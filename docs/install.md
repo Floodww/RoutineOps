@@ -578,7 +578,7 @@ docker compose -f docker-compose.prod.yml logs server | grep "send invite"
 `git pull --ff-only` → пересборка контейнеров (сервис `migrate` накатит новые
 миграции до старта сервера) → пересборка, подпись и публикация агентов новой
 версии. Парк подтянет агентов self-update'ом (проверка раз в 6 часов,
-`MDM_UPDATE_INTERVAL`). Детали и откат — [self-hosted-deploy.md](self-hosted-deploy.md).
+`ROUTINEOPS_UPDATE_INTERVAL`). Детали и откат — [self-hosted-deploy.md](self-hosted-deploy.md).
 
 Чек-лист вокруг обновления:
 

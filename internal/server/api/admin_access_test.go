@@ -183,7 +183,7 @@ func TestAdminAccessRequests_Unauthenticated_Returns401(t *testing.T) {
 }
 
 // Выдача в минутах — легальный сценарий; ниже минуты и выше 30 суток — нет.
-// Нижняя граница не случайна: агент опрашивает статус раз в 30с (MDM_ADMIN_POLL),
+// Нижняя граница не случайна: агент опрашивает статус раз в 30с (ROUTINEOPS_ADMIN_POLL),
 // и грант короче минуты истёк бы раньше, чем доехал до устройства.
 func TestRespondAdminRequest_DurationBounds(t *testing.T) {
 	db := newTestDB(t)

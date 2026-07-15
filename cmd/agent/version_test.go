@@ -59,7 +59,7 @@ func TestPrintVersionSelfUpdateFlag(t *testing.T) {
 }
 
 // Регрессия SEC-2 (аудит 2026-07-01): вшитый в релизную сборку ключ должен
-// быть авторитетным и НЕ обходиться через -update-pubkey/MDM_UPDATE_PUBKEY —
+// быть авторитетным и НЕ обходиться через -update-pubkey/ROUTINEOPS_UPDATE_PUBKEY —
 // иначе локальный админ/поддельный env могли бы подсунуть свой ключ и принять
 // произвольный "подписанный" бинарь как обновление.
 func TestResolveUpdatePubKeyB64(t *testing.T) {

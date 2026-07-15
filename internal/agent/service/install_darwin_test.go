@@ -12,7 +12,7 @@ import (
 )
 
 // TestInstallWritesPlist проверяет генерацию LaunchDaemon-plist установщиком без
-// root: путь подменяется через MDM_LAUNCHD_PLIST, активация launchctl под
+// root: путь подменяется через ROUTINEOPS_LAUNCHD_PLIST, активация launchctl под
 // не-root пропускается (см. install_darwin.go). Это гейт на корректность
 // служебной обвязки, от которой зависит боевой e2e (enroll→heartbeat→selfupdate
 // под launchd). Сам системный демон в /Library/LaunchDaemons тест НЕ трогает.
@@ -21,10 +21,10 @@ func TestInstallWritesPlist(t *testing.T) {
 		t.Skip("тест рассчитан на не-root: под root Install активирует системный домен")
 	}
 	plist := filepath.Join(t.TempDir(), "RoutineOps-agent.test.plist")
-	t.Setenv("MDM_LAUNCHD_PLIST", plist)
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", filepath.Join(t.TempDir(), "RoutineOps-agent.tray.test.plist"))
+	t.Setenv("ROUTINEOPS_LAUNCHD_PLIST", plist)
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", filepath.Join(t.TempDir(), "RoutineOps-agent.tray.test.plist"))
 
-	args := []string{"-server", "mdm.example:50051", "-cert-source", "keystore", "-keystore-label", "dev-device"}
+	args := []string{"-server", "routineops.example:50051", "-cert-source", "keystore", "-keystore-label", "dev-device"}
 	const exe = "/usr/local/bin/RoutineOps-agent"
 	const workDir = "/var/lib/RoutineOps-agent"
 	if err := Install(Config{Args: args, Exe: exe, WorkingDir: workDir}); err != nil {
@@ -80,8 +80,8 @@ func TestInstallWritesPlist_CustomExe(t *testing.T) {
 		t.Skip("тест рассчитан на не-root")
 	}
 	plist := filepath.Join(t.TempDir(), "RoutineOps-agent.test.plist")
-	t.Setenv("MDM_LAUNCHD_PLIST", plist)
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", filepath.Join(t.TempDir(), "RoutineOps-agent.tray.test.plist"))
+	t.Setenv("ROUTINEOPS_LAUNCHD_PLIST", plist)
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", filepath.Join(t.TempDir(), "RoutineOps-agent.tray.test.plist"))
 
 	customExe := "/usr/local/bin/RoutineOps-agent"
 	if err := Install(Config{Exe: customExe, Args: []string{"-server", "host:50051"}}); err != nil {
@@ -103,10 +103,10 @@ func TestInstallWritesTrayPlist_PropagatesArgs(t *testing.T) {
 	}
 	plist := filepath.Join(t.TempDir(), "RoutineOps-agent.test.plist")
 	trayPlist := filepath.Join(t.TempDir(), "RoutineOps-agent.tray.test.plist")
-	t.Setenv("MDM_LAUNCHD_PLIST", plist)
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", trayPlist)
+	t.Setenv("ROUTINEOPS_LAUNCHD_PLIST", plist)
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", trayPlist)
 
-	args := []string{"-server", "mdm.example:50051", "-lock-state", "/var/lib/RoutineOps-agent/lock.json"}
+	args := []string{"-server", "routineops.example:50051", "-lock-state", "/var/lib/RoutineOps-agent/lock.json"}
 	if err := Install(Config{Args: args, Exe: "/usr/local/bin/RoutineOps-agent"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -134,14 +134,14 @@ func TestInstall_DaemonSurvivesTrayFailure(t *testing.T) {
 		t.Skip("тест рассчитан на не-root: под root installDaemon трогает системный домен")
 	}
 	daemonPlist := filepath.Join(t.TempDir(), "RoutineOps-agent.plist")
-	t.Setenv("MDM_LAUNCHD_PLIST", daemonPlist)
+	t.Setenv("ROUTINEOPS_LAUNCHD_PLIST", daemonPlist)
 	// Путь трея ВНУТРЬ обычного файла → MkdirAll(filepath.Dir) даст ENOTDIR:
 	// детерминированный сбой трея без root.
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", filepath.Join(blocker, "tray.plist"))
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", filepath.Join(blocker, "tray.plist"))
 
 	err := Install(Config{Exe: "/usr/local/bin/RoutineOps-agent", Args: []string{"-server", "h:50051"}})
 	if err == nil {
@@ -169,8 +169,8 @@ func TestUninstall_RemovesTrayPlist(t *testing.T) {
 	}
 	daemonPlist := filepath.Join(t.TempDir(), "RoutineOps-agent.plist")
 	trayPlist := filepath.Join(t.TempDir(), "RoutineOps-agent.tray.plist")
-	t.Setenv("MDM_LAUNCHD_PLIST", daemonPlist)
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", trayPlist)
+	t.Setenv("ROUTINEOPS_LAUNCHD_PLIST", daemonPlist)
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", trayPlist)
 
 	if err := Install(Config{Exe: "/usr/local/bin/RoutineOps-agent", Args: []string{"-server", "h:50051"}}); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -200,7 +200,7 @@ func TestInstallTrayAgentOverProtectedPlist(t *testing.T) {
 		t.Fatalf("chflags schg: %v (%s)", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("chflags", "noschg", p).Run() })
-	t.Setenv("MDM_LAUNCH_AGENT_PLIST", p)
+	t.Setenv("ROUTINEOPS_LAUNCH_AGENT_PLIST", p)
 	if err := InstallTrayAgent(Config{Exe: "/usr/local/bin/RoutineOps-agent"}); err != nil {
 		t.Fatalf("InstallTrayAgent поверх schg-plist: %v", err)
 	}

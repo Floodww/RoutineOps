@@ -37,21 +37,21 @@
 
 | Флаг | Env | Назначение |
 |---|---|---|
-| `-server host:port` | `MDM_SERVER_ADDR` | Адрес gRPC-сервера |
-| `-server-name` | `MDM_SERVER_NAME` | Ожидаемое имя в серверном сертификате |
-| `-cert` / `-key` / `-ca` | `MDM_AGENT_CERT` / `MDM_AGENT_KEY` / `MDM_CA_CERT` | Файловый mTLS-материал |
-| `-cert-source file\|keystore` | `MDM_CERT_SOURCE` | Источник идентичности (`keystore` = защищённое хранилище ОС) |
-| `-keystore-label` | `MDM_KEYSTORE_LABEL` | Метка идентичности в keystore (обычно `device_id` = CN) |
-| `-enroll-url` | `MDM_ENROLL_URL` | Эндпоинт энроллмента (`https://host/api/v1/enroll`) |
-| `-token` | `MDM_ENROLL_TOKEN` | Одноразовый enrollment-токен |
-| `-ca-url` | `MDM_CA_URL` | Откуда скачать CA-бандл, если `-ca` нет на диске |
-| `-ca-sha256 HEX` | `MDM_CA_SHA256` | Пин sha256 CA-бандла. **Обязателен вместе с `-ca-url`** — скачивание CA без пина отклоняется (защита от MITM) |
-| `-install-service` | `MDM_ENROLL_INSTALL` | После `enroll` сразу зарегистрировать службу |
+| `-server host:port` | `ROUTINEOPS_SERVER_ADDR` | Адрес gRPC-сервера |
+| `-server-name` | `ROUTINEOPS_SERVER_NAME` | Ожидаемое имя в серверном сертификате |
+| `-cert` / `-key` / `-ca` | `ROUTINEOPS_AGENT_CERT` / `ROUTINEOPS_AGENT_KEY` / `ROUTINEOPS_CA_CERT` | Файловый mTLS-материал |
+| `-cert-source file\|keystore` | `ROUTINEOPS_CERT_SOURCE` | Источник идентичности (`keystore` = защищённое хранилище ОС) |
+| `-keystore-label` | `ROUTINEOPS_KEYSTORE_LABEL` | Метка идентичности в keystore (обычно `device_id` = CN) |
+| `-enroll-url` | `ROUTINEOPS_ENROLL_URL` | Эндпоинт энроллмента (`https://host/api/v1/enroll`) |
+| `-token` | `ROUTINEOPS_ENROLL_TOKEN` | Одноразовый enrollment-токен |
+| `-ca-url` | `ROUTINEOPS_CA_URL` | Откуда скачать CA-бандл, если `-ca` нет на диске |
+| `-ca-sha256 HEX` | `ROUTINEOPS_CA_SHA256` | Пин sha256 CA-бандла. **Обязателен вместе с `-ca-url`** — скачивание CA без пина отклоняется (защита от MITM) |
+| `-install-service` | `ROUTINEOPS_ENROLL_INSTALL` | После `enroll` сразу зарегистрировать службу |
 | `-probe` | — | `diag`: дополнительно проверить mTLS-соединение |
-| `-outbox-max` | `MDM_OUTBOX_MAX` | Потолок числа записей в очереди отчётов (0 = без лимита) |
-| `-outbox-max-age` | `MDM_OUTBOX_MAX_AGE` | Потолок возраста записи (0 = без лимита по возрасту) |
-| `-update-url` | `MDM_UPDATE_URL` | URL манифеста самообновления (`.../api/v1/agent/version`); при `enroll -install-service` прописывается в службу автоматически |
-| `-update-interval` | `MDM_UPDATE_INTERVAL` | Период проверки обновлений (по умолчанию 6ч) |
+| `-outbox-max` | `ROUTINEOPS_OUTBOX_MAX` | Потолок числа записей в очереди отчётов (0 = без лимита) |
+| `-outbox-max-age` | `ROUTINEOPS_OUTBOX_MAX_AGE` | Потолок возраста записи (0 = без лимита по возрасту) |
+| `-update-url` | `ROUTINEOPS_UPDATE_URL` | URL манифеста самообновления (`.../api/v1/agent/version`); при `enroll -install-service` прописывается в службу автоматически |
+| `-update-interval` | `ROUTINEOPS_UPDATE_INTERVAL` | Период проверки обновлений (по умолчанию 6ч) |
 
 Публичный ключ проверки подписи обновлений агент получает при enroll (поле
 `release_pubkey`, приходит по доверенному каналу с пином CA) — сборки по умолчанию

@@ -19,20 +19,20 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentService_Connect_FullMethodName             = "/mdm.AgentService/Connect"
-	AgentService_AckTaskReceived_FullMethodName     = "/mdm.AgentService/AckTaskReceived"
-	AgentService_ReportInventory_FullMethodName     = "/mdm.AgentService/ReportInventory"
-	AgentService_ReportTaskResult_FullMethodName    = "/mdm.AgentService/ReportTaskResult"
-	AgentService_ReportSecurityEvent_FullMethodName = "/mdm.AgentService/ReportSecurityEvent"
-	AgentService_FetchPolicy_FullMethodName         = "/mdm.AgentService/FetchPolicy"
-	AgentService_RequestAdminAccess_FullMethodName  = "/mdm.AgentService/RequestAdminAccess"
-	AgentService_FetchAdminStatus_FullMethodName    = "/mdm.AgentService/FetchAdminStatus"
-	AgentService_ReportAdminAccess_FullMethodName   = "/mdm.AgentService/ReportAdminAccess"
-	AgentService_FetchScriptPolicies_FullMethodName = "/mdm.AgentService/FetchScriptPolicies"
-	AgentService_ReportScriptResult_FullMethodName  = "/mdm.AgentService/ReportScriptResult"
-	AgentService_ReportLockStatus_FullMethodName    = "/mdm.AgentService/ReportLockStatus"
-	AgentService_FetchLockStatus_FullMethodName     = "/mdm.AgentService/FetchLockStatus"
-	AgentService_EscrowRecoveryKey_FullMethodName   = "/mdm.AgentService/EscrowRecoveryKey"
+	AgentService_Connect_FullMethodName             = "/routineops.AgentService/Connect"
+	AgentService_AckTaskReceived_FullMethodName     = "/routineops.AgentService/AckTaskReceived"
+	AgentService_ReportInventory_FullMethodName     = "/routineops.AgentService/ReportInventory"
+	AgentService_ReportTaskResult_FullMethodName    = "/routineops.AgentService/ReportTaskResult"
+	AgentService_ReportSecurityEvent_FullMethodName = "/routineops.AgentService/ReportSecurityEvent"
+	AgentService_FetchPolicy_FullMethodName         = "/routineops.AgentService/FetchPolicy"
+	AgentService_RequestAdminAccess_FullMethodName  = "/routineops.AgentService/RequestAdminAccess"
+	AgentService_FetchAdminStatus_FullMethodName    = "/routineops.AgentService/FetchAdminStatus"
+	AgentService_ReportAdminAccess_FullMethodName   = "/routineops.AgentService/ReportAdminAccess"
+	AgentService_FetchScriptPolicies_FullMethodName = "/routineops.AgentService/FetchScriptPolicies"
+	AgentService_ReportScriptResult_FullMethodName  = "/routineops.AgentService/ReportScriptResult"
+	AgentService_ReportLockStatus_FullMethodName    = "/routineops.AgentService/ReportLockStatus"
+	AgentService_FetchLockStatus_FullMethodName     = "/routineops.AgentService/FetchLockStatus"
+	AgentService_EscrowRecoveryKey_FullMethodName   = "/routineops.AgentService/EscrowRecoveryKey"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -572,7 +572,7 @@ func _AgentService_EscrowRecoveryKey_Handler(srv interface{}, ctx context.Contex
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var AgentService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "mdm.AgentService",
+	ServiceName: "routineops.AgentService",
 	HandlerType: (*AgentServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

@@ -612,7 +612,7 @@ type respondAdminRequestReq struct {
 }
 
 // Границы срока выдачи админ-прав. Нижняя = минута: агент опрашивает статус раз в 30с
-// (MDM_ADMIN_POLL), так что выдача короче минуты истекла бы раньше, чем доехала.
+// (ROUTINEOPS_ADMIN_POLL), так что выдача короче минуты истекла бы раньше, чем доехала.
 // Верхняя = 30 суток: временные права, а не постоянные.
 const (
 	minAdminGrantSeconds = 60
@@ -870,8 +870,10 @@ func (h *Handler) getEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no active enrollment token", http.StatusNotFound)
 		return
 	}
+	// N6: plaintext-токен хранится хешированным и здесь недоступен. Отдаём только
+	// факт наличия активного токена и срок. Сам токен выдаётся один раз при
+	// create/reenroll; потерян → перевыпустить (reenrollDevice).
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":      tok.Token,
 		"expires_at": tok.ExpiresAt,
 	})
 }

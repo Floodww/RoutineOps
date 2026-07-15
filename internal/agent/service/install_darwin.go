@@ -13,10 +13,10 @@ import (
 	"github.com/Floodww/RoutineOps/internal/agent/tamper"
 )
 
-// plistPath — путь к LaunchDaemon. Переопределяется через MDM_LAUNCHD_PLIST
+// plistPath — путь к LaunchDaemon. Переопределяется через ROUTINEOPS_LAUNCHD_PLIST
 // (удобно для теста/нестандартной установки).
 func plistPath() string {
-	if p := os.Getenv("MDM_LAUNCHD_PLIST"); p != "" {
+	if p := os.Getenv("ROUTINEOPS_LAUNCHD_PLIST"); p != "" {
 		return p
 	}
 	return "/Library/LaunchDaemons/" + Name + ".plist"

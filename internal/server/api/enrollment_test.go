@@ -72,8 +72,13 @@ func TestGetEnrollmentToken_Returns200(t *testing.T) {
 	}
 	var tokResp map[string]any
 	json.NewDecoder(w2.Body).Decode(&tokResp)
-	if tokResp["token"] == "" {
-		t.Error("expected token in response")
+	// N6: эндпоинт re-display больше не отдаёт plaintext-токен (хранится хешированным),
+	// только срок активного токена.
+	if tokResp["expires_at"] == nil || tokResp["expires_at"] == "" {
+		t.Error("expected expires_at in response")
+	}
+	if _, leaked := tokResp["token"]; leaked {
+		t.Error("plaintext token must NOT be returned by re-display endpoint (N6)")
 	}
 }
 

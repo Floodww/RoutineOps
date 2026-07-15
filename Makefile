@@ -32,7 +32,7 @@ RELEASE_KEY    ?= $(HOME)/release_ed25519.pem
 # собирает (символов main.escrowRecipient/_Fpr нет; escrow не шлётся, age не в графе).
 # Enterprise-сборка агента:
 #   make build-mac AGENT_TAGS=enterprise ESCROW_RECIPIENT=age1... ESCROW_RECIPIENT_FPR=<fpr>
-# ESCROW_RECIPIENT_FPR получить enterprise-бинарём сервера: `mdm-server -escrow-fpr age1...`.
+# ESCROW_RECIPIENT_FPR получить enterprise-бинарём сервера: `routineops-server -escrow-fpr age1...`.
 AGENT_TAGS           ?=
 ESCROW_RECIPIENT     ?=
 ESCROW_RECIPIENT_FPR ?=
@@ -96,9 +96,9 @@ run-mock: ## Запустить mock-сервер (нужны certs/server.* + c
 
 run-agent: ## Запустить агент. Требует DEVICE_ID=<uuid> (тот же, что в certs)
 	@test -n "$(DEVICE_ID)" || { echo "укажи DEVICE_ID=<uuid>"; exit 1; }
-	MDM_AGENT_CERT=certs/agents/$(DEVICE_ID)/agent.crt \
-	MDM_AGENT_KEY=certs/agents/$(DEVICE_ID)/agent.key \
-	MDM_CA_CERT=certs/agents/$(DEVICE_ID)/ca.crt \
+	ROUTINEOPS_AGENT_CERT=certs/agents/$(DEVICE_ID)/agent.crt \
+	ROUTINEOPS_AGENT_KEY=certs/agents/$(DEVICE_ID)/agent.key \
+	ROUTINEOPS_CA_CERT=certs/agents/$(DEVICE_ID)/ca.crt \
 	go run ./cmd/agent
 
 test: ## Прогнать тесты

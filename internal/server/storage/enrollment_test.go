@@ -108,13 +108,20 @@ func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 		t.Fatalf("ResetDeviceForReenroll: %v", err)
 	}
 
-	// old token should be invalidated
+	// old token should be invalidated (marked used)
+	oldRec, _ := db.GetEnrollmentToken(context.Background(), oldTok)
+	if oldRec == nil || oldRec.UsedAt == nil {
+		t.Error("old token should be marked used after reenroll")
+	}
+
+	// new token must be the active one and resolvable by its plaintext (hash match, N6)
 	active, _ := db.GetActiveEnrollmentToken(context.Background(), d.ID)
 	if active == nil {
 		t.Fatal("expected new active token")
 	}
-	if active.Token != newTok {
-		t.Errorf("active token = %q, want %q", active.Token, newTok)
+	newRec, _ := db.GetEnrollmentToken(context.Background(), newTok)
+	if newRec == nil || newRec.ID != active.ID {
+		t.Errorf("new token not resolvable by plaintext or does not match active row")
 	}
 
 	// device status should be pending again

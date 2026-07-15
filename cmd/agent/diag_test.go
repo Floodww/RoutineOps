@@ -59,7 +59,7 @@ func diagConfig(t *testing.T, caPEM []byte) *config.Config {
 		t.Fatal(err)
 	}
 	return &config.Config{
-		ServerAddr:        "mdm.example:55443",
+		ServerAddr:        "routineops.example:55443",
 		ServerName:        "routineops-server",
 		CertSource:        "file",
 		CAFile:            caFile,
@@ -234,7 +234,7 @@ func TestRunDiag_SelfUpdateDead_Exit1(t *testing.T) {
 
 	cert, caPEM := genTLSCert(t, "device-ok", time.Now().Add(-time.Hour), time.Now().Add(60*24*time.Hour))
 	cfg := diagConfig(t, caPEM)
-	cfg.UpdateCheckURL = "https://mdm.example/api/v1/agent/version"
+	cfg.UpdateCheckURL = "https://routineops.example/api/v1/agent/version"
 
 	var buf bytes.Buffer
 	if code := runDiag(&buf, cfg, fakeProvider{cert: cert}, time.Now(), nil); code != 1 {

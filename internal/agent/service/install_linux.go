@@ -15,10 +15,10 @@ import (
 // общего Name, чтобы имя службы не разъезжалось между платформами.
 const unitName = Name + ".service"
 
-// unitPath — путь к unit-файлу. Переопределяется через MDM_SYSTEMD_UNIT
+// unitPath — путь к unit-файлу. Переопределяется через ROUTINEOPS_SYSTEMD_UNIT
 // (удобно для теста/нестандартной установки).
 func unitPath() string {
-	if p := os.Getenv("MDM_SYSTEMD_UNIT"); p != "" {
+	if p := os.Getenv("ROUTINEOPS_SYSTEMD_UNIT"); p != "" {
 		return p
 	}
 	return "/etc/systemd/system/" + unitName

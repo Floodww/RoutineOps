@@ -123,81 +123,81 @@ type Config struct {
 func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
 
-	fs.StringVar(&c.ServerAddr, "server", env("MDM_SERVER_ADDR", "localhost:55443"),
-		"адрес gRPC-сервера host:port (env MDM_SERVER_ADDR)")
-	fs.StringVar(&c.ServerName, "server-name", env("MDM_SERVER_NAME", "routineops-server"),
-		"ожидаемое имя в серверном сертификате (env MDM_SERVER_NAME)")
-	fs.StringVar(&c.CertFile, "cert", env("MDM_AGENT_CERT", "certs/agent.crt"),
-		"путь к клиентскому сертификату агента (env MDM_AGENT_CERT)")
-	fs.StringVar(&c.KeyFile, "key", env("MDM_AGENT_KEY", "certs/agent.key"),
-		"путь к приватному ключу агента (env MDM_AGENT_KEY)")
-	fs.StringVar(&c.CAFile, "ca", env("MDM_CA_CERT", "certs/ca.crt"),
-		"путь к корневому CA (env MDM_CA_CERT)")
-	fs.DurationVar(&c.HeartbeatInterval, "heartbeat", envDuration("MDM_HEARTBEAT_INTERVAL", 30*time.Second),
-		"период отправки heartbeat (env MDM_HEARTBEAT_INTERVAL)")
-	fs.DurationVar(&c.InventoryInterval, "inventory", envDuration("MDM_INVENTORY_INTERVAL", 5*time.Minute),
-		"период полной инвентаризации ReportInventory (env MDM_INVENTORY_INTERVAL)")
-	fs.DurationVar(&c.SecurityScanInterval, "security-scan", envDuration("MDM_SECURITY_SCAN", 30*time.Second),
-		"период проверки процессов Security Monitor (env MDM_SECURITY_SCAN)")
-	fs.StringVar(&c.ForbiddenListFile, "forbidden-list", env("MDM_FORBIDDEN_LIST", "forbidden_software.txt"),
-		"локальный кэш политики ПО (FetchPolicy), читается Security Monitor (env MDM_FORBIDDEN_LIST)")
-	fs.DurationVar(&c.PolicySyncInterval, "policy-sync", envDuration("MDM_POLICY_SYNC", 5*time.Minute),
-		"период синхронизации политики ПО через FetchPolicy (env MDM_POLICY_SYNC)")
-	fs.StringVar(&c.TaskStateFile, "task-state", env("MDM_TASK_STATE", "agent_tasks.seen"),
-		"файл идемпотентности выполненных задач (env MDM_TASK_STATE)")
-	fs.StringVar(&c.LockStateFile, "lock-state", env("MDM_LOCK_STATE", ""),
-		"файл состояния блокировки (пусто = машинный каталог: ProgramData\\RoutineOps\\lock.json), env MDM_LOCK_STATE")
-	fs.DurationVar(&c.LockPollInterval, "lock-poll", envDuration("MDM_LOCK_POLL", 30*time.Second),
-		"период реконсиляции блокировки с сервером, FetchLockStatus (env MDM_LOCK_POLL)")
-	fs.DurationVar(&c.BlockedRetry, "blocked-retry", envDuration("MDM_BLOCKED_RETRY", 5*time.Minute),
-		"пауза реконнекта при блокировке устройства, PermissionDenied (env MDM_BLOCKED_RETRY)")
-	fs.DurationVar(&c.AdminPollInterval, "admin-poll", envDuration("MDM_ADMIN_POLL", 30*time.Second),
-		"период поллинга статуса прав администратора (env MDM_ADMIN_POLL)")
+	fs.StringVar(&c.ServerAddr, "server", env("ROUTINEOPS_SERVER_ADDR", "localhost:55443"),
+		"адрес gRPC-сервера host:port (env ROUTINEOPS_SERVER_ADDR)")
+	fs.StringVar(&c.ServerName, "server-name", env("ROUTINEOPS_SERVER_NAME", "routineops-server"),
+		"ожидаемое имя в серверном сертификате (env ROUTINEOPS_SERVER_NAME)")
+	fs.StringVar(&c.CertFile, "cert", env("ROUTINEOPS_AGENT_CERT", "certs/agent.crt"),
+		"путь к клиентскому сертификату агента (env ROUTINEOPS_AGENT_CERT)")
+	fs.StringVar(&c.KeyFile, "key", env("ROUTINEOPS_AGENT_KEY", "certs/agent.key"),
+		"путь к приватному ключу агента (env ROUTINEOPS_AGENT_KEY)")
+	fs.StringVar(&c.CAFile, "ca", env("ROUTINEOPS_CA_CERT", "certs/ca.crt"),
+		"путь к корневому CA (env ROUTINEOPS_CA_CERT)")
+	fs.DurationVar(&c.HeartbeatInterval, "heartbeat", envDuration("ROUTINEOPS_HEARTBEAT_INTERVAL", 30*time.Second),
+		"период отправки heartbeat (env ROUTINEOPS_HEARTBEAT_INTERVAL)")
+	fs.DurationVar(&c.InventoryInterval, "inventory", envDuration("ROUTINEOPS_INVENTORY_INTERVAL", 5*time.Minute),
+		"период полной инвентаризации ReportInventory (env ROUTINEOPS_INVENTORY_INTERVAL)")
+	fs.DurationVar(&c.SecurityScanInterval, "security-scan", envDuration("ROUTINEOPS_SECURITY_SCAN", 30*time.Second),
+		"период проверки процессов Security Monitor (env ROUTINEOPS_SECURITY_SCAN)")
+	fs.StringVar(&c.ForbiddenListFile, "forbidden-list", env("ROUTINEOPS_FORBIDDEN_LIST", "forbidden_software.txt"),
+		"локальный кэш политики ПО (FetchPolicy), читается Security Monitor (env ROUTINEOPS_FORBIDDEN_LIST)")
+	fs.DurationVar(&c.PolicySyncInterval, "policy-sync", envDuration("ROUTINEOPS_POLICY_SYNC", 5*time.Minute),
+		"период синхронизации политики ПО через FetchPolicy (env ROUTINEOPS_POLICY_SYNC)")
+	fs.StringVar(&c.TaskStateFile, "task-state", env("ROUTINEOPS_TASK_STATE", "agent_tasks.seen"),
+		"файл идемпотентности выполненных задач (env ROUTINEOPS_TASK_STATE)")
+	fs.StringVar(&c.LockStateFile, "lock-state", env("ROUTINEOPS_LOCK_STATE", ""),
+		"файл состояния блокировки (пусто = машинный каталог: ProgramData\\RoutineOps\\lock.json), env ROUTINEOPS_LOCK_STATE")
+	fs.DurationVar(&c.LockPollInterval, "lock-poll", envDuration("ROUTINEOPS_LOCK_POLL", 30*time.Second),
+		"период реконсиляции блокировки с сервером, FetchLockStatus (env ROUTINEOPS_LOCK_POLL)")
+	fs.DurationVar(&c.BlockedRetry, "blocked-retry", envDuration("ROUTINEOPS_BLOCKED_RETRY", 5*time.Minute),
+		"пауза реконнекта при блокировке устройства, PermissionDenied (env ROUTINEOPS_BLOCKED_RETRY)")
+	fs.DurationVar(&c.AdminPollInterval, "admin-poll", envDuration("ROUTINEOPS_ADMIN_POLL", 30*time.Second),
+		"период поллинга статуса прав администратора (env ROUTINEOPS_ADMIN_POLL)")
 	fs.StringVar(&c.Reason, "reason", "", "обоснование для подкоманды request-admin")
-	fs.BoolVar(&c.AdminDryRun, "admin-dry-run", envBool("MDM_ADMIN_DRYRUN"),
-		"не применять админ-права к системе, только логировать (env MDM_ADMIN_DRYRUN)")
-	fs.StringVar(&c.OutboxDir, "outbox-dir", env("MDM_OUTBOX_DIR", "agent_outbox"),
-		"каталог устойчивой очереди отчётов (env MDM_OUTBOX_DIR)")
-	fs.IntVar(&c.OutboxMax, "outbox-max", envInt("MDM_OUTBOX_MAX", 1000),
-		"максимум записей в очереди отчётов, 0=без лимита (env MDM_OUTBOX_MAX)")
-	fs.DurationVar(&c.OutboxMaxAge, "outbox-max-age", envDuration("MDM_OUTBOX_MAX_AGE", 0),
-		"потолок возраста записи в очереди, 0=без лимита по возрасту (env MDM_OUTBOX_MAX_AGE)")
-	fs.DurationVar(&c.OutboxFlush, "outbox-flush", envDuration("MDM_OUTBOX_FLUSH", 30*time.Second),
-		"период фоновых попыток до-доставки очереди (env MDM_OUTBOX_FLUSH)")
-	fs.DurationVar(&c.ScriptPollInterval, "script-poll", envDuration("MDM_SCRIPT_POLL", time.Minute),
-		"период синхронизации скрипт-политик FetchScriptPolicies (env MDM_SCRIPT_POLL)")
-	fs.StringVar(&c.ScriptDedupFile, "script-dedup", env("MDM_SCRIPT_DEDUP", "agent_scripts.seen"),
-		"файл дедупа on_connect-запусков скриптов (env MDM_SCRIPT_DEDUP)")
-	fs.DurationVar(&c.EventScanInterval, "event-scan", envDuration("MDM_EVENT_SCAN", 15*time.Second),
-		"период опроса событий ОС login/logout/network_change (env MDM_EVENT_SCAN)")
-	fs.StringVar(&c.UpdateCheckURL, "update-url", env("MDM_UPDATE_URL", ""),
-		"URL manifest самообновления, пусто=выключено (env MDM_UPDATE_URL)")
-	fs.DurationVar(&c.UpdateInterval, "update-interval", envDuration("MDM_UPDATE_INTERVAL", 6*time.Hour),
-		"период проверки обновлений (env MDM_UPDATE_INTERVAL)")
-	fs.StringVar(&c.UpdatePubKey, "update-pubkey", env("MDM_UPDATE_PUBKEY", ""),
-		"base64 ed25519 публичного ключа релиза (env MDM_UPDATE_PUBKEY)")
-	fs.StringVar(&c.UpdateFloorFile, "update-floor", env("MDM_UPDATE_FLOOR", "agent_update_floor.txt"),
-		"файл high-water mark версии самообновления, защита от replay старого релиза (env MDM_UPDATE_FLOOR)")
-	fs.StringVar(&c.EnrollURL, "enroll-url", env("MDM_ENROLL_URL", ""),
-		"URL эндпоинта энроллмента для подкоманды enroll (env MDM_ENROLL_URL)")
-	fs.StringVar(&c.EnrollToken, "token", env("MDM_ENROLL_TOKEN", ""),
-		"одноразовый enrollment-токен для подкоманды enroll (env MDM_ENROLL_TOKEN)")
-	fs.StringVar(&c.CAURL, "ca-url", env("MDM_CA_URL", ""),
-		"URL CA-бандла: скачать, если файла -ca нет на диске, подкоманда enroll (env MDM_CA_URL)")
-	fs.StringVar(&c.CASHA256, "ca-sha256", env("MDM_CA_SHA256", ""),
-		"hex sha256 CA-бандла: пин против MITM при скачивании по -ca-url, подкоманда enroll (env MDM_CA_SHA256)")
-	fs.BoolVar(&c.EnrollInstall, "install-service", envBool("MDM_ENROLL_INSTALL"),
-		"после enroll зарегистрировать системную службу (env MDM_ENROLL_INSTALL)")
-	fs.StringVar(&c.CertSource, "cert-source", env("MDM_CERT_SOURCE", "file"),
-		"источник mTLS-материала: file|keystore (env MDM_CERT_SOURCE)")
-	fs.StringVar(&c.KeystoreLabel, "keystore-label", env("MDM_KEYSTORE_LABEL", ""),
-		"метка идентичности в хранилище ОС для cert-source=keystore, обычно device_id (env MDM_KEYSTORE_LABEL)")
+	fs.BoolVar(&c.AdminDryRun, "admin-dry-run", envBool("ROUTINEOPS_ADMIN_DRYRUN"),
+		"не применять админ-права к системе, только логировать (env ROUTINEOPS_ADMIN_DRYRUN)")
+	fs.StringVar(&c.OutboxDir, "outbox-dir", env("ROUTINEOPS_OUTBOX_DIR", "agent_outbox"),
+		"каталог устойчивой очереди отчётов (env ROUTINEOPS_OUTBOX_DIR)")
+	fs.IntVar(&c.OutboxMax, "outbox-max", envInt("ROUTINEOPS_OUTBOX_MAX", 1000),
+		"максимум записей в очереди отчётов, 0=без лимита (env ROUTINEOPS_OUTBOX_MAX)")
+	fs.DurationVar(&c.OutboxMaxAge, "outbox-max-age", envDuration("ROUTINEOPS_OUTBOX_MAX_AGE", 0),
+		"потолок возраста записи в очереди, 0=без лимита по возрасту (env ROUTINEOPS_OUTBOX_MAX_AGE)")
+	fs.DurationVar(&c.OutboxFlush, "outbox-flush", envDuration("ROUTINEOPS_OUTBOX_FLUSH", 30*time.Second),
+		"период фоновых попыток до-доставки очереди (env ROUTINEOPS_OUTBOX_FLUSH)")
+	fs.DurationVar(&c.ScriptPollInterval, "script-poll", envDuration("ROUTINEOPS_SCRIPT_POLL", time.Minute),
+		"период синхронизации скрипт-политик FetchScriptPolicies (env ROUTINEOPS_SCRIPT_POLL)")
+	fs.StringVar(&c.ScriptDedupFile, "script-dedup", env("ROUTINEOPS_SCRIPT_DEDUP", "agent_scripts.seen"),
+		"файл дедупа on_connect-запусков скриптов (env ROUTINEOPS_SCRIPT_DEDUP)")
+	fs.DurationVar(&c.EventScanInterval, "event-scan", envDuration("ROUTINEOPS_EVENT_SCAN", 15*time.Second),
+		"период опроса событий ОС login/logout/network_change (env ROUTINEOPS_EVENT_SCAN)")
+	fs.StringVar(&c.UpdateCheckURL, "update-url", env("ROUTINEOPS_UPDATE_URL", ""),
+		"URL manifest самообновления, пусто=выключено (env ROUTINEOPS_UPDATE_URL)")
+	fs.DurationVar(&c.UpdateInterval, "update-interval", envDuration("ROUTINEOPS_UPDATE_INTERVAL", 6*time.Hour),
+		"период проверки обновлений (env ROUTINEOPS_UPDATE_INTERVAL)")
+	fs.StringVar(&c.UpdatePubKey, "update-pubkey", env("ROUTINEOPS_UPDATE_PUBKEY", ""),
+		"base64 ed25519 публичного ключа релиза (env ROUTINEOPS_UPDATE_PUBKEY)")
+	fs.StringVar(&c.UpdateFloorFile, "update-floor", env("ROUTINEOPS_UPDATE_FLOOR", "agent_update_floor.txt"),
+		"файл high-water mark версии самообновления, защита от replay старого релиза (env ROUTINEOPS_UPDATE_FLOOR)")
+	fs.StringVar(&c.EnrollURL, "enroll-url", env("ROUTINEOPS_ENROLL_URL", ""),
+		"URL эндпоинта энроллмента для подкоманды enroll (env ROUTINEOPS_ENROLL_URL)")
+	fs.StringVar(&c.EnrollToken, "token", env("ROUTINEOPS_ENROLL_TOKEN", ""),
+		"одноразовый enrollment-токен для подкоманды enroll (env ROUTINEOPS_ENROLL_TOKEN)")
+	fs.StringVar(&c.CAURL, "ca-url", env("ROUTINEOPS_CA_URL", ""),
+		"URL CA-бандла: скачать, если файла -ca нет на диске, подкоманда enroll (env ROUTINEOPS_CA_URL)")
+	fs.StringVar(&c.CASHA256, "ca-sha256", env("ROUTINEOPS_CA_SHA256", ""),
+		"hex sha256 CA-бандла: пин против MITM при скачивании по -ca-url, подкоманда enroll (env ROUTINEOPS_CA_SHA256)")
+	fs.BoolVar(&c.EnrollInstall, "install-service", envBool("ROUTINEOPS_ENROLL_INSTALL"),
+		"после enroll зарегистрировать системную службу (env ROUTINEOPS_ENROLL_INSTALL)")
+	fs.StringVar(&c.CertSource, "cert-source", env("ROUTINEOPS_CERT_SOURCE", "file"),
+		"источник mTLS-материала: file|keystore (env ROUTINEOPS_CERT_SOURCE)")
+	fs.StringVar(&c.KeystoreLabel, "keystore-label", env("ROUTINEOPS_KEYSTORE_LABEL", ""),
+		"метка идентичности в хранилище ОС для cert-source=keystore, обычно device_id (env ROUTINEOPS_KEYSTORE_LABEL)")
 	fs.BoolVar(&c.Probe, "probe", false,
 		"diag: дополнительно проверить mTLS-соединение с сервером")
-	fs.StringVar(&c.FilevaultEscrowDir, "filevault-escrow-dir", env("MDM_FILEVAULT_ESCROW_DIR", "filevault_escrow"),
-		"каталог write-ahead escrow-записей FileVault (enterprise; env MDM_FILEVAULT_ESCROW_DIR)")
-	fs.BoolVar(&c.FilevaultDryRun, "filevault-dry-run", envBool("MDM_FILEVAULT_DRYRUN"),
-		"не выполнять привилегированные FileVault-операции, только логировать (env MDM_FILEVAULT_DRYRUN)")
+	fs.StringVar(&c.FilevaultEscrowDir, "filevault-escrow-dir", env("ROUTINEOPS_FILEVAULT_ESCROW_DIR", "filevault_escrow"),
+		"каталог write-ahead escrow-записей FileVault (enterprise; env ROUTINEOPS_FILEVAULT_ESCROW_DIR)")
+	fs.BoolVar(&c.FilevaultDryRun, "filevault-dry-run", envBool("ROUTINEOPS_FILEVAULT_DRYRUN"),
+		"не выполнять привилегированные FileVault-операции, только логировать (env ROUTINEOPS_FILEVAULT_DRYRUN)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

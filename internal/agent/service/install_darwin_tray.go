@@ -20,7 +20,7 @@ func TrayPlistPath() string {
 }
 
 func agentPlistPath() string {
-	if p := os.Getenv("MDM_LAUNCH_AGENT_PLIST"); p != "" {
+	if p := os.Getenv("ROUTINEOPS_LAUNCH_AGENT_PLIST"); p != "" {
 		return p
 	}
 	return "/Library/LaunchAgents/" + Name + ".tray.plist"
@@ -69,7 +69,7 @@ func InstallTrayAgent(cfg Config) error {
 	}
 
 	path := agentPlistPath()
-	// Каталог обычно есть, но путь переопределяем через MDM_LAUNCH_AGENT_PLIST — создаём.
+	// Каталог обычно есть, но путь переопределяем через ROUTINEOPS_LAUNCH_AGENT_PLIST — создаём.
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("создание каталога agent plist %s: %w", filepath.Dir(path), err)
 	}

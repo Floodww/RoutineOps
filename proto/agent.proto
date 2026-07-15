@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package mdm;
+package routineops;
 
 option go_package = "github.com/Floodww/RoutineOps/proto";
 

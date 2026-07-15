@@ -135,10 +135,10 @@ func TestEnrollServiceArgs_Keystore(t *testing.T) {
 // сервер), нестандартный enroll-URL → "" (self-update не включаем).
 func TestDeriveUpdateURL(t *testing.T) {
 	cases := map[string]string{
-		"http://mdm.example:8081/api/v1/enroll": "http://mdm.example:8081/api/v1/agent/version",
-		"https://host/api/v1/enroll":            "https://host/api/v1/agent/version",
-		"":                                      "",
-		"http://host/custom/path":               "",
+		"http://routineops.example:8081/api/v1/enroll": "http://routineops.example:8081/api/v1/agent/version",
+		"https://host/api/v1/enroll":                   "https://host/api/v1/agent/version",
+		"":                                             "",
+		"http://host/custom/path":                      "",
 	}
 	for in, want := range cases {
 		if got := deriveUpdateURL(in); got != want {
@@ -228,9 +228,9 @@ func TestEnrollServiceArgs_UpdateURL(t *testing.T) {
 		CertFile:  filepath.FromSlash("/opt/mdm/agent.crt"),
 		KeyFile:   filepath.FromSlash("/opt/mdm/agent.key"),
 		CAFile:    filepath.FromSlash("/opt/mdm/ca.crt"),
-		EnrollURL: "http://mdm.example:8081/api/v1/enroll",
+		EnrollURL: "http://routineops.example:8081/api/v1/enroll",
 	}
-	if got := flagPairs(t, enrollServiceArgs(cfg, "dev-123"))["-update-url"]; got != "http://mdm.example:8081/api/v1/agent/version" {
+	if got := flagPairs(t, enrollServiceArgs(cfg, "dev-123"))["-update-url"]; got != "http://routineops.example:8081/api/v1/agent/version" {
 		t.Errorf("-update-url = %q, хотим манифест из enroll-URL", got)
 	}
 
@@ -251,7 +251,7 @@ func TestEnrollServiceArgsParse(t *testing.T) {
 		CertFile:  filepath.FromSlash("/opt/mdm/agent.crt"),
 		KeyFile:   filepath.FromSlash("/opt/mdm/agent.key"),
 		CAFile:    filepath.FromSlash("/opt/mdm/ca.crt"),
-		EnrollURL: "http://mdm.example:8081/api/v1/enroll",
+		EnrollURL: "http://routineops.example:8081/api/v1/enroll",
 	}
 	args := enrollServiceArgs(cfg, "dev-123")
 	if _, err := config.Load(flag.NewFlagSet("agent", flag.ContinueOnError), args); err != nil {
@@ -443,11 +443,11 @@ func TestCopyFile_AliasedPathsNotZeroed(t *testing.T) {
 
 func TestIsLoopbackHost(t *testing.T) {
 	cases := map[string]bool{
-		"localhost:55443":   true,
-		"127.0.0.1:50051":   true,
-		"[::1]:50051":       true,
-		"203.0.113.5:50051": false,
-		"mdm.example:50051": false,
+		"localhost:55443":          true,
+		"127.0.0.1:50051":          true,
+		"[::1]:50051":              true,
+		"203.0.113.5:50051":        false,
+		"routineops.example:50051": false,
 	}
 	for addr, want := range cases {
 		if got := isLoopbackHost(addr); got != want {

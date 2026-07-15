@@ -18,7 +18,7 @@ if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="do
 set -a; . ./.env.prod; set +a
 
 echo "=== MDM Update ==="
-CUR=$($DC -f docker-compose.prod.yml exec -T server ./mdm-server -version 2>/dev/null || echo "неизвестно")
+CUR=$($DC -f docker-compose.prod.yml exec -T server ./routineops-server -version 2>/dev/null || echo "неизвестно")
 echo "Текущая версия сервера: ${CUR}"
 
 # 1. Бэкап БД ОБЯЗАТЕЛЕН перед миграциями (down-миграций нет — откат только из бэкапа).

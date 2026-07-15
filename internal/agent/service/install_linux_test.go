@@ -10,7 +10,7 @@ import (
 )
 
 // TestInstallWritesUnit проверяет генерацию systemd unit-файла без root: путь
-// подменяется через MDM_SYSTEMD_UNIT, активация systemctl под не-root
+// подменяется через ROUTINEOPS_SYSTEMD_UNIT, активация systemctl под не-root
 // пропускается (см. install_linux.go). Гейт на корректность служебной обвязки,
 // от которой зависит боевой запуск агента как службы на Linux (роудмап v2).
 // Системный /etc/systemd/system тест НЕ трогает. Прогоняется в CI на ubuntu.
@@ -19,9 +19,9 @@ func TestInstallWritesUnit(t *testing.T) {
 		t.Skip("тест рассчитан на не-root: под root Install активирует systemctl")
 	}
 	unit := filepath.Join(t.TempDir(), "RoutineOps-agent.service")
-	t.Setenv("MDM_SYSTEMD_UNIT", unit)
+	t.Setenv("ROUTINEOPS_SYSTEMD_UNIT", unit)
 
-	args := []string{"-server", "mdm.example:50051", "-cert-source", "keystore", "-keystore-label", "dev-device"}
+	args := []string{"-server", "routineops.example:50051", "-cert-source", "keystore", "-keystore-label", "dev-device"}
 	if err := Install(Config{Args: args}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestInstallWritesUnit_CustomExe(t *testing.T) {
 		t.Skip("тест рассчитан на не-root")
 	}
 	unit := filepath.Join(t.TempDir(), "RoutineOps-agent.service")
-	t.Setenv("MDM_SYSTEMD_UNIT", unit)
+	t.Setenv("ROUTINEOPS_SYSTEMD_UNIT", unit)
 
 	customExe := "/usr/local/bin/RoutineOps-agent"
 	if err := Install(Config{Exe: customExe, Args: []string{"-server", "host:50051"}}); err != nil {

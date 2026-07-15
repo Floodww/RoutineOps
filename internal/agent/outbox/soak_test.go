@@ -16,12 +16,12 @@ import (
 // утечку памяти/горутин в durable-конвейере (пункт «memory leak 24ч (pprof)»
 // тест-плана).
 //
-// Длительность задаётся MDM_SOAK_DURATION (напр. "24h" для боевого прогона), по
-// умолчанию короткая — чтобы шла в CI. MDM_SOAK_HEAP_OUT=<путь> сбрасывает heap-
+// Длительность задаётся ROUTINEOPS_SOAK_DURATION (напр. "24h" для боевого прогона), по
+// умолчанию короткая — чтобы шла в CI. ROUTINEOPS_SOAK_HEAP_OUT=<путь> сбрасывает heap-
 // профиль для ручного анализа `go tool pprof`.
 func TestNoLeakUnderSustainedLoad(t *testing.T) {
 	dur := 2 * time.Second
-	if v := os.Getenv("MDM_SOAK_DURATION"); v != "" {
+	if v := os.Getenv("ROUTINEOPS_SOAK_DURATION"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			dur = d
 		}
@@ -67,7 +67,7 @@ func TestNoLeakUnderSustainedLoad(t *testing.T) {
 
 	endHeap, endGor := sample()
 
-	if out := os.Getenv("MDM_SOAK_HEAP_OUT"); out != "" {
+	if out := os.Getenv("ROUTINEOPS_SOAK_HEAP_OUT"); out != "" {
 		if f, err := os.Create(out); err == nil {
 			_ = pprof.WriteHeapProfile(f)
 			_ = f.Close()

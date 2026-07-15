@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -11,10 +13,17 @@ import (
 type EnrollmentToken struct {
 	ID        string
 	DeviceID  string
-	Token     string
 	ExpiresAt time.Time
 	UsedAt    *time.Time
 	CreatedAt time.Time
+}
+
+// hashEnrollToken — SHA-256(hex) enrollment-токена для хранения и поиска (N6).
+// Токен высокоэнтропийный (UUID v4 / rand hex), поэтому детерминированный хеш без
+// соли безопасен и позволяет искать по равенству. Plaintext в БД не хранится.
+func hashEnrollToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // ErrEnrollTokenAlreadyUsed — enrollment-токен уже погашен. Guarded UPDATE
@@ -36,18 +45,18 @@ func (db *DB) CreatePendingDevice(ctx context.Context, hostname, os string) (*De
 
 func (db *DB) CreateEnrollmentToken(ctx context.Context, deviceID, token string, expiresAt time.Time) error {
 	_, err := db.pool.Exec(ctx, `
-		INSERT INTO enrollment_tokens (device_id, token, expires_at)
+		INSERT INTO enrollment_tokens (device_id, token_hash, expires_at)
 		VALUES ($1, $2, $3)
-	`, deviceID, token, expiresAt)
+	`, deviceID, hashEnrollToken(token), expiresAt)
 	return err
 }
 
 func (db *DB) GetEnrollmentToken(ctx context.Context, token string) (*EnrollmentToken, error) {
 	var t EnrollmentToken
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, device_id, token, expires_at, used_at, created_at
-		FROM enrollment_tokens WHERE token = $1
-	`, token).Scan(&t.ID, &t.DeviceID, &t.Token, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+		SELECT id, device_id, expires_at, used_at, created_at
+		FROM enrollment_tokens WHERE token_hash = $1
+	`, hashEnrollToken(token)).Scan(&t.ID, &t.DeviceID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -60,11 +69,11 @@ func (db *DB) GetEnrollmentToken(ctx context.Context, token string) (*Enrollment
 func (db *DB) GetActiveEnrollmentToken(ctx context.Context, deviceID string) (*EnrollmentToken, error) {
 	var t EnrollmentToken
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, device_id, token, expires_at, used_at, created_at
+		SELECT id, device_id, expires_at, used_at, created_at
 		FROM enrollment_tokens
 		WHERE device_id = $1 AND used_at IS NULL AND expires_at > now()
 		ORDER BY created_at DESC LIMIT 1
-	`, deviceID).Scan(&t.ID, &t.DeviceID, &t.Token, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	`, deviceID).Scan(&t.ID, &t.DeviceID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -133,8 +142,8 @@ func (db *DB) ResetDeviceForReenroll(ctx context.Context, deviceID, newToken str
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO enrollment_tokens (device_id, token, expires_at) VALUES ($1, $2, $3)
-	`, deviceID, newToken, expiresAt); err != nil {
+		INSERT INTO enrollment_tokens (device_id, token_hash, expires_at) VALUES ($1, $2, $3)
+	`, deviceID, hashEnrollToken(newToken), expiresAt); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -68,7 +68,7 @@ var version = "dev"
 // releasePubKey — base64 ed25519 публичного ключа релиза, ВШИВАЕТСЯ в бинарь при
 // сборке релиза через -ldflags "-X main.releasePubKey=<base64>". Так публичный
 // ключ нельзя подменить через env/флаг в проде (это снизило бы доверие к
-// самообновлению). -update-pubkey/MDM_UPDATE_PUBKEY остаётся для dev-override.
+// самообновлению). -update-pubkey/ROUTINEOPS_UPDATE_PUBKEY остаётся для dev-override.
 var releasePubKey = ""
 
 // FileVault escrow (age-recipient пиннинг + цепочка internal/agent/filevault) — это
@@ -264,7 +264,7 @@ func printUsage(w io.Writer) {
 
 КЛЮЧЕВЫЕ ФЛАГИ (идут ПОСЛЕ команды; каждый можно задать через env):
   Связь:
-    -server host:port           адрес gRPC-сервера (MDM_SERVER_ADDR)
+    -server host:port           адрес gRPC-сервера (ROUTINEOPS_SERVER_ADDR)
     -server-name name           ожидаемое имя в серверном сертификате
   mTLS-материал:
     -cert / -key / -ca PATH     клиентский серт, ключ, корневой CA
@@ -286,29 +286,29 @@ func printUsage(w io.Writer) {
   # Запускать от администратора/root (служба под LocalSystem/root). -ca-sha256
   # ОБЯЗАТЕЛЕН при -ca-url (TOFU-скачивание без пина отклоняется, см. -ca-sha256
   # выше) — либо разложите CA локальным файлом через -ca и уберите -ca-url.
-  agent enroll -enroll-url https://mdm.example:8081/api/v1/enroll \
-    -token <one-time-token> -ca-url https://mdm.example:8081/ca.crt \
-    -ca-sha256 <hex-sha256-ca.crt> -server mdm.example:50051 -install-service
+  agent enroll -enroll-url https://routineops.example:8081/api/v1/enroll \
+    -token <one-time-token> -ca-url https://routineops.example:8081/ca.crt \
+    -ca-sha256 <hex-sha256-ca.crt> -server routineops.example:50051 -install-service
 
   # То же, но идентичность в защищённом хранилище ОС (Keychain/NCrypt).
   # cert-source=keystore + install-service ОБЯЗАТЕЛЬНО от админа/root.
-  agent enroll -enroll-url https://mdm.example:8081/api/v1/enroll \
-    -token <one-time-token> -ca-url https://mdm.example:8081/ca.crt \
-    -ca-sha256 <hex-sha256-ca.crt> -server mdm.example:50051 \
+  agent enroll -enroll-url https://routineops.example:8081/api/v1/enroll \
+    -token <one-time-token> -ca-url https://routineops.example:8081/ca.crt \
+    -ca-sha256 <hex-sha256-ca.crt> -server routineops.example:50051 \
     -cert-source keystore -install-service
 
   # Ручной запуск в консоли (отладка), файловые серты.
-  agent run -server mdm.example:50051 \
+  agent run -server routineops.example:50051 \
     -cert certs/agent.crt -key certs/agent.key -ca certs/ca.crt
 
   # Запуск с идентичностью из keystore (ключа на диске нет).
-  agent run -server mdm.example:50051 -cert-source keystore
+  agent run -server routineops.example:50051 -cert-source keystore
 
   # Диагностика на устройстве (конфиг, серт, проба связи).
-  agent diag -server mdm.example:50051 -probe
+  agent diag -server routineops.example:50051 -probe
 
   # Запросить временные права администратора.
-  agent request-admin -server mdm.example:50051 -reason "установка ПО"
+  agent request-admin -server routineops.example:50051 -reason "установка ПО"
 
 ЗАМЕЧАНИЯ:
   • При install/enroll -install-service пути к сертам сохраняются в конфиг службы —
@@ -1643,7 +1643,7 @@ var installedCertDir = service.InstallLayout().CertDir
 
 // resolveUpdatePubKeyB64 решает, какой ключ проверки подписи самообновления
 // использовать. Вшитый при сборке releasePubKey — АВТОРИТЕТНЫЙ и в релизной
-// сборке НИКОГДА не обходится: cfgKey (-update-pubkey/MDM_UPDATE_PUBKEY) — это
+// сборке НИКОГДА не обходится: cfgKey (-update-pubkey/ROUTINEOPS_UPDATE_PUBKEY) — это
 // dev-override для сборок БЕЗ вшитого ключа (releasePubKey == ""), а не способ
 // подменить его в проде. Раньше было наоборот (cfgKey имел приоритет) — root/
 // скомпрометированный юзер мог задать свой ключ+свой -update-url и накатить

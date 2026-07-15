@@ -9,7 +9,7 @@
 
 ## Как это работает
 
-1. Раз в `MDM_UPDATE_INTERVAL` (по умолчанию 6ч) агент делает
+1. Раз в `ROUTINEOPS_UPDATE_INTERVAL` (по умолчанию 6ч) агент делает
    `GET /api/v1/agent/version?os=<GOOS>&arch=<GOARCH>` → manifest.
 2. Если `version` новее (semver) и текущей версии, и anti-rollback floor —
    качает бинарь по `url` (сервер раздаёт `releases/` через `/downloads/`;
@@ -46,15 +46,15 @@ dev-сборки (`version=dev` или пустая) не автообновля
 по приоритету: (1) ВШИТЫЙ `releasePubKey`, если сборка не универсальная — он
 авторитетен и в проде не обходится через env/флаг (SEC-2); (2) ключ, сохранённый при
 enroll из доверенного (пин CA) enroll-ответа — это путь универсального бинаря;
-(3) `-update-pubkey`/`MDM_UPDATE_PUBKEY` — dev-override ТОЛЬКО для сборок без вшитого
+(3) `-update-pubkey`/`ROUTINEOPS_UPDATE_PUBKEY` — dev-override ТОЛЬКО для сборок без вшитого
 ключа. Остальные параметры работают в любой сборке:
 
 | Флаг | Env | Дефолт |
 |---|---|---|
-| `-update-url` | `MDM_UPDATE_URL` | пусто = выключено |
-| `-update-interval` | `MDM_UPDATE_INTERVAL` | `6h` |
-| `-update-pubkey` | `MDM_UPDATE_PUBKEY` | dev-override; игнорируется при вшитом ключе |
-| `-update-floor` | `MDM_UPDATE_FLOOR` | `agent_update_floor.txt`; на macOS/Linux служба пишет в `<DataDir>/update_floor.txt` |
+| `-update-url` | `ROUTINEOPS_UPDATE_URL` | пусто = выключено |
+| `-update-interval` | `ROUTINEOPS_UPDATE_INTERVAL` | `6h` |
+| `-update-pubkey` | `ROUTINEOPS_UPDATE_PUBKEY` | dev-override; игнорируется при вшитом ключе |
+| `-update-floor` | `ROUTINEOPS_UPDATE_FLOOR` | `agent_update_floor.txt`; на macOS/Linux служба пишет в `<DataDir>/update_floor.txt` |
 
 ## Контракт manifest
 
@@ -131,7 +131,7 @@ openssl pkey -in release_ed25519.pem -pubout -outform DER | tail -c 32 | base64
 - Манифест: `curl 'https://<SERVER_IP>/api/v1/agent/version?os=windows&arch=amd64'`.
 - Версия агента на устройстве: колонка «Версия агента» в UI
   (`devices.agent_version`, миграция 025) или лог службы.
-- Ждать до 6ч либо временно уменьшить `MDM_UPDATE_INTERVAL` у службы.
+- Ждать до 6ч либо временно уменьшить `ROUTINEOPS_UPDATE_INTERVAL` у службы.
 
 ## Безопасность (зафиксировано в коде)
 

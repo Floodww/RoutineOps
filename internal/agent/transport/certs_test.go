@@ -103,12 +103,12 @@ func TestFileCertProviderRootCAsInvalid(t *testing.T) {
 
 func TestNewDialerOK(t *testing.T) {
 	cert, key, ca := genCertFiles(t)
-	d, err := NewDialer("mdm.example:50051", "mdm.example", FileCertProvider{CertFile: cert, KeyFile: key, CAFile: ca})
+	d, err := NewDialer("routineops.example:50051", "routineops.example", FileCertProvider{CertFile: cert, KeyFile: key, CAFile: ca})
 	if err != nil {
 		t.Fatalf("NewDialer: %v", err)
 	}
-	if d.Addr() != "mdm.example:50051" {
-		t.Fatalf("Addr()=%q, want mdm.example:50051", d.Addr())
+	if d.Addr() != "routineops.example:50051" {
+		t.Fatalf("Addr()=%q, want routineops.example:50051", d.Addr())
 	}
 }
 

@@ -23,11 +23,11 @@ import (
 // outbox.go: события терялись при редеплоях сервера).
 
 const (
-	crashEnvFlag = "MDM_OUTBOX_CRASH_CHILD" // "1" → процесс выступает крашащимся ребёнком
-	crashEnvDir  = "MDM_OUTBOX_CRASH_DIR"   // каталог очереди
-	crashEnvN    = "MDM_OUTBOX_CRASH_N"     // сколько событий поставить
-	crashEnvK    = "MDM_OUTBOX_CRASH_K"     // индекс, на доставке которого падаем
-	crashEnvJrnl = "MDM_OUTBOX_CRASH_JRNL"  // путь журнала доставок
+	crashEnvFlag = "ROUTINEOPS_OUTBOX_CRASH_CHILD" // "1" → процесс выступает крашащимся ребёнком
+	crashEnvDir  = "ROUTINEOPS_OUTBOX_CRASH_DIR"   // каталог очереди
+	crashEnvN    = "ROUTINEOPS_OUTBOX_CRASH_N"     // сколько событий поставить
+	crashEnvK    = "ROUTINEOPS_OUTBOX_CRASH_K"     // индекс, на доставке которого падаем
+	crashEnvJrnl = "ROUTINEOPS_OUTBOX_CRASH_JRNL"  // путь журнала доставок
 )
 
 // TestMain перехватывает запуск: если выставлен crashEnvFlag — это краш-ребёнок,

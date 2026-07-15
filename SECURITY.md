@@ -49,7 +49,7 @@ application does everything it can to be secure-by-default; the rest is yours.
   channel — the default build is universal and ships **no** embedded key. Embedding
   the key at build time (`-ldflags -X main.releasePubKey=`) is an opt-in for
   legacy/dev builds; when a build does embed it, that key is authoritative and is not
-  overridable via env/flag (SEC-2). Either way `-update-pubkey`/`MDM_UPDATE_PUBKEY`
+  overridable via env/flag (SEC-2). Either way `-update-pubkey`/`ROUTINEOPS_UPDATE_PUBKEY`
   is only a dev-override for keyless builds and never bypasses an embedded key. The
   agent refuses to fetch a CA over the network (`-ca-url`) without a pinned SHA-256
   (`-ca-sha256`). CA distribution is pinned on every channel: the Windows MSI and the

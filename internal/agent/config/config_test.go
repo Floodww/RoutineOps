@@ -39,7 +39,7 @@ func TestFlagsOverride(t *testing.T) {
 }
 
 func TestEnvOverride(t *testing.T) {
-	t.Setenv("MDM_SERVER_ADDR", "envhost:9")
+	t.Setenv("ROUTINEOPS_SERVER_ADDR", "envhost:9")
 	if c := load(t); c.ServerAddr != "envhost:9" {
 		t.Errorf("env не применился: ServerAddr=%q", c.ServerAddr)
 	}

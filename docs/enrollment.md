@@ -86,7 +86,7 @@ agent enroll -enroll-url https://<host>/api/v1/enroll -token <tok> \
 - Проверяет, что выданный серт подписан **под наш** публичный ключ (сервер не
   подсунул чужой), затем раскладывает `agent.key` (0600), `agent.crt`, `ca.crt`.
 - При `-install-service` после успеха регистрирует службу с этими путями.
-- Флаги дублируются env: `MDM_ENROLL_URL`, `MDM_ENROLL_TOKEN`, `MDM_ENROLL_INSTALL`.
+- Флаги дублируются env: `ROUTINEOPS_ENROLL_URL`, `ROUTINEOPS_ENROLL_TOKEN`, `ROUTINEOPS_ENROLL_INSTALL`.
 
 Серверная сторона (`POST /api/v1/enroll`, подпись CSR, UI токенов) реализована
 и отвечает по контракту выше: `{device_id, cert_pem, ca_pem}`; ошибки
