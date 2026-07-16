@@ -1118,7 +1118,9 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID str
 		    ORDER BY lower(s.software_name)
 		    LIMIT 1
 		) m ON true
-		WHERE r.id = $1
+		-- id::text, а не id = $1: ruleID приходит сырым из URL, мусор вместо UUID
+		-- дал бы 22P02 → 500; с ::text он просто ничего не находит (конвенция GetScript).
+		WHERE r.id::text = $1
 		ORDER BY installed DESC, lower(d.hostname)
 	`, ruleID)
 	if err != nil {

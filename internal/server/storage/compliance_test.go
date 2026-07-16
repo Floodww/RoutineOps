@@ -388,13 +388,17 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 	})
 
 	// Несуществующее правило — пустой список, не ошибка: хендлер отдаст [].
-	t.Run("несуществующее правило — пусто", func(t *testing.T) {
-		rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, "00000000-0000-0000-0000-000000000000")
-		if err != nil {
-			t.Fatalf("ListSoftwarePolicyDeviceCompliance: %v", err)
-		}
-		if len(rows) != 0 {
-			t.Fatalf("rows = %+v, want пусто", rows)
+	// Мусор вместо UUID — тоже пусто, не 22P02: id приходит сырым из URL
+	// (/policies/garbage/compliance), сравнение идёт через id::text.
+	t.Run("несуществующее правило и мусорный id — пусто", func(t *testing.T) {
+		for _, id := range []string{"00000000-0000-0000-0000-000000000000", "garbage"} {
+			rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, id)
+			if err != nil {
+				t.Fatalf("ListSoftwarePolicyDeviceCompliance(%q): %v", id, err)
+			}
+			if len(rows) != 0 {
+				t.Fatalf("rows(%q) = %+v, want пусто", id, rows)
+			}
 		}
 	})
 }

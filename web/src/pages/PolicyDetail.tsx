@@ -17,6 +17,8 @@ export default function PolicyDetail() {
   const [rows, setRows] = useState<PolicyDeviceCompliance[]>([])
   const [groups, setGroups] = useState<DeviceGroup[]>([])
   const [loading, setLoading] = useState(true)
+  // Ошибка загрузки ≠ «политика не найдена»: не приписываем удаление при упавшем API.
+  const [loadFailed, setLoadFailed] = useState(false)
 
   useEffect(() => {
     if (!id) return
@@ -26,15 +28,19 @@ export default function PolicyDetail() {
       // Отдельного GET /policies/{id} нет — правило достаём из общего списка.
       api.get<PolicyRule[]>("/policies"),
       api.get<PolicyDeviceCompliance[]>(`/policies/${id}/compliance`),
-      api.get<DeviceGroup[]>("/device-groups"),
-    ]).then(([r, c, g]) => {
+    ]).then(([r, c]) => {
       if (stale) return
       setRule((r.data ?? []).find((x) => x.id === id) ?? null)
       setRows(c.data ?? [])
-      setGroups(g.data ?? [])
     }).catch(() => {
-      if (!stale) toast({ title: "Не удалось загрузить политику", variant: "destructive" })
+      if (stale) return
+      setLoadFailed(true)
+      toast({ title: "Не удалось загрузить политику", variant: "destructive" })
     }).finally(() => { if (!stale) setLoading(false) })
+    // Группы нужны только для имени в подзаголовке — best-effort, не валит страницу.
+    api.get<DeviceGroup[]>("/device-groups")
+      .then((g) => { if (!stale) setGroups(g.data ?? []) })
+      .catch(() => {})
     return () => { stale = true }
   }, [id])
 
@@ -57,7 +63,9 @@ export default function PolicyDetail() {
     return (
       <div>
         {back}
-        <p className="text-sm text-muted-foreground">Политика не найдена — возможно, она была удалена.</p>
+        <p className="text-sm text-muted-foreground">
+          {loadFailed ? "Не удалось загрузить политику — попробуй обновить страницу." : "Политика не найдена — возможно, она была удалена."}
+        </p>
       </div>
     )
   }
