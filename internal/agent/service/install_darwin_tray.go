@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/Floodww/RoutineOps/internal/agent/tamper"
@@ -105,9 +106,16 @@ func InstallTrayAgent(cfg Config) error {
 func UninstallTrayAgent() error {
 	path := agentPlistPath()
 	if os.Geteuid() == 0 {
-		// Снять агента у всех активных пользователей сложно без перебора uid,
-		// поэтому мы можем просто убить процесс 'RoutineOps-agent tray'.
-		_ = exec.Command("pkill", "-f", "RoutineOps-agent tray").Run()
+		// Выгрузить LaunchAgent из GUI-сессии активного пользователя. Просто pkill
+		// проигрывает гонку с KeepAlive (launchd мгновенно перезапускает трей), а
+		// удаления plist-файла мало: загруженный job переживает и файл, и снос агента,
+		// потом при переустановке держит слот, роняет свежий bootstrap в EIO, а сам
+		// крутится без иконки (полевой баг 07-16). bootout снимает job штатно; pkill —
+		// страховка на случай, если консольную сессию определить не удалось.
+		if uid := consoleUID(); uid != "" && uid != "0" {
+			_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+Name+".tray").Run()
+		}
+		_ = exec.Command("pkill", "-f", Name+" tray").Run()
 	}
 	// Без снятия schg os.Remove вернёт EPERM даже под root.
 	_ = tamper.Unlock(path)
@@ -115,4 +123,15 @@ func UninstallTrayAgent() error {
 		return fmt.Errorf("удаление agent plist %s: %w", path, err)
 	}
 	return nil
+}
+
+// consoleUID — uid активного консольного (Aqua) пользователя, или "" если консоль
+// за loginwindow (owner root) либо определить не удалось. Нужен, чтобы адресовать
+// bootout/bootstrap tray-LaunchAgent в правильный gui/<uid>-домен.
+func consoleUID() string {
+	out, err := exec.Command("stat", "-f", "%u", "/dev/console").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

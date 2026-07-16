@@ -40,6 +40,10 @@ func launchTrayInActiveSession(log *slog.Logger) {
 		return
 	}
 	plist := service.TrayPlistPath()
+	// Снять возможный стейл-инстанс, переживший прошлую установку: иначе bootstrap
+	// упрётся в EIO «уже загружен», а стейл-трей висит без иконки (спавнился в чужом
+	// контексте). bootout идемпотентен — на пустой слот просто вернёт ошибку, игнорим.
+	_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+service.Name+".tray").Run()
 	if out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, plist).CombinedOutput(); err != nil {
 		log.Warn("трей: не удалось забутстрапить LaunchAgent в активную сессию",
 			slog.String("uid", uid), slog.String("output", strings.TrimSpace(string(out))), slog.Any("error", err))
