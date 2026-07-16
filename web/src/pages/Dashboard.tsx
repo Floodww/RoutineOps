@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ElementType, type CSSProperties } from "react"
 import { useNavigate } from "react-router-dom"
 import { Monitor, FileCode2, Shield, Bell, ChevronRight, Activity, ShieldAlert, KeyRound, UserCog } from "lucide-react"
-import api, { Device, Script, PolicyRule } from "@/lib/api"
+import api, { Device, Script, PolicyRule, Alert } from "@/lib/api"
 import { formatDistanceToNow } from "@/lib/time"
 import { toast } from "@/lib/toast"
 import SpotlightCard from "@/components/SpotlightCard"
@@ -12,14 +12,6 @@ interface AuditEntry {
   action: string
   target_type: string
   created_at: string
-}
-
-interface Alert {
-  id: string
-  acknowledged: boolean
-  created_at: string
-  message?: string
-  device_hostname?: string
 }
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
@@ -175,7 +167,9 @@ export default function Dashboard() {
   const enrolled = devices.filter((d) => d.status === "enrolled").length
   const pending  = devices.filter((d) => d.status === "pending").length
   const online   = devices.filter((d) => d.last_seen_at && now - new Date(d.last_seen_at).getTime() < ONLINE_THRESHOLD_MS).length
-  const unackedAlerts = alerts.filter((a) => !a.acknowledged).length
+  // API отдаёт acknowledged_at (timestamp | null), поля `acknowledged` не существует —
+  // старый фильтр по нему считал ВСЕ алерты непринятыми.
+  const unackedAlerts = alerts.filter((a) => !a.acknowledged_at).length
 
   const osCounts = devices.reduce<Record<string, number>>((acc, d) => {
     const fam = osFamily(d.os)
@@ -204,7 +198,7 @@ export default function Dashboard() {
           { label: "Всего устройств", value: devices.length, icon: Monitor,   sub: `${online} онлайн`, cta: "Подключить устройство", accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/devices")  },
           { label: "Скриптов",        value: scripts.length,  icon: FileCode2, sub: "в библиотеке",     cta: "Добавить скрипт",       accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/scripts")  },
           { label: "Политик",         value: policies.length, icon: Shield,    sub: "правил ПО",        cta: "Добавить политику",     accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/policies") },
-          { label: "Алертов",         value: unackedAlerts,   icon: Bell,      sub: "без ответа",       cta: "",                      accent: unackedAlerts > 0 ? "border-t-destructive" : "border-t-border", iconColor: unackedAlerts > 0 ? "text-destructive" : "text-muted-foreground", onClick: () => navigate("/alerts") },
+          { label: "Алертов",         value: unackedAlerts,   icon: Bell,      sub: "",                 cta: "",                      accent: unackedAlerts > 0 ? "border-t-destructive" : "border-t-border", iconColor: unackedAlerts > 0 ? "text-destructive" : "text-muted-foreground", onClick: () => navigate("/alerts") },
         ].map(({ label, value, icon: Icon, sub, cta, accent, iconColor, onClick }) => (
           <SpotlightCard
             as="button"
@@ -224,9 +218,9 @@ export default function Dashboard() {
               // В светлой теме --brand (52%) даёт ~4:1 на белом — ниже AA для
               // text-xs, поэтому CTA затемнён той же тональностью (~6.8:1).
               <p className="text-xs font-medium text-[hsl(220_65%_42%)] dark:text-brand mt-1">{cta} →</p>
-            ) : (
+            ) : sub ? (
               <p className="text-xs text-muted-foreground mt-1">{sub}</p>
-            )}
+            ) : null}
           </SpotlightCard>
         ))}
       </div>
