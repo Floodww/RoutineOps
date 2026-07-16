@@ -2,57 +2,56 @@ package notifier
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
-// TestDialParallel_PicksLiveAmongDead: среди «мёртвых» (не маршрутизируемых) адресов
-// dialParallel находит и возвращает живой listener — эмуляция частично
-// заблокированного api.telegram.org, где открыт лишь один из IP.
-func TestDialParallel_PicksLiveAmongDead(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// TestDialTLSParallel_PicksLiveAmongDead: среди «мёртвых» (не маршрутизируемых) адресов
+// dialTLSParallel находит IP с рабочим TLS — эмуляция блокировки Telegram по IP, где
+// открыт лишь один адрес.
+func TestDialTLSParallel_PicksLiveAmongDead(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String()) // 127.0.0.1:PORT
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	go func() {
-		for {
-			c, e := ln.Accept()
-			if e != nil {
-				return
-			}
-			c.Close()
-		}
-	}()
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	cfg := &tls.Config{ServerName: host, RootCAs: pool}
 
-	live := ln.Addr().String()
-	// 192.0.2.0/24 (TEST-NET-1, RFC 5737) не маршрутизируется → dial уходит в
-	// таймаут/ошибку, как заблокированный IP Telegram.
-	dead1, dead2 := "192.0.2.1:443", "192.0.2.2:443"
-
+	// 192.0.2.0/24 (TEST-NET-1, RFC 5737) не маршрутизируется → эмулирует заблокированный IP.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := dialParallel(ctx, "tcp", []string{dead1, dead2, live})
+	conn, err := dialTLSParallel(ctx, "tcp", cfg, []string{"192.0.2.1", "192.0.2.2", host}, port)
 	if err != nil {
-		t.Fatalf("ждали соединение с живым target, получили ошибку: %v", err)
+		t.Fatalf("ждали живое TLS-соединение, получили ошибку: %v", err)
 	}
 	defer conn.Close()
-	if conn.RemoteAddr().String() != live {
-		t.Fatalf("подключились к %s, а живой был %s", conn.RemoteAddr(), live)
+	tc, ok := conn.(*tls.Conn)
+	if !ok || !tc.ConnectionState().HandshakeComplete {
+		t.Fatalf("ждали завершённое TLS-соединение, получили %T", conn)
 	}
 }
 
-// TestDialParallel_AllDeadReturnsError: если живых нет — возвращается ошибка, а не
-// вечное зависание.
-func TestDialParallel_AllDeadReturnsError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+// TestDialTLSParallel_AllDeadReturnsError: если живых нет — ошибка, а не зависание.
+func TestDialTLSParallel_AllDeadReturnsError(t *testing.T) {
+	cfg := &tls.Config{ServerName: telegramHost}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	conn, err := dialParallel(ctx, "tcp", []string{"192.0.2.1:443", "192.0.2.2:443"})
+	conn, err := dialTLSParallel(ctx, "tcp", cfg, []string{"192.0.2.1", "192.0.2.2"}, "443")
 	if err == nil {
 		conn.Close()
-		t.Fatal("ждали ошибку при всех мёртвых target, получили соединение")
+		t.Fatal("ждали ошибку при всех мёртвых адресах, получили соединение")
 	}
 }
