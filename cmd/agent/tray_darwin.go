@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"time"
 
 	"fyne.io/systray"
 
@@ -42,9 +43,19 @@ func launchTrayInActiveSession(log *slog.Logger) {
 	plist := service.TrayPlistPath()
 	// Снять возможный стейл-инстанс, переживший прошлую установку: иначе bootstrap
 	// упрётся в EIO «уже загружен», а стейл-трей висит без иконки (спавнился в чужом
-	// контексте). bootout идемпотентен — на пустой слот просто вернёт ошибку, игнорим.
+	// контексте). На чистом слоте bootout — безвредный no-op. bootout АСИНХРОНЕН:
+	// launchd снимает job не мгновенно, и немедленный bootstrap ловит ту же EIO уже по
+	// гонке, оставляя сессию вовсе без трея, — поэтому bootstrap ретраим ~3с, пока слот
+	// освобождается (на чистом слоте проходит с первой попытки).
 	_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+service.Name+".tray").Run()
-	if out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, plist).CombinedOutput(); err != nil {
+	// out/err уже объявлены выше (вызов stat) — переиспользуем, не переобъявляя.
+	for i := 0; i < 10; i++ {
+		if out, err = exec.Command("launchctl", "bootstrap", "gui/"+uid, plist).CombinedOutput(); err == nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if err != nil {
 		log.Warn("трей: не удалось забутстрапить LaunchAgent в активную сессию",
 			slog.String("uid", uid), slog.String("output", strings.TrimSpace(string(out))), slog.Any("error", err))
 		return
