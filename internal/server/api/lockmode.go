@@ -51,9 +51,22 @@ func WithReleasePubKey(key string) RouterOption {
 	return func(h *Handler, _ chi.Router) { h.releasePubKey = key }
 }
 
-// WithRoutes монтирует дополнительные роуты enterprise (напр. /escrow/status).
+// WithRoutes монтирует дополнительные роуты enterprise (напр. /escrow/status) в
+// authed-группу (все роли).
 func WithRoutes(mount func(*Handler, chi.Router)) RouterOption {
 	return func(h *Handler, r chi.Router) { mount(h, r) }
+}
+
+// WithAdminRoutes монтирует enterprise-роуты в подгруппу с гейтом it_admin (для
+// мутирующих/чувствительных операций вроде применения лицензии). Инфраструктура
+// (не enterprise-логика): open-core просто не передаёт таких опций.
+func WithAdminRoutes(mount func(*Handler, chi.Router)) RouterOption {
+	return func(h *Handler, r chi.Router) {
+		r.Group(func(ar chi.Router) {
+			ar.Use(h.requireRole("it_admin"))
+			mount(h, ar)
+		})
+	}
 }
 
 // WithTelegramBotUsername отдаёт функцию, возвращающую @username бота этого деплоя

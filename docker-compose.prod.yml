@@ -25,6 +25,10 @@ services:
     volumes:
       - ./certs:/app/certs:ro
       - ./releases:/app/releases
+      # rw-том под enterprise-лицензию: её применяют через UI в рантайме, и она должна
+      # пережить рестарт. Отдельно от certs (тот :ro — там приватный ключ CA) и от
+      # releases (тот раздаётся наружу по /downloads/*). В open-core остаётся пустым.
+      - ./license:/app/license
     env_file: .env.prod
     depends_on:
       migrate:

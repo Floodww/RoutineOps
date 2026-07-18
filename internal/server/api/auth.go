@@ -181,6 +181,17 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{Status: "ok"})
 }
 
+// Actor извлекает аутентифицированного пользователя из контекста запроса (за
+// jwtMiddleware). Экспорт для enterprise-хендлеров (напр. аудит применения лицензии),
+// которым нужен актор, но недоступен внутренний claimsKey. ok=false вне authed-группы.
+func Actor(ctx context.Context) (userID, email string, ok bool) {
+	c, ok := ctx.Value(claimsKey).(*jwtClaims)
+	if !ok {
+		return "", "", false
+	}
+	return c.UserID, c.Email, true
+}
+
 func (h *Handler) requireRole(role string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
