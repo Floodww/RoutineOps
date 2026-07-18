@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { scriptPlatformFromFilename, agentPlatform, deviceRunsScript, errMessage } from "./api"
+import { scriptPlatformFromFilename, agentPlatform, deviceRunsScript, errMessage, errStatus } from "./api"
 
 describe("scriptPlatformFromFilename", () => {
   it(".ps1 → Windows", () => {
@@ -47,4 +47,17 @@ describe("errMessage", () => {
     expect(errMessage(axiosLike)).toBe("token expired")
   })
   it("неизвестное → дефолт", () => expect(errMessage(123)).toBe("Неизвестная ошибка"))
+})
+
+// errStatus отличает «роута нет в этой сборке» от настоящего сбоя: по нему страница
+// «Лицензия» решает, показать «недоступно в редакции Free» или ошибку загрузки.
+// Спутать эти случаи — значит нарисовать enterprise-админу чужую редакцию.
+describe("errStatus", () => {
+  it("ответ сервера → его код", () => {
+    expect(errStatus({ isAxiosError: true, message: "Request failed", response: { status: 404 } })).toBe(404)
+  })
+  it("сеть легла (ответа нет) → 0, а не 404", () => {
+    expect(errStatus({ isAxiosError: true, message: "Network Error" })).toBe(0)
+  })
+  it("не-axios → 0", () => expect(errStatus(new Error("boom"))).toBe(0))
 })

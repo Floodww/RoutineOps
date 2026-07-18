@@ -23,6 +23,8 @@ const ACTION_LABELS: Record<string, string> = {
   revoke_admin_request:  "Отозвал права администратора",
   create_device:         "Добавил устройство",
   reenroll_device:       "Перерегистрировал устройство",
+  apply_license:         "Применил лицензию",
+  deactivate_license:    "Деактивировал лицензию",
 }
 
 export default function AuditLog() {

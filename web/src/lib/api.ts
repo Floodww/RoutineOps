@@ -14,6 +14,12 @@ export function errMessage(e: unknown): string {
   return "Неизвестная ошибка"
 }
 
+// errStatus — HTTP-код ошибки (0, если ответа не было). Нужен, чтобы отличить
+// «роута нет в этой сборке» (404) от настоящего сбоя.
+export function errStatus(e: unknown): number {
+  return axios.isAxiosError(e) ? (e.response?.status ?? 0) : 0
+}
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
@@ -262,4 +268,25 @@ export interface ScriptPolicyCompliance {
   pass: number
   fail: number
   unknown: number
+}
+
+// LicenseStatus — снимок энтайтлмента (GET/POST /license, только enterprise-сборка;
+// в open-core роута нет → 404). Два флага, а не один: configured=лицензия валидно
+// подписана и активирована, valid=она ещё и в сроке. Их пара различает «истекла»
+// (configured && !valid) и «не задана» (!configured) — состояния с разным текстом и
+// разными действиями в UI. Пустой features = вся редакция (семантика Claims.Has).
+// persist_warning приходит только с POST: лицензия применена live, но не легла на
+// диск и не переживёт рестарт — это не ошибка запроса, но молчать о ней нельзя.
+export interface LicenseStatus {
+  configured: boolean
+  valid: boolean
+  licensee?: string
+  edition?: string
+  features?: string[]
+  // Не опционально, хотя в Go у поля стоит omitempty: encoding/json игнорирует omitempty
+  // на структурах, а time.Time — структура. Лицензия без срока приезжает не как
+  // отсутствующее поле, а как "0001-01-01T00:00:00Z" (см. hasExpiry в License.tsx).
+  expires_at: string
+  seats?: number
+  persist_warning?: string
 }
