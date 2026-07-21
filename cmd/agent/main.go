@@ -397,6 +397,13 @@ func tamperDisarmDoneMsg(goos string) string {
 // runDiagCommand собирает зависимости diag из конфига и печатает отчёт. При
 // -probe выполняет реальный mTLS-dial. Вынесено из main для тестируемости runDiag.
 func runDiagCommand(w io.Writer, cfg *config.Config) int {
+	// diag обязан показывать те же state-пути, что реально видит служба: пути,
+	// оставшиеся на относительных дефолтах, переводятся в DataDir раскладки тем же
+	// applyStatePaths, что использует служба (иначе на Windows diag печатал бы
+	// CWD-относительные пути, которыми служба не пользуется).
+	if lay := service.InstallLayout(); lay.DataDir != "" {
+		applyStatePaths(cfg, lay)
+	}
 	provider, err := certProvider(cfg)
 	if err != nil {
 		fmt.Fprintf(w, "RoutineOps-agent diag\n  ОШИБКА инициализации провайдера сертификата: %v\n", err)
@@ -504,6 +511,14 @@ func runEnroll(cfg *config.Config, log *slog.Logger) error {
 	// "token already used". С Return=check у MSI это откатывало бы всю установку
 	// (полевой баг v22). Берём device_id из существующего серта и идём сразу
 	// ставить/перезапускать службу (Install идемпотентен).
+	//
+	// На relocate-платформах (macOS/Linux) идентичность к этому моменту может жить
+	// уже ТОЛЬКО в CertDir: первая установка сама сносит приватный ключ по
+	// pre-relocate пути (relocateForService [B3], вторая копия секрета не нужна).
+	// Без перенацеливания повторный прогон установщика видел бы cert без key,
+	// проваливал reusableIdentity и уходил на полный enroll погашенным токеном —
+	// возврат полевого бага v22, только для .pkg/.deb/.rpm.
+	retargetIdentityToCertDir(cfg, service.InstallLayout(), log)
 	deviceID, reused, err := reusableIdentity(cfg, time.Now(), log)
 	if err != nil {
 		return err
@@ -634,6 +649,38 @@ func runEnroll(cfg *config.Config, log *slog.Logger) error {
 		launchTrayInActiveSession(log)
 	}
 	return nil
+}
+
+// retargetIdentityToCertDir перенацеливает cfg.CertFile/KeyFile (и при
+// необходимости CAFile) на каталог службы (lay.CertDir), когда исходная
+// (pre-relocate) пара уже неполна, а в CertDir лежит целая. Нужна для
+// идемпотентности повторного enroll на relocate-платформах: первая установка
+// сносит приватный ключ по исходному пути (см. relocateForService [B3]), и
+// проверка существующей идентичности обязана смотреть туда, куда мы её сами
+// переложили. Пару берём только целиком (половинки от разных энроллментов
+// ломают mTLS молча). Keystore-режим не трогаем: там идентичность в хранилище
+// ОС и от файлов не зависит.
+func retargetIdentityToCertDir(cfg *config.Config, lay service.Layout, log *slog.Logger) {
+	if !lay.Relocate || cfg.CertSource == keystore.SourceKeystore {
+		return
+	}
+	if fileExists(cfg.CertFile) && fileExists(cfg.KeyFile) {
+		return // исходная пара цела — обычный порядок
+	}
+	certDst := filepath.Join(lay.CertDir, "agent.crt")
+	keyDst := filepath.Join(lay.CertDir, "agent.key")
+	if !fileExists(certDst) || !fileExists(keyDst) {
+		return // в CertDir тоже нет целой пары — пусть решает обычный enroll-поток
+	}
+	log.Info("исходной пары cert/key нет — использую идентичность из каталога службы",
+		slog.String("cert", certDst), slog.String("key", keyDst))
+	cfg.CertFile, cfg.KeyFile = certDst, keyDst
+	// CA публичен и с исходного пути не удаляется, но полу-очищенная машина могла
+	// сохранить его только в CertDir — сверка издателя (serverCABundle) без сети
+	// деградирует на файл, целимся туда же.
+	if ca := filepath.Join(lay.CertDir, "ca.crt"); !fileExists(cfg.CAFile) && fileExists(ca) {
+		cfg.CAFile = ca
+	}
 }
 
 // existingDeviceID возвращает device_id (CN), если на устройстве уже есть валидная
@@ -849,7 +896,10 @@ func enrollServiceArgs(cfg *config.Config, deviceID string) []string {
 	// После раскладки (relocateForService на macOS/Linux) они указывают в DataDir —
 	// служба пишет туда, а не в read-only рабочий каталог (/). На Windows (MSI,
 	// Relocate=false) пути остаются относительными дефолтами и сюда не попадают —
-	// поведение установщика прежнее.
+	// поведение установщика прежнее: их переводит в машинный каталог
+	// (ProgramData\RoutineOps\state) сама служба на каждом старте (runAgent →
+	// applyStatePaths), поэтому фикс не зависит от аргументов службы и доезжает
+	// и через self-update.
 	args = appendAbsFlag(args, "-outbox-dir", cfg.OutboxDir)
 	args = appendAbsFlag(args, "-task-state", cfg.TaskStateFile)
 	args = appendAbsFlag(args, "-script-dedup", cfg.ScriptDedupFile)
@@ -876,6 +926,27 @@ func deriveUpdateURL(enrollURL string) string {
 		return ""
 	}
 	return strings.Replace(enrollURL, enrollPath, manifestPath, 1)
+}
+
+// applyStatePaths переводит изменяемое состояние агента в машинный каталог данных
+// lay.DataDir. Переводятся ТОЛЬКО пути, оставшиеся на относительных дефолтах
+// (config.Default*): явно заданный оператором путь (флаг/env) уважается. Маппинг
+// имён закреплён миграцией старых установок (migrateLegacyState) — менять только
+// вместе с ней. Используется тремя потребителями с одинаковым результатом:
+// relocateForService (enroll, macOS/Linux), runAgent (старт Windows-службы) и
+// runDiagCommand (diag обязан показывать те же пути, что реально видит служба).
+func applyStatePaths(cfg *config.Config, lay service.Layout) {
+	rebase := func(p *string, def, name string) {
+		if *p == def || *p == "" {
+			*p = filepath.Join(lay.DataDir, name)
+		}
+	}
+	rebase(&cfg.OutboxDir, config.DefaultOutboxDir, "outbox")
+	rebase(&cfg.TaskStateFile, config.DefaultTaskStateFile, "tasks.seen")
+	rebase(&cfg.ScriptDedupFile, config.DefaultScriptDedupFile, "scripts.seen")
+	rebase(&cfg.ForbiddenListFile, config.DefaultForbiddenListFile, "forbidden_software.txt")
+	rebase(&cfg.UpdateFloorFile, config.DefaultUpdateFloorFile, "update_floor.txt")
+	rebase(&cfg.FilevaultEscrowDir, config.DefaultFilevaultEscrowDir, "filevault_escrow")
 }
 
 // relocateForService раскладывает агента в постоянные пути службы (macOS/Linux):
@@ -1017,6 +1088,21 @@ func relocateForService(cfg *config.Config, lay service.Layout, log *slog.Logger
 			if err := copyFile(cfg.KeyFile, keyDst, 0o600); err != nil {
 				return fmt.Errorf("копирование ключа в %s: %w", keyDst, err)
 			}
+			// Снести приватный ключ по ИСХОДНОМУ (pre-relocate) пути: он лежит вне
+			// усиленного CertDir (для .pkg — /usr/local/bin/certs, каталог 0o755),
+			// и вторая копия секрета там не нужна — расширяет поверхность утечки
+			// (бэкап/имидж/сбор логов, исключающие CertDir). Только ключ:
+			// cert/CA публичны. Удаляем ТОЛЬКО если исходный и целевой — разные
+			// inode (иначе copyFile был no-op по общему inode и мы снесли бы сам
+			// рабочий ключ): os.SameFile, не сравнение строк-путей.
+			if si, serr := os.Stat(cfg.KeyFile); serr == nil {
+				if di, derr := os.Stat(keyDst); derr == nil && !os.SameFile(si, di) {
+					if err := os.Remove(cfg.KeyFile); err != nil && !os.IsNotExist(err) {
+						log.Warn("не удалить приватный ключ по исходному пути после раскладки — вторая копия секрета осталась",
+							slog.String("path", cfg.KeyFile), slog.Any("error", err))
+					}
+				}
+			}
 		case fileExists(certDst) && fileExists(keyDst):
 			log.Warn("идентичность по исходным путям не найдена — переиспользую пару из каталога службы",
 				slog.String("cert", certDst), slog.String("key", keyDst))
@@ -1029,17 +1115,16 @@ func relocateForService(cfg *config.Config, lay service.Layout, log *slog.Logger
 	}
 
 	// Изменяемое состояние — в DataDir (служба пишет туда, а не в read-only CWD).
-	cfg.OutboxDir = filepath.Join(lay.DataDir, "outbox")
-	cfg.TaskStateFile = filepath.Join(lay.DataDir, "tasks.seen")
-	cfg.ScriptDedupFile = filepath.Join(lay.DataDir, "scripts.seen")
-	cfg.ForbiddenListFile = filepath.Join(lay.DataDir, "forbidden_software.txt")
-	cfg.UpdateFloorFile = filepath.Join(lay.DataDir, "update_floor.txt")
-	cfg.FilevaultEscrowDir = filepath.Join(lay.DataDir, "filevault_escrow")
+	applyStatePaths(cfg, lay)
 	// lock.json и admin-request.json — в отдельном подкаталоге DataDir, а не прямо в
 	// нём: их пишет не только служба (root), но и юзер-сессия без прав root
 	// (лок-экран снимает блокировку, трей кладёт заявку на права). EnsureUserWritableDir
 	// делает ЭТОТ подкаталог доступным на запись всем — если бы это был DataDir
 	// целиком, то же самое получил бы и CertDir (mTLS-ключ) по соседству.
+	// На Windows LockStateFile НЕ переезжает (и потому не входит в applyStatePaths):
+	// трей и лок-экран запускаются БЕЗ флагов (tray_windows.go:43,
+	// locker_session_windows.go:90) и вычисляют путь из lock.DefaultPath() —
+	// перенос сломал бы им status.json/admin-request.json.
 	cfg.LockStateFile = filepath.Join(lay.DataDir, "shared", "lock.json")
 
 	log.Info("файлы службы разложены в постоянные пути",
@@ -1271,6 +1356,21 @@ func dispatchReport(ctx context.Context, dialer *transport.Dialer, kind string, 
 			return reportErr(err, kind, log)
 		}
 		return ackErr(ack.GetReceived())
+	case outbox.KindTask:
+		var res pb.TaskResult
+		if err := proto.Unmarshal(data, &res); err != nil {
+			log.Error("outbox: битый TaskResult отброшен", slog.Any("error", err))
+			return nil
+		}
+		// Запоздалый/повторный результат сервер принимает безопасно: CompleteTask
+		// скоупится по device_id, чужой или уже закрытый task_id — accept-and-drop
+		// (Received:true без gRPC-ошибки), ошибка БД — Received:false → ackErr,
+		// запись остаётся в очереди.
+		ack, err := cl.ReportTaskResult(ctx, &res)
+		if err != nil {
+			return reportErr(err, kind, log)
+		}
+		return ackErr(ack.GetReceived())
 	default:
 		log.Error("outbox: неизвестный вид записи отброшен", slog.String("kind", kind))
 		return nil
@@ -1371,6 +1471,30 @@ func runAgentService(cfg *config.Config, log *slog.Logger) {
 
 // runAgent — рабочий цикл агента: heartbeat-стрим, инвентаризация, выполнение задач.
 func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	// Windows-служба: изменяемое состояние не должно жить в CWD службы
+	// (C:\Windows\System32) — state-пути, оставшиеся на относительных дефолтах,
+	// переводятся в защищённый машинный каталог (InstallLayout().DataDir), а
+	// состояние прежних установок разово переносится из System32. Применяется на
+	// КАЖДОМ старте службы (а не только на enroll): так фикс доезжает и до машин,
+	// обновившихся self-update'ом, у которых аргументы службы не менялись.
+	// Интерактивный запуск (`agent run` в консоли) не трогаем — dev-поведение
+	// с CWD-относительными путями сохраняется.
+	if lay := service.InstallLayout(); !lay.Relocate && lay.DataDir != "" && service.RunningAsService() {
+		// EnsureDataDir — ГЕЙТ, а не best-effort: создаёт каталог и ставит admin-only
+		// protected DACL (policy-syncer каталоги не создаёт; user-writable наследование
+		// от корня ProgramData\RoutineOps сюда доезжать не должно). Пока он не удался
+		// (junction-подмена, отказ DACL, диск), пути НЕ переводятся и миграция НЕ
+		// запускается — fail-safe: лучше оставить состояние на прежних путях (System32,
+		// admin-only на запись), чем перенести security-состояние в незащищённый каталог.
+		if err := service.EnsureDataDir(lay.DataDir); err != nil {
+			log.Error("каталог состояния службы не подготовлен — состояние остаётся на прежних путях",
+				slog.String("dir", lay.DataDir), slog.Any("error", err))
+		} else {
+			applyStatePaths(cfg, lay)
+			migrateLegacyState(legacyStateDir(), cfg, log)
+		}
+	}
+
 	// Подчистить остатки прошлого самообновления (<exe>.old на Windows).
 	selfupdate.CleanupOld()
 
@@ -1392,6 +1516,13 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var updating atomic.Bool
+
+	// Полное самоудаление по команде сервера (Task.decommission). Executor
+	// подтверждает приём серверу и зовёт этот колбэк; сам снос (служба, tamper,
+	// серт, состояние, бинарь) выполняется ПОСЛЕ graceful-остановки цикла — там,
+	// где уже не пишут heartbeat/outbox/reporter (см. хвост runAgent).
+	var decommissioning atomic.Bool
+	var decommReason string
 
 	// Снимок устройства при старте — для наглядности в логах (не отправляется).
 	info := collector.Collect()
@@ -1478,8 +1609,10 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 	go reporter.Run(ctx)
 
-	// Command Listener: выполняет задачи, пришедшие в Connect-стриме.
-	executor := command.NewExecutor(dialer, log, cfg.TaskStateFile)
+	// Command Listener: выполняет задачи, пришедшие в Connect-стриме. Результат
+	// уходит durable-путём через outbox (KindTask) — обрыв связи или рестарт
+	// агента больше не теряют его навсегда.
+	executor := command.NewExecutor(dialer, log, cfg.TaskStateFile, ob.Enqueue)
 	// Блокировка устройства: состояние переживает рестарт/ребут (Load на старте
 	// поднимет замок). Команды lock/unlock приходят в Task.lock и применяются через
 	// executor. На Windows локер службы (NewPlatformLocker → SessionLocker) сам
@@ -1497,6 +1630,13 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		log.Error("lock: загрузка состояния блокировки", slog.Any("error", err))
 	}
 	executor.SetLocker(locker)
+	// decommission: executor уже подтвердил серверу приём — здесь только помечаем
+	// намерение и роняем цикл (cancel). Teardown в хвосте runAgent, после Shutdown.
+	executor.SetDecommissioner(func(_, reason string) {
+		decommReason = reason
+		decommissioning.Store(true)
+		cancel()
+	})
 	// Реконсиляция блокировки (pull, FetchLockStatus): переживает потерю push-
 	// команды и ребут — см. package lock, Reconciler. OnLocalUnlock тем же
 	// движением durably (через outbox) отчитывается о ЛОКАЛЬНОМ снятии блокировки
@@ -1506,16 +1646,23 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// Следим за офлайн-разблокировкой и отчитываемся серверу. Интервал короче, чем
 	// keep-alive SessionLocker (3с, см. lock.go) — иначе разблокированный лок-экран
 	// мигнёт заново, пока демон не успел среагировать.
-	go locker.Run(ctx, time.Second, lockReconciler.OnLocalUnlock)
-	go lockReconciler.Run(ctx)
-
 	// FileVault dynamic-lock chaining (G1/G2/G3): nil на не-darwin/сборках без
 	// вшитого escrow recipient — executor/reconciler в этом случае отклоняют
 	// lock_mode=FILEVAULT с ошибкой вместо тихой деградации в overlay (см.
 	// FileVaultRevoker doc в command/executor.go и lock/reconcile.go).
-	if fv := wireFileVaultChain(cfg, deviceID, dialer, log); fv != nil {
+	// Revoker подключаем ДО `go lockReconciler.Run` — иначе первый тик читал бы
+	// r.revoker, пока SetFileVaultRevoker его пишет (гонка данных, #9). Для
+	// executor это безопасно и позже (приём задач стартует ниже, client.Run).
+	fv := wireFileVaultChain(cfg, deviceID, dialer, log)
+	if fv != nil {
 		executor.SetFileVaultRevoker(fv.chain)
 		lockReconciler.SetFileVaultRevoker(fv.chain)
+	}
+
+	go locker.Run(ctx, time.Second, lockReconciler.OnLocalUnlock)
+	go lockReconciler.Run(ctx)
+
+	if fv != nil {
 		// Фоновый добор недоставленных escrow-записей (enroll.go пишет их
 		// write-ahead на диск ДО сети; если сервер был недоступен дольше
 		// enroll-foreground-окна, доставка продолжается здесь неограниченно
@@ -1612,6 +1759,15 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	ob.FlushOnce(flushCtx)
 	flushCancel()
+	// Самоудаление: цикл остановлен, writer'ы состояния молчат — сносим агента
+	// целиком и выходим БЕЗ ошибки (не хотим, чтобы супервизор перезапустил нас;
+	// службу мы всё равно удаляем). Отчёт серверу уже отправлен executor'ом до
+	// этой точки, пока серт был на диске.
+	if decommissioning.Load() {
+		runDecommission(cfg, decommReason, log)
+		return nil
+	}
+
 	// Перезапуск ради применения обновления: возвращаем ошибку → ненулевой выход,
 	// чтобы супервизор (launchd KeepAlive / Windows recovery action) поднял новый
 	// бинарь. Чистая остановка по сигналу (context.Canceled) — не ошибка.

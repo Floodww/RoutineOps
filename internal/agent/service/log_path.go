@@ -1,7 +1,6 @@
 package service
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 )
@@ -15,11 +14,7 @@ import (
 func LogFilePath() string {
 	switch runtime.GOOS {
 	case "windows":
-		pd := os.Getenv("ProgramData")
-		if pd == "" {
-			pd = `C:\ProgramData`
-		}
-		return filepath.Join(pd, "RoutineOps", "logs", "agent.log")
+		return filepath.Join(ProgramDataDir(), "RoutineOps", "logs", "agent.log")
 	case "darwin":
 		return filepath.Join("/Library/Logs/RoutineOps", "agent.log")
 	default:

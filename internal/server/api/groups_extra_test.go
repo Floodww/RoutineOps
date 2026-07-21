@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -105,6 +106,11 @@ func TestRunScriptOnGroup_Created(t *testing.T) {
 	macScriptID := createScript(t, rtr, tok, "run-script-mac", "macOS")
 	linuxScriptID := createScript(t, rtr, tok, "run-script-linux", "linux")
 	deviceID, _ := createDevice(t, rtr, tok, "run-host", "macos")
+	// Скрипты гоняются только на active (безопасность: pending/pending_approval не
+	// исполняют скрипты). Активируем устройство — иначе fan-out его не таргетит.
+	if err := db.UpdateDeviceStatus(context.Background(), deviceID, "active"); err != nil {
+		t.Fatalf("activate device: %v", err)
+	}
 
 	// Добавляем устройство в группу.
 	mb, _ := json.Marshal(map[string]string{"device_id": deviceID})

@@ -12,11 +12,19 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
 type contextKey string
 
 const claimsKey contextKey = "claims"
+
+// validRoles — полный список ролей системы. Иерархии нет: requireRole сравнивает
+// точным равенством, поэтому "выше/ниже" здесь не выражается и не подразумевается.
+// Один список на пакет намеренно: раньше он жил локальной переменной в inviteUser,
+// и добавление роли требовало помнить про все остальные места проверки.
+var validRoles = map[string]bool{"it_admin": true, "viewer": true}
 
 // newJTI генерирует случайный идентификатор токена (jti) для блок-листа отзыва (M-7).
 func newJTI() (string, error) {
@@ -31,7 +39,49 @@ type jwtClaims struct {
 	UserID string `json:"user_id"`
 	Email  string `json:"email"`
 	Role   string `json:"role"`
+	// TokenID непустой ⇔ запрос пришёл по СЕРВИСНОМУ токену, а не от человека.
+	// `json:"-"` обязателен: структура сериализуется в JWT, и поле не должно ни
+	// попадать в выпускаемые токены, ни читаться из присланных — иначе признак
+	// «я человек/я токен» стал бы управляемым извне.
+	TokenID string `json:"-"`
 	jwt.RegisteredClaims
+}
+
+// requireHuman отбивает сервисные токены на «личных» ручках.
+//
+// У токена НЕТ своего аккаунта: claims.UserID — это id создавшего админа (нужен, чтобы
+// аудит связывался с живым пользователем). Поэтому любой хендлер, трактующий UserID как
+// «текущего человека», под токеном работает с ЧУЖОЙ учёткой. Адверс-ревью нашло это как
+// настоящую дыру: viewer-токен, выданный для CI, читал telegram link_token создавшего
+// админа (→ перехват его алертов) и менял ему пароль, инвалидируя все живые сессии.
+//
+// Правильная модель: у сервисного токена личного аккаунта нет, значит личные ручки для
+// него не «работают с чужим», а недоступны. Для автоматизации они и бессмысленны.
+//
+// Отсюда общее правило, по которому и надо решать, вешать ли гард на новую ручку:
+//
+//	ВСЁ, ЧТО ВЫПУСКАЕТ ИЛИ ПОВЫШАЕТ ПРАВА — ТОЛЬКО ЧЕЛОВЕКОМ.
+//
+// Иначе модель отзыва («удалили строку токена — доступа нет») превращается в фикцию:
+// утёкший токен успевает выписать себе что-нибудь, переживающее отзыв. Первый раунд
+// ревью поймал теневой токен через /api-tokens; второй — приглашение живого админа
+// через /users/invite, и это было ХУЖЕ, потому что строки в users нет в списке
+// токенов и при разборе инцидента её не находят.
+//
+// 🔴 Искать такие ручки по «где claims.UserID трактуется как личность» НЕДОСТАТОЧНО —
+// именно так /users/invite и был пропущен: там UserID идёт лишь в аудит и invited_by.
+// Опасность не в том, ЧЬЮ личность ручка записывает, а в том, ЧТО она выпускает.
+//
+// Сознательно НЕ закрыты: энроллмент и переэнроллмент устройств (это и есть штатная
+// работа автоматизации) и отзыв admin-access (защитное действие, запрещать вредно).
+func requireHuman(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, ok := r.Context().Value(claimsKey).(*jwtClaims); ok && c.TokenID != "" {
+			http.Error(w, "недоступно для сервисного токена", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *Handler) jwtMiddleware(next http.Handler) http.Handler {
@@ -44,6 +94,41 @@ func (h *Handler) jwtMiddleware(next http.Handler) http.Handler {
 		}
 		if tokenStr == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Сервисный токен — ОТДЕЛЬНАЯ ветка до разбора JWT: это не JWT, и парсер
+		// на нём вернул бы просто «unauthorized», без шанса отличить неверный
+		// токен от испорченной сессии. Различаем по префиксу (storage.APITokenPrefix).
+		//
+		// Ниже по коду идут проверки, которые к сервисному токену НЕ применимы и
+		// применяться не должны: блок-лист jti (у токена нет jti, отзыв — удаление
+		// строки) и token-epoch по password_changed_at (смена пароля админом не
+		// обязана ронять работающую автоматизацию — для этого есть явный отзыв).
+		// Поэтому ветка возвращает управление сразу, а не проваливается вниз.
+		if strings.HasPrefix(tokenStr, storage.APITokenPrefix) {
+			tok, terr := h.db.AuthenticateAPIToken(r.Context(), tokenStr)
+			if terr != nil {
+				// Fail-closed, как и остальные проверки в этом миддлваре.
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if tok == nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Роль берём ИЗ ТОКЕНА, а не из users: она зафиксирована при выпуске.
+			// Email в формате "token:<имя>" — чтобы в журнале аудита действие
+			// автоматизации нельзя было спутать с действием человека.
+			// UserID = создатель: нужен, чтобы аудит связывался с живым пользователем.
+			// 🔴 Но это НЕ личность актора: под токеном действует автоматизация, а не
+			// админ. Все «личные» ручки закрыты от токена requireHuman — см. его док.
+			ctx := context.WithValue(r.Context(), claimsKey, &jwtClaims{
+				UserID:  tok.CreatedBy,
+				Email:   "token:" + tok.Name,
+				Role:    tok.Role,
+				TokenID: tok.ID,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		claims := &jwtClaims{}
@@ -249,6 +334,20 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 // гейтинга UI по роли (фронт скрывает admin-действия для viewer).
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	// Сервисный токен отдаёт СВОЮ личность и СВОЮ роль. Чтение user-строки создателя
+	// вернуло бы роль админа (it_admin) для viewer-токена — ровно противоположное тому,
+	// что энфорсит requireRole, — и заодно раздало бы email и id админа любому
+	// держателю токена. /me объявлен источником роли для гейтинга UI, так что врать
+	// здесь особенно дорого: клиент включил бы админские действия, которые все 403'ят.
+	if claims.TokenID != "" {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"id":    claims.TokenID,
+			"email": claims.Email, // "token:<имя>"
+			"name":  strings.TrimPrefix(claims.Email, "token:"),
+			"role":  claims.Role,
+		})
+		return
+	}
 	user, err := h.db.GetUserByID(r.Context(), claims.UserID)
 	if err != nil || user == nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)

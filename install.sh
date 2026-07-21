@@ -21,6 +21,19 @@ done
 
 echo "=== RoutineOps Server Install ==="
 
+# install.env заполняется руками (install.env.example: «nano install.env»), .env.prod
+# правится при смене адреса/SMTP — оба гитигнорятся, так что оба доезжают с Windows с
+# CRLF. Хвостовой CR невидим, а последствия молчаливые: PUBLIC_ADDR="1.2.3.4\r" мимо
+# теста `*[!0-9.]*` уезжает в SAN как DNS вместо IP (агенты по IP ловят TLS-mismatch),
+# cert_covers не матчит — серт перевыпускается каждый прогон, а строка PUBLIC_WEB_URL
+# переписывается с тем же CR обратно в .env.prod, т.е. само не чинится никогда. CR в
+# ADMIN_PASSWORD ещё и запекается в сид админа: браузер CR не шлёт → вход невозможен.
+# Чиним один раз на файл, ДО чтения — иначе каждый потребитель ниже пришлось бы латать
+# отдельно (два `.`-сорса, sed-парсер PUBLIC_WEB_URL, grep -qxF идемпотентности).
+for _f in install.env .env.prod; do
+  [ -f "$_f" ] && grep -q $'\r' "$_f" && { sed -i 's/\r$//' "$_f"; echo "!! $_f был в CRLF (Windows) — привёл к LF"; }
+done
+
 # Быстрый старт: параметры берём из install.env (cp install.env.example install.env,
 # заполни PUBLIC_ADDR/ADMIN_*). Так все нужные значения уходят в установку сразу и
 # наверняка, а не забываются в инлайновых env. Инлайновые VAR=... ./install.sh

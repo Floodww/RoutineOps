@@ -103,23 +103,23 @@ export default function Policies() {
 
   if (creating) {
     return (
-      <div className="max-w-2xl">
+      <div className="flex flex-col gap-5 max-w-2xl">
         <button
           type="button"
           onClick={() => setCreating(false)}
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors"
+          className="flex items-center gap-1.5 self-start text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4" strokeWidth={2} />
           Назад к политикам
         </button>
 
-        <h1 className="text-2xl font-semibold mb-7">Новая политика</h1>
+        <h1 className="text-xl font-semibold text-foreground">Новая политика</h1>
 
-        <div className="space-y-6">
+        <div className="glass flex flex-col gap-6 px-5 py-[18px]">
           {/* Condition editor – Fleet-style */}
           <div>
-            <Label className="text-sm font-medium mb-2 block">Условие</Label>
-            <div className="rounded-md border bg-muted overflow-hidden font-mono text-sm">
+            <Label className="text-sm font-medium text-soft mb-2 block">Условие</Label>
+            <div className="rounded-md border border-input bg-transparent overflow-hidden font-mono text-sm focus-within:ring-1 focus-within:ring-ring">
               <div className="flex items-start gap-3 px-4 py-3">
                 <span className="text-xs text-muted-foreground select-none mt-px">1</span>
                 <input
@@ -141,7 +141,7 @@ export default function Policies() {
 
           {/* Rule type toggle */}
           <div>
-            <Label className="text-sm font-medium mb-2 block">Тип правила</Label>
+            <Label className="text-sm font-medium text-soft mb-2 block">Тип правила</Label>
             <div className="flex gap-2">
               {(["allowed", "forbidden"] as const).map((t) => (
                 <button
@@ -152,7 +152,7 @@ export default function Policies() {
                     "px-3 py-1.5 rounded-md text-sm border transition-colors " +
                     (form.rule_type === t
                       ? t === "allowed"
-                        ? "bg-emerald-600/20 border-emerald-600/50 text-emerald-500 dark:text-emerald-400"
+                        ? "bg-emerald-600/20 border-emerald-600/50 text-emerald-600 dark:text-emerald-400"
                         : "bg-red-600/20 border-red-600/50 text-red-500 dark:text-red-400"
                       : "border-border text-muted-foreground hover:text-foreground")
                   }
@@ -165,7 +165,7 @@ export default function Policies() {
 
           {/* Compatible with */}
           <div>
-            <Label className="text-sm font-medium mb-2.5 block">Совместимо с</Label>
+            <Label className="text-sm font-medium text-soft mb-2.5 block">Совместимо с</Label>
             <div className="flex items-center gap-5">
               {PLATFORMS.map((p) => {
                 const on = platforms[p]
@@ -176,7 +176,7 @@ export default function Policies() {
                     onClick={() => togglePlatform(p)}
                     className="flex items-center gap-1.5 text-sm transition-colors"
                   >
-                    <span className={on ? "text-emerald-500 dark:text-emerald-400" : "text-muted-foreground"}>
+                    <span className={on ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}>
                       {on ? "✓" : "—"}
                     </span>
                     <span className={on ? "text-foreground" : "text-muted-foreground"}>{p}</span>
@@ -188,7 +188,7 @@ export default function Policies() {
 
           {/* Optional device scope */}
           <div>
-            <Label className="text-sm font-medium mb-2 block">Устройство <span className="text-muted-foreground font-normal">(необязательно)</span></Label>
+            <Label className="text-sm font-medium text-soft mb-2 block">Устройство <span className="text-muted-foreground font-normal">(необязательно)</span></Label>
             <Input
               placeholder="UUID устройства — пусто = глобальное"
               value={form.device_id}
@@ -202,7 +202,6 @@ export default function Policies() {
             <Button
               onClick={addRule}
               disabled={submitting || !form.software_name || !Object.values(platforms).some(Boolean)}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white border-0"
             >
               {submitting ? "Сохранение..." : "Сохранить"}
             </Button>
@@ -220,34 +219,36 @@ export default function Policies() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Политики</h1>
+        <h1 className="text-xl font-semibold text-foreground">Политики</h1>
         <Button size="sm" onClick={() => setCreating(true)}>
           + Новая политика
         </Button>
       </div>
 
-      <Input
-        placeholder="Поиск по программе..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="max-w-sm"
-      />
+      <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
+        <Input
+          placeholder="Поиск по программе..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="max-w-sm"
+        />
+      </div>
 
       {loading ? (
         <p className="text-muted-foreground text-sm">Загрузка...</p>
       ) : (
-        <div className="rounded-lg border">
+        <div className="glass overflow-hidden">
           <Table>
             <TableHeader>
-              <TableRow>
-                <TableHead>Программа</TableHead>
-                <TableHead>Тип</TableHead>
-                <TableHead title="Устройств соответствует / нарушает">Pass / Fail</TableHead>
-                <TableHead title="Устройств в области действия правила">Охват</TableHead>
-                <TableHead>Устройство</TableHead>
-                <TableHead>Обновлено</TableHead>
+              <TableRow className="border-t-0 hover:bg-transparent">
+                <TableHead className="text-xs">Программа</TableHead>
+                <TableHead className="text-xs">Тип</TableHead>
+                <TableHead className="text-xs" title="Устройств соответствует / нарушает">Pass / Fail</TableHead>
+                <TableHead className="text-xs" title="Устройств в области действия правила">Охват</TableHead>
+                <TableHead className="text-xs">Устройство</TableHead>
+                <TableHead className="text-xs">Обновлено</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -257,8 +258,8 @@ export default function Policies() {
                 const filtered = q ? rules.filter((r) => r.software_name.toLowerCase().includes(q)) : rules
                 if (filtered.length === 0) {
                   return (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
                         {rules.length === 0 ? "Нет политик" : "Ничего не найдено"}
                       </TableCell>
                     </TableRow>
@@ -268,39 +269,39 @@ export default function Policies() {
                 <TableRow
                   key={r.id}
                   onClick={() => navigate(`/policies/${r.id}`)}
-                  className="cursor-pointer"
+                  className="cursor-pointer glass-hover"
                 >
-                  <TableCell className="font-medium font-mono text-sm">
+                  <TableCell className="px-4 py-3 font-medium font-mono text-sm text-foreground">
                     {r.software_name}
                     {r.platforms && r.platforms.length > 0 && r.platforms.length < 3 && (
                       <div className="text-[10px] text-muted-foreground font-sans mt-0.5">{r.platforms.join(", ")}</div>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-4 py-3">
                     <Badge variant={r.rule_type === "allowed" ? "success" : "destructive"}>
                       {r.rule_type === "allowed" ? "Разрешено" : "Запрещено"}
                     </Badge>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-4 py-3">
                     <PassFail c={compliance[r.id]} />
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs tabular-nums">
+                  <TableCell className="px-4 py-3 text-muted-foreground text-xs tabular-nums">
                     {compliance[r.id] ? compliance[r.id].in_scope : "…"}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs font-mono">
+                  <TableCell className="px-4 py-3 text-muted-foreground text-xs font-mono">
                     {/* group_id раньше игнорировался — групповое правило выглядело как глобальное */}
                     {r.device_id ? r.device_id.slice(0, 8) : r.group_id ? "Группа" : "Глобальное"}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
+                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">
                     {formatDistanceToNow(r.updated_at)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-4 py-3">
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); setConfirmDelete(r) }}
                       className="text-muted-foreground hover:text-destructive transition-colors"
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Trash2 className="h-4 w-4" strokeWidth={2} />
                     </button>
                   </TableCell>
                 </TableRow>

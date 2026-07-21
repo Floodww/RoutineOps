@@ -36,7 +36,7 @@ export function Select({ value, onChange, options, placeholder = "Выберит
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <span className={selected ? "text-foreground" : "text-muted-foreground"}>
           {selected ? selected.label : placeholder}
@@ -45,7 +45,8 @@ export function Select({ value, onChange, options, placeholder = "Выберит
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full mt-1 z-50 rounded-md border border-border bg-card py-1 shadow-lg">
+        // Выпадающий список — контрол: стекло, но радиус меньше карточного.
+        <div className="glass rounded-lg absolute left-0 right-0 top-full mt-1 z-50 overflow-hidden py-1">
           {options.map((opt) => (
             <button
               key={opt.value}
@@ -61,7 +62,7 @@ export function Select({ value, onChange, options, placeholder = "Выберит
               )}
             >
               <span className="flex-1">{opt.label}</span>
-              {opt.value === value && <Check className="h-3.5 w-3.5 text-emerald-500" />}
+              {opt.value === value && <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-500" />}
             </button>
           ))}
         </div>

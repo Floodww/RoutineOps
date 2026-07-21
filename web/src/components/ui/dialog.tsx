@@ -34,7 +34,8 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 -translate-x-1/2 -translate-y-1/2 grid w-full max-w-lg gap-4 border bg-background p-6 shadow-xl sm:rounded-xl",
+        // Модалка — карта: поверхность целиком из .glass (фон, блюр, бордер, радиус 16px, тень).
+        "glass fixed left-[50%] top-[50%] z-50 -translate-x-1/2 -translate-y-1/2 grid w-full max-w-lg gap-4 p-6",
         "data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
         className
       )}

@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
+import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
+import SpotlightCard from "@/components/SpotlightCard"
 
 export default function ResetPassword() {
   const [searchParams] = useSearchParams()
@@ -40,27 +42,41 @@ export default function ResetPassword() {
 
   if (!token) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Card className="w-full max-w-sm">
-          <CardContent className="pt-6">
-            <p className="text-destructive text-sm">Неверная ссылка.</p>
-            <Link to="/login" className="text-sm text-primary hover:underline mt-2 block">На страницу входа</Link>
+      // Без bg-background: карта стоит прямо на фоне body с радиальными бликами.
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <SpotlightCard as={Card} className="w-full max-w-sm">
+          <CardHeader className="px-5 pt-6 pb-2">
+            <CardTitle className="flex items-center justify-center gap-2.5 py-2 text-foreground">
+              <RoutineOpsLogo size={32} />
+              <span className="text-lg font-semibold tracking-tight">RoutineOps</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-5 pb-6">
+            {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
+                берём тот же красный, что у алерт-цифры на дашборде. */}
+            <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">Неверная ссылка.</p>
+            <Link to="/login" className="mt-2 block text-sm text-brand hover:underline">На страницу входа</Link>
           </CardContent>
-        </Card>
+        </SpotlightCard>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Новый пароль</CardTitle>
+    // Без bg-background: карта стоит прямо на фоне body с радиальными бликами.
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <SpotlightCard as={Card} className="w-full max-w-sm">
+        <CardHeader className="px-5 pt-6 pb-2">
+          <CardTitle className="flex items-center justify-center gap-2.5 py-2 text-foreground">
+            <RoutineOpsLogo size={32} />
+            <span className="text-lg font-semibold tracking-tight">RoutineOps</span>
+          </CardTitle>
+          <p className="text-center text-xs text-muted-foreground">Новый пароль</p>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-5 pb-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="password">Новый пароль</Label>
+              <Label htmlFor="password" className="text-soft">Новый пароль</Label>
               <Input
                 id="password"
                 type="password"
@@ -71,7 +87,7 @@ export default function ResetPassword() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="confirm">Подтвердите пароль</Label>
+              <Label htmlFor="confirm" className="text-soft">Подтвердите пароль</Label>
               <Input
                 id="confirm"
                 type="password"
@@ -80,13 +96,15 @@ export default function ResetPassword() {
                 required
               />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
+                берём тот же красный, что у алерт-цифры на дашборде. */}
+            {error && <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Сохранение..." : "Сохранить пароль"}
             </Button>
           </form>
         </CardContent>
-      </Card>
+      </SpotlightCard>
     </div>
   )
 }

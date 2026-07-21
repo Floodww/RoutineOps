@@ -94,3 +94,75 @@ func TestDetectOfflineUnlock_StillLocked(t *testing.T) {
 		t.Fatalf("пока заблокировано, колбэк не дёргаем: called=%v locked=%v", called, m.Locked())
 	}
 }
+
+// MarkUnlocked (Windows-оверлей) кладёт в файл hash сверенного лока: снятие
+// ТЕКУЩЕГО лока легитимно — детект синхронизирует память, зовёт колбэк и
+// durable-сохраняет LastUnlockedHash (реконсиляция не пере-запрёт по
+// устаревшему desired).
+func TestDetectOfflineUnlock_MarkedWithCurrentHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock.json")
+	fl := &fakeLocker{}
+	m := New(path, fl, quietLog())
+	hash := bcryptHash(t, "pw")
+	if err := m.Lock("r1", hash, "увольнение"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkUnlocked(path, hash); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotReq, gotHash string
+	m.detectOfflineUnlock(func(reqID, h string) { gotReq, gotHash = reqID, h })
+
+	if gotReq != "r1" || gotHash != hash {
+		t.Fatalf("колбэк ожидали с (r1, hash), got (%q, %q)", gotReq, gotHash)
+	}
+	if m.Locked() {
+		t.Fatal("после легитимного снятия Manager должен быть разблокирован")
+	}
+	if got := m.LastUnlockedHash(); got != hash {
+		t.Fatalf("LastUnlockedHash=%q, ожидали hash снятого лока", got)
+	}
+	st, err := ReadState(path)
+	if err != nil || st.Locked || st.LastUnlockedHash != hash {
+		t.Fatalf("на диске ожидали {unlocked, last=hash}, got %+v (err=%v)", st, err)
+	}
+}
+
+// Гонка со сменой лока: оверлей, живший под старым H1, затёр файл уже ПОСЛЕ
+// применения нового лока H2. Маркер в файле (H1) не совпадает с текущим (H2) —
+// снятие НЕлегитимно: замок не опускается, колбэк не зовётся, файл
+// пере-утверждается текущим locked-состоянием (до фикса демон затирал и память,
+// и диск «разблокированным», а в худшем варианте durable-запоминал
+// LastUnlockedHash=H2 — kill-switch выключался насовсем).
+func TestDetectOfflineUnlock_StaleMarkerReassertsLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock.json")
+	fl := &fakeLocker{}
+	m := New(path, fl, quietLog())
+	oldHash := bcryptHash(t, "old-pw")
+	newHash := bcryptHash(t, "new-pw")
+	if err := m.Lock("r2", newHash, "эскалация ИБ"); err != nil {
+		t.Fatal(err)
+	}
+	// Оверлей сверил пароль СТАРОГО лока и затёр файл своим маркером.
+	if err := MarkUnlocked(path, oldHash); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	m.detectOfflineUnlock(func(string, string) { called = true })
+
+	if called {
+		t.Fatal("колбэк вызван для снятия устаревшего лока")
+	}
+	if !m.Locked() || m.CurrentHash() != newHash {
+		t.Fatalf("текущий лок H2 должен остаться: locked=%v hash=%q", m.Locked(), m.CurrentHash())
+	}
+	st, err := ReadState(path)
+	if err != nil || !st.Locked || st.Hash != newHash {
+		t.Fatalf("на диске ожидали пере-утверждённый locked-H2, got %+v (err=%v)", st, err)
+	}
+	if got := m.LastUnlockedHash(); got != "" {
+		t.Fatalf("LastUnlockedHash=%q — устаревшее снятие не должно запоминаться (реконсиляция бы навсегда пропускала re-lock)", got)
+	}
+}

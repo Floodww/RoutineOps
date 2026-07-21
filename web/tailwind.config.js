@@ -14,6 +14,9 @@ export default {
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        // Вторичный слой текста: заголовки/значения — foreground (#fff в тёмной),
+        // тело и подписи строк — soft, третичное — muted-foreground.
+        soft: "hsl(var(--soft))",
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
@@ -40,6 +43,7 @@ export default {
         },
         brand: {
           DEFAULT: "hsl(var(--brand))",
+          alt: "hsl(var(--brand-alt))",
           deep: "hsl(var(--brand-deep))",
         },
       },

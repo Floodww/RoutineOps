@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { Copy, Check } from "lucide-react"
-import api, { Device, CreateDeviceResponse, DeviceGroup } from "@/lib/api"
+import { Copy, Check, ChevronRight } from "lucide-react"
+import api, { Device, CreateDeviceResponse, DeviceGroup, DEVICE_STATUS } from "@/lib/api"
 import { GroupBadges, groupAccent } from "@/components/GroupBadge"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -28,7 +29,7 @@ function OnlineBadge({ device }: { device: Device }) {
   return (
     <span className="flex items-center gap-1.5">
       <span className={`h-2 w-2 rounded-full flex-shrink-0 ${online ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
-      <span className={`text-sm ${online ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
+      <span className={`text-[13px] ${online ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
         {online ? "Онлайн" : "Офлайн"}
       </span>
     </span>
@@ -190,7 +191,7 @@ export default function Devices() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
 
   const searching = query.trim() !== ""
   const filtering = searching || groupId !== ALL_GROUPS
@@ -201,9 +202,9 @@ export default function Devices() {
   const rows = [...pendingRows, ...devices]
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Устройства</h1>
+        <h1 className="text-xl font-semibold text-foreground">Устройства</h1>
         {isAdmin && (
         <Dialog open={dialogOpen} onOpenChange={(o) => { setDialogOpen(o); if (!o) resetDialog() }}>
           <DialogTrigger asChild>
@@ -240,7 +241,7 @@ export default function Devices() {
                   Запустите на целевой машине. Токен действует 24ч.
                 </p>
                 <div className="relative">
-                  <pre className="rounded-md border bg-muted px-3 py-3 text-xs font-mono break-all whitespace-pre-wrap pr-10">
+                  <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono text-soft break-all whitespace-pre-wrap pr-10">
                     {enrollCommand()}
                   </pre>
                   <button
@@ -248,7 +249,7 @@ export default function Devices() {
                     onClick={copyCommand}
                     className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:text-foreground transition-colors"
                   >
-                    {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    {copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-500" /> : <Copy className="h-4 w-4" />}
                   </button>
                 </div>
                 <div className="text-xs text-muted-foreground space-y-0.5">
@@ -292,7 +293,10 @@ export default function Devices() {
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
+      {/* Фильтры живут в отдельной стеклянной панели, а не внутри карты таблицы:
+          карте таблицы нужен overflow-hidden (иначе ховер последней строки вылезает
+          за скругление), а он обрезал бы выпадашку Select'а. */}
+      <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
         <Input
           placeholder="Поиск: имя, IP, MAC, серийник, ОС, CPU..."
           value={query}
@@ -310,22 +314,22 @@ export default function Devices() {
         />
       </div>
 
-      <div className="rounded-lg border">
+      <div className="glass overflow-hidden">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Устройство</TableHead>
-              <TableHead>Группа</TableHead>
-              <TableHead>IP</TableHead>
-              <TableHead>Статус</TableHead>
-              <TableHead>Агент</TableHead>
-              <TableHead>Последний раз</TableHead>
+            <TableRow className="border-t-0 hover:bg-transparent">
+              <TableHead className="text-xs">Устройство</TableHead>
+              <TableHead className="text-xs">Группа</TableHead>
+              <TableHead className="text-xs">IP</TableHead>
+              <TableHead className="text-xs">Статус</TableHead>
+              <TableHead className="text-xs">Агент</TableHead>
+              <TableHead className="text-xs">Последний раз</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
                   {filtering ? "Ничего не найдено" : "Нет устройств"}
                 </TableCell>
               </TableRow>
@@ -336,15 +340,15 @@ export default function Devices() {
               return (
               <TableRow
                 key={d.id}
-                className="cursor-pointer border-l-2"
+                className="cursor-pointer border-l-2 glass-hover"
                 // Рамка цветом группы. Без группы — прозрачная того же размера, иначе
                 // строки «прыгали» бы по горизонтали при появлении цвета.
                 style={{ borderLeftColor: accent ?? "transparent" }}
                 onClick={() => navigate(`/devices/${d.id}`)}
               >
-                <TableCell>
+                <TableCell className="px-4 py-3">
                   <div className="flex flex-col gap-0.5">
-                    <span className="font-medium">{d.hostname}</span>
+                    <span className="text-sm font-medium text-foreground">{d.hostname}</span>
                     <span className="text-xs text-muted-foreground">
                       {osIcon(d.os)} {d.os}{d.os_version ? ` ${d.os_version}` : ""}
                     </span>
@@ -353,18 +357,33 @@ export default function Devices() {
                     )}
                   </div>
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-4 py-3">
                   <GroupBadges groups={d.groups} />
                 </TableCell>
-                <TableCell className="text-muted-foreground text-sm">{d.ip_address || "—"}</TableCell>
-                <TableCell>
-                  <OnlineBadge device={d} />
+                <TableCell className="px-4 py-3 text-muted-foreground text-xs">{d.ip_address || "—"}</TableCell>
+                <TableCell className="px-4 py-3">
+                  {/* Онлайн-бейдж — это свежесть last_seen_at, а НЕ статус устройства.
+                      Пока их не различали, отклонённая или ждущая одобрения машина,
+                      которая исправно шлёт хартбит, выглядела обычной зелёной строкой.
+                      Статус показываем только когда он не «активен» — иначе колонка
+                      превращается в шум на здоровом парке. */}
+                  <div className="flex items-center gap-2">
+                    <OnlineBadge device={d} />
+                    {d.status !== "active" && (
+                      <Badge variant={DEVICE_STATUS[d.status]?.variant ?? "outline"}>
+                        {DEVICE_STATUS[d.status]?.label ?? d.status}
+                      </Badge>
+                    )}
+                  </div>
                 </TableCell>
-                <TableCell className="text-muted-foreground text-xs font-mono">
+                <TableCell className="px-4 py-3 text-muted-foreground text-xs font-mono">
                   {d.agent_version || "—"}
                 </TableCell>
-                <TableCell className="text-muted-foreground text-xs">
-                  {d.last_seen_at ? formatDistanceToNow(d.last_seen_at) : "—"}
+                <TableCell className="px-4 py-3 text-muted-foreground text-xs">
+                  <span className="flex items-center justify-between gap-3">
+                    {d.last_seen_at ? formatDistanceToNow(d.last_seen_at) : "—"}
+                    <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />
+                  </span>
                 </TableCell>
               </TableRow>
               )

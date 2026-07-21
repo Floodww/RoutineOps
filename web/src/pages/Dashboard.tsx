@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ElementType, type CSSProperties } from "react"
 import { useNavigate } from "react-router-dom"
-import { Monitor, FileCode2, Shield, Bell, ChevronRight, Activity, ShieldAlert, KeyRound, UserCog } from "lucide-react"
-import api, { Device, Script, PolicyRule, Alert } from "@/lib/api"
+import { Monitor, FileCode2, Shield, Bell, ChevronRight, ShieldAlert, KeyRound, UserCog } from "lucide-react"
+import api, { Device, Script, PolicyRule, Alert, DEVICE_STATUS } from "@/lib/api"
 import { formatDistanceToNow } from "@/lib/time"
 import { toast } from "@/lib/toast"
 import SpotlightCard from "@/components/SpotlightCard"
@@ -16,6 +16,19 @@ interface AuditEntry {
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
 
+// Счётчик читается «Активных: 12», а бейдж на карточке — «Активен». Одна карта на оба
+// падежа звучала бы криво в одном из мест, поэтому здесь только форма для счётчиков;
+// цвет и порядок по-прежнему берутся из общей DEVICE_STATUS.
+const STATUS_PLURAL: Record<string, string> = {
+  active:           "Активных",
+  enrolled:         "Зарегистрированных",
+  pending:          "Ожидающих",
+  pending_approval: "Ожидают одобрения",
+  rejected:         "Отклонённых",
+  blocked:          "Заблокированных",
+  decommissioned:   "Выведенных из эксплуатации",
+}
+
 const ACTION_LABELS: Record<string, string> = {
   block_device:          "заблокировал устройство",
   unblock_device:        "разблокировал устройство",
@@ -24,6 +37,14 @@ const ACTION_LABELS: Record<string, string> = {
   revoke_admin_request:  "отозвал права",
   create_device:         "добавил устройство",
   delete_device:         "удалил устройство",
+  approve_device:        "одобрил устройство",
+  reject_device:         "отклонил устройство",
+  approve_pending_bulk:  "одобрил очередь энроллмента",
+  reject_pending_bulk:   "отклонил очередь энроллмента",
+  create_bulk_token:     "выпустил массовый токен",
+  decommission_device:   "вывел устройство из эксплуатации",
+  create_api_token:      "выпустил API-токен",
+  revoke_api_token:      "отозвал API-токен",
   reenroll_device:       "перерегистрировал устройство",
   lock_device:           "заблокировал экран устройства",
   unlock_device:         "разблокировал экран устройства",
@@ -70,6 +91,11 @@ const ACTION_CATEGORY: Record<string, EventCategory> = {
   approve_admin_request: "admin", reject_admin_request: "admin", revoke_admin_request: "admin",
   create_device: "device", delete_device: "device", reenroll_device: "device",
   unblock_device: "device", unlock_device: "device",
+  // Выпуск токена и одобрение — выдача доступа к парку, это security, а не «контент»:
+  // без явной категории они падали в content и рисовались нейтральной иконкой.
+  create_bulk_token: "security", approve_device: "security", approve_pending_bulk: "security",
+  create_api_token: "security", revoke_api_token: "security",
+  reject_device: "device", reject_pending_bulk: "device", decommission_device: "device",
   // Запуск скрипта — исполнение кода на устройстве/парке, не правка контента.
   run_script: "device", run_script_on_group: "device",
   create_device_group: "device", update_device_group: "device", delete_device_group: "device",
@@ -114,8 +140,9 @@ function useCountUp(target: number, duration = 600): number {
   return value
 }
 
-function StatValue({ value }: { value: number }) {
-  return <p className="text-2xl font-semibold tabular-nums">{useCountUp(value)}</p>
+function StatValue({ value, className }: { value: number; className?: string }) {
+  // 30px/300 из хендоффа: крупная тонкая цифра — главный якорь плитки.
+  return <p className={`text-[30px] font-light leading-[1.1] tabular-nums mt-0.5 ${className ?? "text-foreground"}`}>{useCountUp(value)}</p>
 }
 
 function osFamily(os: string): "macOS" | "Windows" | "Linux" {
@@ -126,11 +153,6 @@ function osFamily(os: string): "macOS" | "Windows" | "Linux" {
   return "Linux"
 }
 
-const OS_COLOR: Record<string, string> = {
-  macOS:   "bg-blue-500",
-  Windows: "bg-violet-500",
-  Linux:   "bg-amber-500",
-}
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -163,9 +185,22 @@ export default function Dashboard() {
   }, [])
 
   const now = Date.now()
-  const active   = devices.filter((d) => d.status === "active").length
-  const enrolled = devices.filter((d) => d.status === "enrolled").length
-  const pending  = devices.filter((d) => d.status === "pending").length
+  // Считаем ПО ФАКТУ, а не перечислением статусов руками: раньше карточка знала четыре
+  // строки, сумма молча расходилась с «Всего устройств», а строка «Ожидающих» вообще
+  // была мёртвой — считала литеральный 'pending', который сервер не отдаёт
+  // (ListEnrolledDevices режет его в SQL). Порядок строк — как в DEVICE_STATUS.
+  const statusCounts = devices.reduce<Record<string, number>>((acc, d) => {
+    acc[d.status] = (acc[d.status] ?? 0) + 1
+    return acc
+  }, {})
+  const statusOrder = Object.keys(DEVICE_STATUS)
+  const statusRows = Object.entries(statusCounts)
+    .sort((a, b) => statusOrder.indexOf(a[0]) - statusOrder.indexOf(b[0]))
+    .map(([status, count]) => ({
+      label: STATUS_PLURAL[status] ?? DEVICE_STATUS[status as keyof typeof DEVICE_STATUS]?.label ?? status,
+      dot: DEVICE_STATUS[status as keyof typeof DEVICE_STATUS]?.dot ?? "bg-muted-foreground/40",
+      count,
+    }))
   const online   = devices.filter((d) => d.last_seen_at && now - new Date(d.last_seen_at).getTime() < ONLINE_THRESHOLD_MS).length
   // API отдаёт acknowledged_at (timestamp | null), поля `acknowledged` не существует —
   // старый фильтр по нему считал ВСЕ алерты непринятыми.
@@ -186,68 +221,74 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Обзор</h1>
+    <div className="flex flex-col gap-5">
+      <h1 className="text-xl font-semibold text-foreground">Обзор</h1>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        {/* Цветом метим только то, что требует внимания: непрочитанные алерты.
-            Нулевые счётчики превращаем в CTA — три нуля подряд читаются как
-            «заброшенный продукт», а «Добавить …» зовёт к действию. */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {/* Цветом метим только то, что требует внимания: непрочитанные алерты
+            (красно-оранжевая колонка и цифра). Нулевые счётчики превращаем в CTA —
+            три нуля подряд читаются как «заброшенный продукт». */}
         {[
-          { label: "Всего устройств", value: devices.length, icon: Monitor,   sub: `${online} онлайн`, cta: "Подключить устройство", accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/devices")  },
-          { label: "Скриптов",        value: scripts.length,  icon: FileCode2, sub: "в библиотеке",     cta: "Добавить скрипт",       accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/scripts")  },
-          { label: "Политик",         value: policies.length, icon: Shield,    sub: "правил ПО",        cta: "Добавить политику",     accent: "border-t-brand",     iconColor: "text-brand",            onClick: () => navigate("/policies") },
-          { label: "Алертов",         value: unackedAlerts,   icon: Bell,      sub: "",                 cta: "",                      accent: unackedAlerts > 0 ? "border-t-destructive" : "border-t-border", iconColor: unackedAlerts > 0 ? "text-destructive" : "text-muted-foreground", onClick: () => navigate("/alerts") },
-        ].map(({ label, value, icon: Icon, sub, cta, accent, iconColor, onClick }) => (
+          { label: "Всего устройств", value: devices.length, icon: Monitor,   sub: `${online} онлайн`, cta: "Подключить устройство", onClick: () => navigate("/devices")  },
+          { label: "Скриптов",        value: scripts.length,  icon: FileCode2, sub: "в библиотеке",     cta: "Добавить скрипт",       onClick: () => navigate("/scripts")  },
+          { label: "Политик",         value: policies.length, icon: Shield,    sub: "правил ПО",        cta: "Добавить политику",     onClick: () => navigate("/policies") },
+          { label: "Алертов",         value: unackedAlerts,   icon: Bell,      sub: "неподтверждённых", cta: "",                      onClick: () => navigate("/alerts"), alert: true },
+        ].map(({ label, value, icon: Icon, sub, cta, onClick, alert }) => (
           <SpotlightCard
             as="button"
             type="button"
             key={label}
             onClick={onClick}
-            // Акцентная кромка идёт ПОСЛЕ `border-border`: className проходит через
-            // tailwind-merge внутри SpotlightCard, и более поздний класс выигрывает.
-            className={`rounded-lg border border-border border-t-2 ${accent} bg-card p-4 text-left hover:bg-accent/50 transition-colors`}
+            className="glass glass-hover flex min-h-[104px] overflow-hidden text-left"
           >
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs text-muted-foreground">{label}</span>
-              <Icon className={`h-4 w-4 ${iconColor}`} />
+            {/* Градиентная колонка 64px с иконкой — единственный цветной элемент
+                плитки; у алертов она красно-оранжевая. */}
+            <div className={`w-16 flex-shrink-0 flex items-center justify-center text-white ${alert && value > 0 ? "alert-gradient" : "brand-gradient"}`}>
+              <Icon className="h-[26px] w-[26px]" strokeWidth={2} />
             </div>
-            <StatValue value={value} />
-            {value === 0 && cta && !loadFailed ? (
-              // В светлой теме --brand (52%) даёт ~4:1 на белом — ниже AA для
-              // text-xs, поэтому CTA затемнён той же тональностью (~6.8:1).
-              <p className="text-xs font-medium text-[hsl(220_65%_42%)] dark:text-brand mt-1">{cta} →</p>
-            ) : sub ? (
-              <p className="text-xs text-muted-foreground mt-1">{sub}</p>
-            ) : null}
+            <div className="flex-1 min-w-0 flex flex-col px-4 py-3.5">
+              <span className="text-[13px] text-muted-foreground truncate">{label}</span>
+              <StatValue value={value} className={alert && value > 0 ? "text-[hsl(0_62%_45%)] dark:text-[hsl(0_72%_66%)]" : "text-foreground"} />
+              {value === 0 && cta && !loadFailed ? (
+                // В светлой теме --brand (52%) даёт ~4:1 на белом — ниже AA для
+                // text-xs, поэтому CTA затемнён той же тональностью (~6.8:1).
+                <p className="text-xs font-medium text-[hsl(220_65%_42%)] dark:text-brand mt-auto">{cta} →</p>
+              ) : sub ? (
+                <p className="text-xs text-muted-foreground mt-auto truncate">{sub}</p>
+              ) : null}
+            </div>
           </SpotlightCard>
         ))}
       </div>
 
-      {/* Two-column section */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+      {/* Two-column section: 2fr / 3fr. Именно так, а не grid-cols-5 + col-span:
+          при пяти равных колонках gap считается иначе и пропорция уезжает. */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[2fr_3fr]">
 
         {/* Left: Devices by OS + status breakdown */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="rounded-lg border bg-card p-4">
-            <h2 className="text-sm font-medium mb-4">Устройства по ОС</h2>
+        <div className="flex flex-col gap-5">
+          <div className="glass px-5 py-[18px]">
+            <h2 className="text-[15px] font-semibold text-foreground">Устройства по ОС</h2>
+            <p className="text-xs text-muted-foreground mb-4">Всего {devices.length}</p>
             {osEntries.length === 0 ? (
               <p className="text-xs text-muted-foreground">Нет данных</p>
             ) : (
-              <div className="space-y-3">
+              <div className="flex flex-col gap-3.5">
                 {osEntries.map(([os, count]) => (
                   <div key={os}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-muted-foreground">{os}</span>
-                      <span className="text-xs font-medium tabular-nums">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[13px] text-soft">{os}</span>
+                      <span className="text-[13px] text-foreground tabular-nums">
                         {count}
-                        <span className="text-muted-foreground font-normal"> · {Math.round((count / totalDevices) * 100)}%</span>
+                        <span className="text-muted-foreground"> · {Math.round((count / totalDevices) * 100)}%</span>
                       </span>
                     </div>
+                    {/* Полосы одного фирменного градиента: доля читается длиной,
+                        разноцветные ОС добавляли смысл, которого нет. */}
                     <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
                       <div
-                        className={`h-full rounded-full ${OS_COLOR[os] ?? "bg-zinc-500"} transition-all`}
+                        className="h-full rounded-full brand-gradient-h transition-all"
                         style={{ width: `${(count / totalDevices) * 100}%` }}
                       />
                     </div>
@@ -258,21 +299,20 @@ export default function Dashboard() {
           </div>
 
           {/* Status breakdown */}
-          <div className="rounded-lg border bg-card p-4">
-            <h2 className="text-sm font-medium mb-3">Статусы</h2>
-            <div className="space-y-2">
-              {[
-                { label: "Активных",           count: active,   dot: "bg-emerald-500" },
-                { label: "Зарегистрированных", count: enrolled, dot: "bg-blue-500"    },
-                { label: "Ожидающих",          count: pending,  dot: "bg-amber-500"   },
-                { label: "Заблокированных",    count: devices.filter((d) => d.status === "blocked").length, dot: "bg-red-500" },
-              ].map(({ label, count, dot }) => (
+          <div className="glass px-5 py-[18px]">
+            <h2 className="text-[15px] font-semibold text-foreground">Статусы</h2>
+            <p className="text-xs text-muted-foreground mb-3.5">Распределение парка</p>
+            <div className="flex flex-col gap-2.5">
+              {statusRows.length === 0 && (
+                <p className="text-xs text-muted-foreground">Нет устройств</p>
+              )}
+              {statusRows.map(({ label, count, dot }) => (
                 <div key={label} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2.5">
                     <span className={`h-2 w-2 rounded-full ${dot}`} />
-                    <span className="text-xs text-muted-foreground">{label}</span>
+                    <span className="text-[13px] text-soft">{label}</span>
                   </div>
-                  <span className="text-xs font-medium">{count}</span>
+                  <span className="text-[13px] font-semibold text-foreground tabular-nums">{count}</span>
                 </div>
               ))}
             </div>
@@ -280,23 +320,23 @@ export default function Dashboard() {
         </div>
 
         {/* Right: Activity feed */}
-        <div className="lg:col-span-3 rounded-lg border bg-card">
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <div className="flex items-center gap-2">
-              <Activity className="h-4 w-4 text-muted-foreground" />
-              <h2 className="text-sm font-medium">Активность</h2>
+        <div className="glass flex flex-col">
+          <div className="flex items-center justify-between px-5 pt-4 pb-3">
+            <div>
+              <h2 className="text-[15px] font-semibold text-foreground">Активность</h2>
+              <p className="text-xs text-muted-foreground">Последние события</p>
             </div>
             <button
               type="button"
               onClick={() => navigate("/audit-log")}
               className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              Все события <ChevronRight className="h-3 w-3" />
+              Все события <ChevronRight className="h-3.5 w-3.5" />
             </button>
           </div>
-          <div className="divide-y">
+          <div>
             {activity.length === 0 && (
-              <p className="text-xs text-muted-foreground px-4 py-6 text-center">Нет событий</p>
+              <p className="text-xs text-muted-foreground px-5 py-6 text-center">Нет событий</p>
             )}
             {activity.map((e, i) => {
               const cat = ACTION_CATEGORY[e.action] ?? "content"
@@ -304,15 +344,17 @@ export default function Dashboard() {
               return (
                 <div
                   key={e.id}
-                  className={`feed-item flex items-start gap-3 px-4 py-2.5 ${cat === "security" ? "bg-red-500/[0.04]" : ""}`}
+                  // last:rounded-b-2xl обязателен: у security-строки есть красная
+                  // подложка, и без скругления она заливала бы нижние углы карты.
+                  className={`feed-item flex items-start gap-3 px-5 py-2.5 border-t border-border last:rounded-b-2xl ${cat === "security" ? "bg-red-500/[0.06]" : ""}`}
                   style={{ "--i": i } as CSSProperties}
                 >
-                  <div className={`mt-0.5 h-6 w-6 rounded-full ${bg} flex items-center justify-center flex-shrink-0`}>
+                  <div className={`mt-px h-[26px] w-[26px] rounded-full ${bg} flex items-center justify-center flex-shrink-0`}>
                     <CatIcon className={`h-3.5 w-3.5 ${fg}`} />
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs leading-snug">
-                      <span className="font-medium">{e.user_email}</span>
+                    <p className="text-[13px] leading-snug text-soft">
+                      <span className="font-medium text-foreground">{e.user_email}</span>
                       {" "}
                       <span className={cat === "security" ? fg : "text-muted-foreground"}>
                         {ACTION_LABELS[e.action] ?? e.action}
@@ -328,36 +370,39 @@ export default function Dashboard() {
       </div>
 
       {/* Recent devices */}
-      <div className="rounded-lg border bg-card">
-        <div className="flex items-center justify-between px-4 py-3 border-b">
-          <h2 className="text-sm font-medium">Последние устройства</h2>
+      <div className="glass">
+        <div className="flex items-center justify-between px-5 pt-4 pb-3">
+          <div>
+            <h2 className="text-[15px] font-semibold text-foreground">Последние устройства</h2>
+            <p className="text-xs text-muted-foreground">Недавно на связи</p>
+          </div>
           <button
             type="button"
             onClick={() => navigate("/devices")}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
-            Все устройства <ChevronRight className="h-3 w-3" />
+            Все устройства <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </div>
-        <div className="divide-y">
+        <div>
+          {devices.length === 0 && (
+            <p className="text-xs text-muted-foreground px-5 py-6 text-center">Нет устройств</p>
+          )}
           {devices.slice(0, 5).map((d) => {
-            const statusColor: Record<Device["status"], string> = {
-              active:   "bg-emerald-500",
-              enrolled: "bg-blue-500",
-              pending:  "bg-amber-500",
-              blocked:  "bg-red-500",
-            }
+            // Фолбэк не декоративный: без него неизвестный статус давал className
+            // "... undefined" — точка молча становилась невидимой.
+            const dot = DEVICE_STATUS[d.status]?.dot ?? "bg-muted-foreground/40"
             return (
               <button
                 type="button"
                 key={d.id}
                 onClick={() => navigate(`/devices/${d.id}`)}
-                className="w-full flex items-center justify-between px-4 py-3 hover:bg-accent/50 transition-colors text-left"
+                className="w-full flex items-center justify-between px-5 py-3 border-t border-border glass-hover text-left last:rounded-b-2xl"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <span className={`h-2 w-2 rounded-full flex-shrink-0 ${statusColor[d.status]}`} />
+                  <span className={`h-2 w-2 rounded-full flex-shrink-0 ${dot}`} />
                   <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{d.hostname}</p>
+                    <p className="text-sm font-medium text-foreground truncate">{d.hostname}</p>
                     <p className="text-xs text-muted-foreground">{d.os}</p>
                   </div>
                 </div>

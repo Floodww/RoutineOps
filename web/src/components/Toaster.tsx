@@ -10,10 +10,13 @@ interface Item extends ToastInput {
 
 let counter = 0
 
+// Поверхность тоста — общее стекло (.glass несёт блюр, бордер, радиус 16px и тень).
+// Смысловые варианты перекрывают только фон и цвет текста: утилита bg-* идёт слоем
+// выше .glass, поэтому форма стекла остаётся, а красный/зелёный читаются как раньше.
 const variantClass: Record<ToastVariant, string> = {
-  default: "border bg-background text-foreground",
-  destructive: "border-destructive bg-destructive text-destructive-foreground",
-  success: "border-green-600 bg-green-600 text-white",
+  default: "glass text-foreground",
+  destructive: "glass border-destructive/60 bg-destructive text-destructive-foreground",
+  success: "glass border-emerald-500/60 bg-emerald-700 text-white",
 }
 
 export default function Toaster() {
@@ -33,7 +36,7 @@ export default function Toaster() {
           key={t.id}
           onOpenChange={(open) => { if (!open) remove(t.id) }}
           className={cn(
-            "relative flex items-start gap-3 rounded-md p-4 pr-8 shadow-lg",
+            "relative flex items-start gap-3 p-4 pr-8",
             variantClass[t.variant ?? "default"],
           )}
         >

@@ -50,13 +50,40 @@ export interface DeviceGroupRef {
   color: string
 }
 
+// Статусы устройства. Держим ПОЛНЫЙ список серверных значений (см. isCutOff в
+// internal/server/gateway): раньше юнион знал только четыре, а сервер уже отдавал
+// pending_approval / rejected / decommissioned — и каждый новый статус приезжал в UI
+// дырявым: бейдж рисовал сырую латиницу среди русского, а точка на дашборде получала
+// className "... undefined" (Record без фолбэка) и становилась невидимой. Молча.
+export type DeviceStatus =
+  | "active" | "enrolled" | "pending"
+  | "pending_approval" | "rejected" | "blocked" | "decommissioned"
+
+// Единая карта статусов. До неё их было три частичных и несогласованных: лейблы в
+// DeviceDetail, цвета в Dashboard, счётчики там же — новый статус надо было не забыть
+// вписать в каждую. Record<DeviceStatus, …> заставляет компилятор ловить это за нас,
+// поэтому НЕ ослаблять до Record<string, …>: тогда дыра вернётся и снова молча.
+export const DEVICE_STATUS: Record<DeviceStatus, {
+  label: string
+  variant: "success" | "default" | "secondary" | "destructive" | "outline"
+  dot: string
+}> = {
+  active:           { label: "Активен",              variant: "success",     dot: "bg-emerald-500" },
+  enrolled:         { label: "Зарегистрирован",      variant: "default",     dot: "bg-blue-500"    },
+  pending:          { label: "Ожидает",              variant: "secondary",   dot: "bg-slate-400"   },
+  pending_approval: { label: "Ожидает одобрения",    variant: "secondary",   dot: "bg-amber-500"   },
+  rejected:         { label: "Отклонено",            variant: "destructive", dot: "bg-rose-600"    },
+  blocked:          { label: "Заблокирован",         variant: "destructive", dot: "bg-red-500"     },
+  decommissioned:   { label: "Выведен из эксплуатации", variant: "outline",  dot: "bg-slate-500"   },
+}
+
 export interface Device {
   id: string
   hostname: string
   os: string
   os_version: string
   ip_address: string
-  status: "active" | "blocked" | "pending" | "enrolled"
+  status: DeviceStatus
   lock_status: "unlocked" | "locked"
   last_seen_at: string | null
   created_at: string
@@ -94,6 +121,17 @@ export interface CreateDeviceResponse {
 export interface EnrollmentTokenResponse {
   token: string
   expires_at: string
+}
+
+// Массовый токен энроллмента: одна партия машин — один токен, устройство создаётся само.
+// 🔴 Поле называется enrollment_token, а НЕ token как в EnrollmentTokenResponse выше —
+// разные ручки, переиспользовать тот интерфейс нельзя, тип сойдётся, а значение будет undefined.
+// ca_sha256 приезжает пустым, если сервер поднят без CA — это не ошибка, просто нечего пинить.
+export interface BulkEnrollmentTokenResponse {
+  enrollment_token: string
+  expires_at: string
+  ca_sha256: string
+  require_approval: boolean
 }
 
 export interface ReenrollResponse {

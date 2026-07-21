@@ -310,6 +310,165 @@ func TestUpsertInventory_PersistsAgentVersion(t *testing.T) {
 	}
 }
 
+// Расширенный инвентарь (миграция 030): значения персистятся; пустой снимок от
+// старого агента НЕ затирает известные sticky-поля (COALESCE(NULLIF(...))) —
+// кроме console_user, где пустая строка это реальный факт «за консолью никого».
+func TestUpsertInventory_ExtendedFields(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	fp := fmt.Sprintf("fp-ext-%s", uniq(t))
+	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "ext-host", "ext-host", "192.0.2.3")); err != nil {
+		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
+	}
+	deviceID, _ := db.GetDeviceIDByFingerprint(ctx, fp)
+
+	full := storage.InventoryData{
+		CertFingerprint: fp,
+		Hostname:        "ext-host", OS: "Windows", OSVersion: "11",
+		Arch: "amd64", ConsoleUser: `CORP\ivanov`, DiskEncryption: "enabled",
+		OSPatchDate: "2026-07-01", BootTime: 1752834000, DiskFree: "120 GB",
+		DomainJoined: "true", TPM: "true", SecureBoot: "false",
+	}
+	if err := db.UpsertInventory(ctx, full); err != nil {
+		t.Fatalf("UpsertInventory (full): %v", err)
+	}
+	got, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	checks := []struct{ name, got, want string }{
+		{"arch", got.Arch, "amd64"},
+		{"console_user", got.ConsoleUser, `CORP\ivanov`},
+		{"disk_encryption", got.DiskEncryption, "enabled"},
+		{"os_patch_date", got.OSPatchDate, "2026-07-01"},
+		{"disk_free", got.DiskFree, "120 GB"},
+		{"domain_joined", got.DomainJoined, "true"},
+		{"tpm", got.TPM, "true"},
+		{"secure_boot", got.SecureBoot, "false"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+	if got.BootTime != 1752834000 {
+		t.Errorf("boot_time = %d, want 1752834000", got.BootTime)
+	}
+
+	// Пустой снимок (старый агент / пробники недоступны): sticky-поля сохранены,
+	// console_user честно обнулён — «за консолью никого» это данные, не unknown.
+	empty := storage.InventoryData{CertFingerprint: fp, Hostname: "ext-host", OS: "Windows", OSVersion: "11"}
+	if err := db.UpsertInventory(ctx, empty); err != nil {
+		t.Fatalf("UpsertInventory (empty): %v", err)
+	}
+	got2, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice after empty: %v", err)
+	}
+	if got2.DiskEncryption != "enabled" || got2.Arch != "amd64" || got2.BootTime != 1752834000 ||
+		got2.DomainJoined != "true" || got2.TPM != "true" || got2.SecureBoot != "false" ||
+		got2.OSPatchDate != "2026-07-01" || got2.DiskFree != "120 GB" {
+		t.Errorf("sticky-поля затёрты пустым снимком: %+v", got2)
+	}
+	if got2.ConsoleUser != "" {
+		t.Errorf("console_user = %q, want «за консолью никого» (пусто)", got2.ConsoleUser)
+	}
+
+	// boot_time ≥ 2^31: без каста $16::bigint параметр выводился как int4 (NULLIF($16,0)
+	// унифицирует с int4-литералом 0), и pgx ронял ВЕСЬ upsert инвентаря на unix-времени
+	// после 2038 / битом снимке. Проверяем round-trip большого значения.
+	big := storage.InventoryData{CertFingerprint: fp, Hostname: "ext-host", OS: "Windows", OSVersion: "11", BootTime: 2224444888} // 2040-07
+	if err := db.UpsertInventory(ctx, big); err != nil {
+		t.Fatalf("UpsertInventory (boot_time ≥ 2^31): %v", err)
+	}
+	got3, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice after big boot_time: %v", err)
+	}
+	if got3.BootTime != 2224444888 {
+		t.Errorf("boot_time (≥2^31) = %d, want 2224444888", got3.BootTime)
+	}
+}
+
+// Дооктябрьские поля инвентаря (hostname/os_version/cpu/ram/disk/ip_address) тоже
+// sticky. У агента нет канала «проба не удалась»: collector.Collect() отдаёт нулевое
+// значение, и одна WMI-икота глушит os_version+ram+disk разом (общий psOut), а
+// переподключение Wi-Fi — ip_address. Отчёт при этом всё равно уходит (хэш другой →
+// дедуп не спасает) и до этого фикса затирал карточку железа нулями до следующего
+// удачного цикла. OS намеренно НЕ sticky: normalizeOS(runtime.GOOS), пустым не бывает.
+func TestUpsertInventory_LegacyFieldsAreSticky(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	fp := fmt.Sprintf("fp-sticky-%s", uniq(t))
+	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "sticky-host", "sticky-host", "192.0.2.7")); err != nil {
+		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
+	}
+	deviceID, _ := db.GetDeviceIDByFingerprint(ctx, fp)
+
+	good := storage.InventoryData{
+		CertFingerprint: fp,
+		Hostname:        "sticky-host", OS: "Windows", OSVersion: "11 23H2",
+		CPU: "Intel i7-1265U", RAM: 16384, Disk: "512 GB", IPAddress: "192.0.2.7",
+	}
+	if err := db.UpsertInventory(ctx, good); err != nil {
+		t.Fatalf("UpsertInventory (good): %v", err)
+	}
+
+	// Снимок после сбоя пробников: всё нулевое, OS есть (GOOS не падает).
+	degraded := storage.InventoryData{CertFingerprint: fp, OS: "Windows"}
+	if err := db.UpsertInventory(ctx, degraded); err != nil {
+		t.Fatalf("UpsertInventory (degraded): %v", err)
+	}
+	got, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	for _, c := range []struct{ name, got, want string }{
+		{"hostname", got.Hostname, "sticky-host"},
+		{"os_version", got.OSVersion, "11 23H2"},
+		{"cpu", got.CPU, "Intel i7-1265U"},
+		{"disk", got.Disk, "512 GB"},
+		{"ip_address", got.IPAddress, "192.0.2.7"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s затёрт сбойным снимком = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+	if got.RAM != 16384 {
+		t.Errorf("ram затёрт сбойным снимком = %d, want 16384", got.RAM)
+	}
+
+	// Реальная замена железа (непустые значения) обязана проходить — sticky не должен
+	// заморозить карточку навсегда. Заодно ловит int4-каст на ram, как у boot_time.
+	upgraded := storage.InventoryData{
+		CertFingerprint: fp,
+		Hostname:        "sticky-host", OS: "Windows", OSVersion: "11 24H2",
+		CPU: "Intel i7-1265U", RAM: 65536, Disk: "2 TB", IPAddress: "192.0.2.8",
+	}
+	if err := db.UpsertInventory(ctx, upgraded); err != nil {
+		t.Fatalf("UpsertInventory (upgraded): %v", err)
+	}
+	got2, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice after upgrade: %v", err)
+	}
+	if got2.RAM != 65536 || got2.Disk != "2 TB" || got2.IPAddress != "192.0.2.8" || got2.OSVersion != "11 24H2" {
+		t.Errorf("апгрейд железа не доехал: ram=%d disk=%q ip=%q osver=%q", got2.RAM, got2.Disk, got2.IPAddress, got2.OSVersion)
+	}
+
+	// Heartbeat с пустым IP (net.Interfaces сбойнул / только APIPA) тоже не затирает.
+	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "sticky-host", "sticky-host", "")); err != nil {
+		t.Fatalf("UpsertDeviceHeartbeat (empty ip): %v", err)
+	}
+	got3, _, err := db.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice after empty-ip heartbeat: %v", err)
+	}
+	if got3.IPAddress != "192.0.2.8" {
+		t.Errorf("ip_address затёрт пустым heartbeat = %q, want 192.0.2.8", got3.IPAddress)
+	}
+}
+
 // Поиск по устройствам должен ловить ЛЮБОЙ собираемый агентом атрибут по подстроке:
 // хвост серийника, кусок IP, MAC с разделителями и без. Это ровно то, как человек ищет.
 func TestListEnrolledDevices_Search(t *testing.T) {

@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/Floodww/RoutineOps/internal/agent/service"
 )
 
 // State — снимок состояния агента для трея.
@@ -37,11 +39,7 @@ func (s State) Online(staleAfter time.Duration) bool {
 // Windows: %ProgramData%\RoutineOps\status.json — машинный каталог, общий для всех.
 func DefaultPath() string {
 	if runtime.GOOS == "windows" {
-		pd := os.Getenv("ProgramData")
-		if pd == "" {
-			pd = `C:\ProgramData`
-		}
-		return filepath.Join(pd, "RoutineOps", "status.json")
+		return filepath.Join(service.ProgramDataDir(), "RoutineOps", "status.json")
 	}
 	return filepath.Join(os.TempDir(), "RoutineOps-agent-status.json")
 }

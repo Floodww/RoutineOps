@@ -1,10 +1,10 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package service
 
-// InstallLayout — на Windows установку выполняет MSI (WiX кладёт бинарь в Program
-// Files, серты — рядом, флаги фиксированы в installer). Перекладка из кода не
-// нужна и сломала бы рабочий MSI-поток — Relocate=false, пути пустые.
+// InstallLayout — платформы без инсталлятора и без машинной раскладки состояния:
+// Relocate=false, пути пустые (агент работает с CWD-относительными дефолтами).
+// Windows выделен в layout_windows.go: там DataDir указывает в ProgramData.
 func InstallLayout() Layout {
 	return Layout{Relocate: false}
 }

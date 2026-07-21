@@ -95,3 +95,6 @@ release_ed25519.pem*
 /server_bin
 /publish-release-linux
 web/test-results/
+
+# nfpm staging (генерится pkg-* целями, уникальный per arch+format)
+build/nfpm/stage-*/

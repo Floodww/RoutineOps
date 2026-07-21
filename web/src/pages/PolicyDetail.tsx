@@ -52,20 +52,20 @@ export default function PolicyDetail() {
     <button
       type="button"
       onClick={() => navigate("/policies")}
-      className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors"
+      className="flex items-center gap-1.5 self-start text-sm text-muted-foreground hover:text-foreground transition-colors"
     >
-      <ChevronLeft className="h-4 w-4" />
+      <ChevronLeft className="h-4 w-4" strokeWidth={2} />
       Назад к политикам
     </button>
   )
 
   if (!rule) {
     return (
-      <div>
+      <div className="flex flex-col gap-5">
         {back}
-        <p className="text-sm text-muted-foreground">
+        <div className="glass px-5 py-8 text-center text-sm text-muted-foreground">
           {loadFailed ? "Не удалось загрузить политику — попробуй обновить страницу." : "Политика не найдена — возможно, она была удалена."}
-        </p>
+        </div>
       </div>
     )
   }
@@ -81,53 +81,55 @@ export default function PolicyDetail() {
       : "Глобальное — весь парк"
 
   return (
-    <div>
+    <div className="flex flex-col gap-5">
       {back}
 
-      <div className="flex items-center gap-3 mb-1 flex-wrap">
-        <h1 className="text-2xl font-semibold font-mono">{rule.software_name}</h1>
-        <Badge variant={forbidden ? "destructive" : "success"}>
-          {forbidden ? "Запрещено" : "Разрешено"}
-        </Badge>
-      </div>
-      <p className="text-sm text-muted-foreground mb-6">
-        {scope}
-        {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && (
-          <> · {rule.platforms.join(", ")}</>
-        )}
-        {" · обновлено "}{formatDistanceToNow(rule.updated_at)}
-      </p>
-
-      {/* Сводка. Для allowed-правил pass/fail не считаются — агент проверяет только forbidden. */}
-      {forbidden ? (
-        <div className="flex items-center gap-6 mb-4 text-sm">
-          <span className="text-muted-foreground">В охвате: <span className="text-foreground font-medium tabular-nums">{rows.length}</span></span>
-          <span className="text-emerald-600 dark:text-emerald-400">Pass: <span className="font-medium tabular-nums">{pass}</span></span>
-          <span className={fail > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-muted-foreground"}>
-            Fail: <span className="tabular-nums">{fail}</span>
-          </span>
+      <div>
+        <div className="flex items-center gap-3 mb-1 flex-wrap">
+          <h1 className="text-xl font-semibold font-mono text-foreground">{rule.software_name}</h1>
+          <Badge variant={forbidden ? "destructive" : "success"}>
+            {forbidden ? "Запрещено" : "Разрешено"}
+          </Badge>
         </div>
-      ) : (
-        <p className="text-xs text-muted-foreground mb-4">
-          Правило-разрешение: агент его не проверяет. Ниже — справка, где это ПО установлено.
+        <p className="text-xs text-muted-foreground">
+          {scope}
+          {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && (
+            <> · {rule.platforms.join(", ")}</>
+          )}
+          {" · обновлено "}{formatDistanceToNow(rule.updated_at)}
         </p>
-      )}
+
+        {/* Сводка. Для allowed-правил pass/fail не считаются — агент проверяет только forbidden. */}
+        {forbidden ? (
+          <div className="flex items-center gap-6 mt-3 text-[13px]">
+            <span className="text-soft">В охвате: <span className="text-foreground font-medium tabular-nums">{rows.length}</span></span>
+            <span className="text-emerald-600 dark:text-emerald-400">Pass: <span className="font-medium tabular-nums">{pass}</span></span>
+            <span className={fail > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-muted-foreground"}>
+              Fail: <span className="tabular-nums">{fail}</span>
+            </span>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground mt-3">
+            Правило-разрешение: агент его не проверяет. Ниже — справка, где это ПО установлено.
+          </p>
+        )}
+      </div>
 
       {rows.length === 0 ? (
-        <div className="rounded-lg border bg-card p-6 text-center text-sm text-muted-foreground">
+        <div className="glass px-5 py-8 text-center text-sm text-muted-foreground">
           Правило не действует ни на одно устройство.
           {rule.group_id && " Проверь, что в группе есть устройства."}
           {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && " Возможно, в парке нет устройств выбранных платформ."}
         </div>
       ) : (
-        <div className="rounded-lg border">
+        <div className="glass overflow-hidden">
           <Table>
             <TableHeader>
-              <TableRow>
-                <TableHead>Устройство</TableHead>
-                <TableHead>ОС</TableHead>
-                <TableHead>Найдено в инвентаре</TableHead>
-                <TableHead>{forbidden ? "Вердикт" : "Установлено"}</TableHead>
+              <TableRow className="border-t-0 hover:bg-transparent">
+                <TableHead className="text-xs">Устройство</TableHead>
+                <TableHead className="text-xs">ОС</TableHead>
+                <TableHead className="text-xs">Найдено в инвентаре</TableHead>
+                <TableHead className="text-xs">{forbidden ? "Вердикт" : "Установлено"}</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -136,16 +138,16 @@ export default function PolicyDetail() {
                 <TableRow
                   key={r.device_id}
                   onClick={() => navigate(`/devices/${r.device_id}`)}
-                  className="cursor-pointer"
+                  className="cursor-pointer glass-hover"
                 >
-                  <TableCell className="font-medium text-sm">{r.hostname}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{r.os || "—"}</TableCell>
-                  <TableCell className="text-xs font-mono">
+                  <TableCell className="px-4 py-3 font-medium text-sm text-foreground">{r.hostname}</TableCell>
+                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">{r.os || "—"}</TableCell>
+                  <TableCell className="px-4 py-3 text-xs font-mono text-soft">
                     {r.installed
                       ? <>{r.matched_software}{r.matched_version && <span className="text-muted-foreground"> {r.matched_version}</span>}</>
                       : <span className="text-muted-foreground font-sans">—</span>}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-4 py-3">
                     {forbidden ? (
                       <Badge variant={r.installed ? "destructive" : "success"}>
                         {r.installed ? "Fail" : "Pass"}
@@ -154,8 +156,8 @@ export default function PolicyDetail() {
                       <span className="text-xs text-muted-foreground">{r.installed ? "Да" : "Нет"}</span>
                     )}
                   </TableCell>
-                  <TableCell className="w-8">
-                    <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                  <TableCell className="px-4 py-3 w-8">
+                    <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" strokeWidth={2} />
                   </TableCell>
                 </TableRow>
               ))}

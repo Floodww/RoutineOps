@@ -26,7 +26,7 @@ func TestBuild_PopulatesDeviceInfo(t *testing.T) {
 	if got := rep.GetDeviceInfo().GetAgentVersion(); got != "1.2.3" {
 		t.Errorf("agent_version = %q, want 1.2.3", got)
 	}
-	if hashReport(rep) != hashReport(build("1.2.3")) {
+	if mustHash(t, rep) != mustHash(t, build("1.2.3")) {
 		t.Error("два последовательных build дали разный хэш — дедуп сломается")
 	}
 }

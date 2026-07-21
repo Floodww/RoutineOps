@@ -55,6 +55,29 @@ message DeviceInfo {
   string mac_address = 9;
   string serial_number = 10;
   string agent_version = 11; // версия агентского бинаря (ldflags main.version) — для видимости раскатки
+
+  // Расширение инвентаря (2026-07). Общий принцип: недоступное на данной ОС
+  // значение — ПУСТАЯ строка / 0 («не знаю»), а не выдуманный false — поэтому
+  // трёхзначные признаки едут строкой "true"/"false"/"", а не proto3-bool,
+  // который не отличает false от «не собрано».
+  string arch            = 12; // архитектура CPU: amd64 / arm64 (runtime.GOARCH)
+  string console_user    = 13; // кто сейчас за консолью; Windows — DOMAIN\user
+                               // (домен сохранён: только по нему учётка матчится
+                               // с каталогом); "" = за консолью никого
+  string disk_encryption = 14; // системный том: "enabled"/"disabled"/"" (unknown).
+                               // macOS FileVault / Windows BitLocker / Linux LUKS
+  string os_patch_date   = 15; // дата последнего установленного обновления ОС,
+                               // ISO "2006-01-02"; "" = неизвестно (Linux: нет
+                               // универсального сигнала — всегда "")
+  int64  boot_time       = 16; // unix-время загрузки ОС; 0 = неизвестно. Именно
+                               // момент загрузки, а не uptime: uptime менялся бы
+                               // в каждом отчёте и убил бы delta-подавление
+  string disk_free       = 17; // свободно на системном томе, человекочитаемо
+  string domain_joined   = 18; // "true"/"false"/""; Windows — Win32_ComputerSystem
+                               // .PartOfDomain, macOS/Linux — заведомое "false"
+  string tpm             = 19; // TPM присутствует: "true"/"false"/"" — Windows
+  string secure_boot     = 20; // Secure Boot включён: "true"/"false"/"" — Windows
+                               // (legacy BIOS = "false": UEFI-защиты заведомо нет)
 }
 
 message SoftwareItem {
@@ -91,6 +114,24 @@ message Task {
   string platform = 4;  // macOS / Windows
   TaskPriority priority = 5;
   LockCommand lock = 6; // если задано — это команда блокировки устройства, а не скрипт
+  DecommissionCommand decommission = 7; // если задано — полное самоудаление агента, а не скрипт/лок
+}
+
+// DecommissionCommand — вывод устройства из эксплуатации: агент сносит СЕБЯ
+// целиком (служба, серт+ключ+CA, конфиг, состояние, бинарь). Едет в Task
+// (переиспользует доставку/ack/идемпотентность). Порядок на агенте: агент
+// ПОДТВЕРЖДАЕТ выполнение обычным ReportTaskResult (по task_id сервер знает, что
+// это decommission-задача) ДО сноса серта — иначе отчитываться будет уже нечем;
+// сервер по подтверждению помечает устройство списанным и ОТЗЫВАЕТ серт.
+//
+// КРИТИЧНО (серверная сторона): пока серт жив, агент шлёт heartbeat, а
+// сервер на неизвестный отпечаток СОЗДАЁТ устройство заново (UpsertDeviceHeartbeat)
+// — недоснесённый агент воскресил бы списанную машину. Поэтому сервер обязан
+// отозвать серт И отказываться воскрешать списанные устройства. Агент со своей
+// стороны немедленно прекращает heartbeat (выходит из рабочего цикла).
+message DecommissionCommand {
+  string request_id = 1; // id заявки (идемпотентность/аудит; сервер приравнивает к task_id)
+  string reason     = 2; // причина списания (для аудита)
 }
 
 // LockCommand — блокировка/разблокировка машины сотрудника (нарушение ИБ/увольнение:

@@ -33,6 +33,23 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+func TestHumanBytesBucketed(t *testing.T) {
+	const gib = uint64(1024 * 1024 * 1024)
+	cases := map[uint64]string{
+		0:             "0 B",
+		512 * 1024:    "512 KB", // меньше корзины — как есть
+		5 * gib:       "5 GB",   // меньше корзины — как есть
+		230*gib + 900: "230 GB", // дрейф внутри корзины не меняет строку...
+		237 * gib:     "230 GB",
+		241 * gib:     "240 GB", // ...а переход через границу корзины — меняет
+	}
+	for in, want := range cases {
+		if got := humanBytesBucketed(in); got != want {
+			t.Errorf("humanBytesBucketed(%d)=%q want %q", in, got, want)
+		}
+	}
+}
+
 func TestLocalIPValid(t *testing.T) {
 	ip := LocalIP()
 	if ip == "" {

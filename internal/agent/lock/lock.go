@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -26,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Floodww/RoutineOps/internal/agent/service"
 )
 
 // DefaultPath — путь к файлу состояния блокировки в машинном каталоге, доступном
@@ -33,11 +36,7 @@ import (
 // Windows: %ProgramData%\RoutineOps\lock.json. Прочие ОС: временный каталог.
 func DefaultPath() string {
 	if runtime.GOOS == "windows" {
-		pd := os.Getenv("ProgramData")
-		if pd == "" {
-			pd = `C:\ProgramData`
-		}
-		return filepath.Join(pd, "RoutineOps", "lock.json")
+		return filepath.Join(service.ProgramDataDir(), "RoutineOps", "lock.json")
 	}
 	return filepath.Join(os.TempDir(), "RoutineOps-agent-lock.json")
 }
@@ -66,6 +65,18 @@ func ReadState(path string) (State, error) {
 // файла (демон/служба) и для платформ, где ACL это разрешает (Windows).
 func ClearState(path string) error {
 	return writeStateAtomic(path, State{})
+}
+
+// MarkUnlocked помечает устройство разблокированным, фиксируя в состоянии hash
+// лока, пароль которого был РЕАЛЬНО сверен (LastUnlockedHash). Вызывать вместо
+// ClearState там, где снятие происходит в обход демона (Windows-оверлей, см.
+// lockui_windows.go): по маркеру detectOfflineUnlock отличает легитимное снятие
+// ТЕКУЩЕГО лока от гонки со сменой лока — оверлей, поднятый под старый hash H1,
+// мог сверить пароль H1 и затереть файл уже ПОСЛЕ того, как демон применил новый
+// лок H2; без маркера демон принял бы это за снятие H2, задурабилил бы
+// LastUnlockedHash=H2 и реконсиляция никогда бы не пере-заперла устройство.
+func MarkUnlocked(path, verifiedHash string) error {
+	return writeStateAtomic(path, State{LastUnlockedHash: verifiedHash})
 }
 
 // unlockRequest — запрос на разблокировку от лок-экрана (юзер-сессия) демону
@@ -112,6 +123,28 @@ type State struct {
 	Reason    string `json:"reason"`     // текст для сотрудника на экране замка
 	RequestID string `json:"request_id"` // id заявки на блокировку (идемпотентность, отчёт)
 	LockedAt  int64  `json:"locked_at"`  // unix-время блокировки
+	// LastUnlockedHash — hash лока, снятого ЛОКАЛЬНО (верный пароль/оффлайн-
+	// обнаружение). Переживает рестарт/ребут, чтобы реконсиляция после старта не
+	// пере-заперла устройство по УСТАРЕВШЕМУ desired=locked, пока сервер не догнал
+	// durable UNLOCKED-отчёт (in-memory lastUnlockedHash реконсилятора при ребуте
+	// теряется — это и был баг). Безопасно лежит бессрочно: hash уникален на лок
+	// (bcrypt случайной соли), тот же самый сервер повторно не выдаст.
+	LastUnlockedHash string `json:"last_unlocked_hash,omitempty"`
+}
+
+// validateBcryptHash — password_hash приходит от сервера; перед тем как поднять
+// по нему блокировку, убеждаемся, что это НЕПУСТОЙ валидный bcrypt-хеш. Пустой/
+// битый хеш дал бы офлайн-НЕСНИМАЕМЫЙ лок: bcrypt.CompareHashAndPassword на нём
+// всегда возвращает ошибку → verify() всегда false → сотрудник не разблокирует
+// НИКАКИМ паролем (fail-safe: лучше не запирать, чем запереть неснимаемо).
+func validateBcryptHash(hash string) error {
+	if hash == "" {
+		return errors.New("пустой password_hash")
+	}
+	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+		return fmt.Errorf("не bcrypt-хеш: %w", err)
+	}
+	return nil
 }
 
 // Locker — платформенный замок экрана (полноэкранный оверлей с полем пароля).
@@ -192,10 +225,28 @@ func (m *Manager) CurrentHash() string {
 	return m.state.Hash
 }
 
+// LastUnlockedHash — durable-память хеша последнего локально снятого лока
+// (переживает рестарт/ребут; см. State.LastUnlockedHash). Реконсиляция сверяет
+// с ним desired-хеш, чтобы не пере-запереть устройство по устаревшему
+// desired=locked после ребута до доставки UNLOCKED-отчёта.
+func (m *Manager) LastUnlockedHash() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.LastUnlockedHash
+}
+
 // Lock блокирует устройство: сохраняет состояние и поднимает замок. hash —
 // bcrypt-хеш пароля разблокировки (приходит с сервера). Повторный Lock с тем же
 // requestID — no-op (идемпотентность доставки команды).
 func (m *Manager) Lock(requestID, hash, reason string) error {
+	// #13: не поднимать блокировку по невалидному хешу (fail-safe против
+	// офлайн-неснимаемого лока). Проверяем ДО mu — чистая функция от аргумента.
+	if err := validateBcryptHash(hash); err != nil {
+		m.log.Error("lock: ОТКАЗ применять блокировку — невалидный password_hash (fail-safe, не создаём офлайн-неснимаемый лок)",
+			slog.String("request_id", requestID), slog.Any("error", err))
+		return fmt.Errorf("lock: невалидный password_hash: %w", err)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -285,6 +336,13 @@ func (m *Manager) processUnlockRequests(onUnlock func(requestID, hash string)) {
 }
 
 // detectOfflineUnlock сверяет память с файлом и реагирует на внешнее снятие блокировки.
+//
+// Весь тик — под m.mu (как и persist в Lock/verify): снимок состояния, чтение
+// файла и запись решения атомарны относительно параллельного Lock/Unlock.
+// Прежний код отпускал mu между снимком и записью — новый лок H2, применённый в
+// это окно, затирался «разблокированным» состоянием, собранным по устаревшему
+// снимку H1 (lost update), причём durably: с диска стиралась и страховка,
+// поднимавшая лок после ребута.
 func (m *Manager) detectOfflineUnlock(onOfflineUnlock func(requestID, hash string)) {
 	m.mu.Lock()
 	if !m.state.Locked {
@@ -293,15 +351,29 @@ func (m *Manager) detectOfflineUnlock(onOfflineUnlock func(requestID, hash strin
 	}
 	reqID := m.state.RequestID
 	hash := m.state.Hash
-	m.mu.Unlock()
 
 	st, err := ReadState(m.path)
 	if err != nil || st.Locked {
+		m.mu.Unlock()
 		return // файл недоступен или всё ещё заблокирован — ничего не делаем
 	}
-	// Файл разблокирован извне (лок-экран): синхронизируем память и уведомляем.
-	m.mu.Lock()
-	m.state = State{}
+	// Файл разблокирован извне. Если снявший оставил маркер, КАКОЙ лок он сверил
+	// (MarkUnlocked, Windows-оверлей), и это НЕ текущий — оверлей жил под старым
+	// hash и затёр файл нового лока: снятие нелегитимно, пере-утверждаем текущее
+	// состояние на диске и лок не опускаем. Пустой маркер (ClearState старого
+	// оверлея, ручная зачистка IT) трактуем по-прежнему как снятие текущего.
+	if st.LastUnlockedHash != "" && st.LastUnlockedHash != hash {
+		_ = m.persist()
+		m.mu.Unlock()
+		m.log.Warn("lock: файл состояния затёрт снятием УСТАРЕВШЕГО лока — текущая блокировка пере-утверждена",
+			slog.String("request_id", reqID), slog.String("stale_unlocked_hash", st.LastUnlockedHash))
+		return
+	}
+	// Легитимное снятие: синхронизируем память и уведомляем. Перезаписываем
+	// внешне-очищенный файл, СОХРАНЯЯ hash снятого лока durably (переживёт ребут —
+	// реконсиляция не пере-запрёт по устаревшему desired, #4).
+	m.state = State{LastUnlockedHash: hash}
+	_ = m.persist()
 	m.mu.Unlock()
 	m.locker.Hide()
 	m.log.Warn("lock: устройство разблокировано оффлайн (верный пароль на лок-экране)",
@@ -346,7 +418,9 @@ func (m *Manager) unlockLocked(reason string) error {
 		return nil
 	}
 	reqID := m.state.RequestID
-	m.state = State{}
+	// Сохраняем hash снятого лока durably (переживёт ребут, #4): реконсиляция
+	// после старта не пере-запрёт устройство по устаревшему desired=locked.
+	m.state = State{LastUnlockedHash: m.state.Hash}
 	err := m.persist()
 	m.locker.Hide()
 	m.log.Warn("lock: устройство разблокировано", slog.String("request_id", reqID), slog.String("reason", reason))

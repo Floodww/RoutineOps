@@ -178,8 +178,10 @@ func (m *Monitor) scan(ctx context.Context) {
 }
 
 // stateFile — файл персиста эпизодов, рядом со списком запрещённого ПО (после
-// раскладки это DataDir; на Windows/MSI — рабочий каталог службы, как у прочих
-// *.seen). Пустой ListFile → без персиста.
+// раскладки это DataDir: на macOS/Linux — relocateForService, Windows-служба
+// переводит дефолты в ProgramData\RoutineOps\state на старте; при переезде
+// файл следует за списком — см. migrateLegacyState в cmd/agent). Пустой
+// ListFile → без персиста.
 func (m *Monitor) stateFile() string {
 	if m.ListFile == "" {
 		return ""

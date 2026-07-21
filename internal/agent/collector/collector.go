@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 )
 
 // DeviceInfo — снимок устройства для инвентаризации (маппится в proto.DeviceInfo).
@@ -27,6 +28,20 @@ type DeviceInfo struct {
 	IP           string
 	MAC          string
 	SerialNumber string
+
+	// Расширение инвентаря (2026-07). Принцип: недоступное на этой ОС значение —
+	// пустая строка / 0 («не знаю»), а не выдуманный false; поэтому трёхзначные
+	// признаки — строки "true"/"false"/"", не bool (см. proto DeviceInfo).
+	Arch           string // amd64 / arm64 (runtime.GOARCH)
+	DiskEncryption string // системный том: "enabled"/"disabled"/""
+	OSPatchDate    string // дата последнего обновления ОС, ISO "2006-01-02"; "" = неизвестно
+	// BootTime — unix-время ЗАГРУЗКИ, не uptime: uptime менялся бы в каждом
+	// снимке и убивал бы delta-подавление отправки инвентаря (hashReport).
+	BootTime     int64  // 0 = неизвестно
+	DiskFree     string // свободно на системном томе, огрублено до diskFreeBucket; "" = неизвестно
+	DomainJoined string // "true"/"false"/""; macOS/Linux — заведомое "false"
+	TPM          string // TPM присутствует: "true"/"false"/"" — Windows
+	SecureBoot   string // Secure Boot включён: "true"/"false"/"" — Windows
 }
 
 // Software — установленное приложение.
@@ -40,15 +55,23 @@ func Collect() DeviceInfo {
 	host, _ := os.Hostname()
 	ip, mac := NetworkInfo()
 	return DeviceInfo{
-		Hostname:     host,
-		OS:           normalizeOS(runtime.GOOS),
-		OSVersion:    osVersion(),
-		CPU:          cpuModel(),
-		RAMMegabytes: ramMegabytes(),
-		Disk:         diskTotal(),
-		IP:           ip,
-		MAC:          mac,
-		SerialNumber: serialNumber(),
+		Hostname:       host,
+		OS:             normalizeOS(runtime.GOOS),
+		OSVersion:      osVersion(),
+		CPU:            cpuModel(),
+		RAMMegabytes:   ramMegabytes(),
+		Disk:           diskTotal(),
+		IP:             ip,
+		MAC:            mac,
+		SerialNumber:   serialNumber(),
+		Arch:           runtime.GOARCH,
+		DiskEncryption: diskEncryption(),
+		OSPatchDate:    osPatchDate(),
+		BootTime:       bootTime(),
+		DiskFree:       diskFree(),
+		DomainJoined:   domainJoined(),
+		TPM:            tpmPresent(),
+		SecureBoot:     secureBootEnabled(),
 	}
 }
 
@@ -120,6 +143,28 @@ func NetworkInfo() (string, string) {
 	return selectNetwork(entries)
 }
 
+// placeholderSerials — то, что вписывают в SMBIOS/BIOS вместо серийника вендоры
+// и гипервизоры. Такое значение хуже пустого: оно одинаково на тысячах машин, а
+// сервер считает серийник (sticky-поле) идентификатором железа — десятки VM и
+// whitebox-сборок с общим "Default string" слились бы в инвентаре. Кросс-
+// платформенно (Windows/darwin/Linux) — раньше фильтр был только на Linux, где
+// машин почти нет, а парк как раз Windows.
+var placeholderSerials = map[string]bool{
+	"":                       true,
+	"none":                   true,
+	"to be filled by o.e.m.": true,
+	"system serial number":   true,
+	"default string":         true,
+	"not specified":          true,
+	"0":                      true,
+}
+
+// isPlaceholderSerial сообщает, что серийник — плейсхолдер (или пуст), и его
+// нельзя отдавать серверу как идентификатор железа.
+func isPlaceholderSerial(s string) bool {
+	return placeholderSerials[strings.ToLower(strings.TrimSpace(s))]
+}
+
 // normalizeOS приводит runtime.GOOS к именам из схемы БД (macOS / Windows).
 func normalizeOS(goos string) string {
 	switch goos {
@@ -144,4 +189,24 @@ func humanBytes(b uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.0f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// diskFreeBucket — шаг огрубления свободного места (10 ГиБ). Точное значение
+// дрейфует на сотни МБ между 5-минутными снимками (логи, кэши, swap,
+// APFS-снапшоты) и на whole-GB точности humanBytes пересекало бы границу
+// округления почти каждый цикл на активной машине, ломая delta-подавление
+// инвентаря (hashReport) — та же причина, по которой BootTime хранится
+// абсолютным, а не как uptime. Поле остаётся в хэше (страж-тест полей
+// проходит), но между циклами стабильно; цена — disk_free в БД отстаёт от
+// истины максимум на размер корзины.
+const diskFreeBucket = 10 * 1024 * 1024 * 1024
+
+// humanBytesBucketed форматирует свободное место, огрубив его вниз до
+// diskFreeBucket (значения меньше корзины отдаются как есть — на почти полном
+// диске «0 GB» скрыл бы реальную критичную цифру).
+func humanBytesBucketed(b uint64) string {
+	if b >= diskFreeBucket {
+		b -= b % diskFreeBucket
+	}
+	return humanBytes(b)
 }

@@ -4,7 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Floodww/RoutineOps/internal/agent/outbox"
 	pb "github.com/Floodww/RoutineOps/proto"
@@ -61,6 +64,30 @@ func TestDefaultExecRealShell(t *testing.T) {
 	}
 	if res.stdout != "out" {
 		t.Fatalf("stdout=%q want %q", res.stdout, "out")
+	}
+}
+
+// Политика, поднявшая фоновый процесс с унаследованным stdout, НЕ подвешивает
+// defaultExec до его смерти: WaitDelay закрывает пайпы, exit-код самого скрипта
+// (0) сохраняется, в stderr — человекочитаемая пометка.
+func TestDefaultExecBackgroundChildDoesNotHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh-скрипт: unix-платформы")
+	}
+	start := time.Now()
+	res := defaultExec(context.Background(), "shell", "sleep 30 & echo hi")
+	elapsed := time.Since(start)
+	if res.exitCode != 0 {
+		t.Fatalf("exit_code=%d want 0 (ErrWaitDelay — успех): stderr=%q", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "hi") {
+		t.Errorf("stdout=%q, ожидали вывод до фонового потомка", res.stdout)
+	}
+	if !strings.Contains(res.stderr, "фоновые потомки") {
+		t.Errorf("stderr=%q, ожидали пометку о фоновых потомках", res.stderr)
+	}
+	if elapsed >= 20*time.Second {
+		t.Fatalf("defaultExec висел %v — WaitDelay не сработал", elapsed)
 	}
 }
 

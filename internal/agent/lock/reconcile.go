@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Floodww/RoutineOps/internal/agent/outbox"
@@ -36,6 +37,13 @@ type Reconciler struct {
 	// показывает locked с ЭТИМ ЖЕ хешем; без этой памяти реконсиляция заблокировала
 	// бы устройство заново тут же после легитимного снятия.
 	lastUnlockedHash string
+
+	// fvInFlight/fvWG — одиночный фоновый воркер FileVault-revoke:
+	// RevokeAndShutdown держит блокирующий durable ReportState
+	// (backoff 1с→2мин до успеха или agent-lifetime ctx) — инлайн-вызов из tick
+	// замораживал бы ВСЮ реконсиляцию (и lock, и unlock) на всё это время.
+	fvInFlight atomic.Bool
+	fvWG       sync.WaitGroup
 }
 
 // FileVaultRevoker — см. command.FileVaultRevoker (та же роль, отдельная
@@ -105,13 +113,16 @@ func (r *Reconciler) OnLocalUnlock(requestID, hash string) {
 	}
 }
 
-// Run крутит фоновую реконсиляцию до отмены ctx.
+// Run крутит фоновую реконсиляцию до отмены ctx. Перед выходом дожидается
+// фонового FileVault-воркера (тот завершается сам: ReportState выходит по
+// ctx.Done) — горутина не переживает Run.
 func (r *Reconciler) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			r.fvWG.Wait()
 			return
 		case <-ticker.C:
 			r.tick(ctx)
@@ -150,18 +161,39 @@ func (r *Reconciler) reconcileLocked(ctx context.Context, resp *pb.FetchLockStat
 			r.log.Error("lock: реконсиляция получила lock_mode=FILEVAULT, но revoker не сконфигурирован")
 			return
 		}
-		state, err := r.revoker.RevokeAndShutdown(ctx, hash)
-		if err != nil {
-			r.log.Error("lock: reconcile RevokeAndShutdown", slog.Any("error", err))
+		// M4: в отдельной горутине — RevokeAndShutdown может блокироваться до
+		// agent-lifetime ctx (durable ReportState при недоступном сервере), а
+		// тик обязан жить дальше. Повторные тики при живом воркере — no-op:
+		// Chain.mu и так сериализует вызовы, но копить на нём заблокированные
+		// горутины (по одной на тик) незачем. ctx тика = ctx Run'а
+		// (agent-lifetime) — ровно тот, что требует ReportState.
+		if !r.fvInFlight.CompareAndSwap(false, true) {
 			return
 		}
-		r.log.Warn("lock: реконсиляция применила desired-состояние FILEVAULT", slog.String("state", state.String()))
+		r.fvWG.Add(1)
+		go func() {
+			defer r.fvWG.Done()
+			defer r.fvInFlight.Store(false)
+			state, err := r.revoker.RevokeAndShutdown(ctx, hash)
+			if err != nil {
+				r.log.Error("lock: reconcile RevokeAndShutdown", slog.Any("error", err))
+				return
+			}
+			r.log.Warn("lock: реконсиляция применила desired-состояние FILEVAULT", slog.String("state", state.String()))
+		}()
 		return
 	}
 
 	r.mu.Lock()
 	skip := hash != "" && hash == r.lastUnlockedHash
 	r.mu.Unlock()
+	// Durable-память снятого лока (переживает ребут, #4): in-memory
+	// lastUnlockedHash после рестарта пуст, но Manager хранит hash последнего
+	// локального снятия на диске — не даём пере-запереть по устаревшему desired,
+	// пока сервер не догнал UNLOCKED-отчёт из outbox.
+	if !skip && hash != "" && hash == r.mgr.LastUnlockedHash() {
+		skip = true
+	}
 	if skip {
 		return
 	}

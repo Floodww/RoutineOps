@@ -123,12 +123,12 @@ export default function License() {
 
   if (unavailable) {
     return (
-      <div className="space-y-4 max-w-2xl">
-        <h1 className="text-xl font-semibold">Лицензия</h1>
-        <div className="rounded-lg border p-4 space-y-2">
+      <div className="flex flex-col gap-5 max-w-2xl">
+        <h1 className="text-xl font-semibold text-foreground">Лицензия</h1>
+        <div className="glass px-5 py-[18px] space-y-2">
           <div className="flex items-center gap-2">
             <Badge variant="secondary">Free</Badge>
-            <span className="text-sm font-medium">Лицензирование недоступно в этой редакции</span>
+            <span className="text-[15px] font-semibold text-foreground">Лицензирование недоступно в этой редакции</span>
           </div>
           <p className="text-sm text-muted-foreground">
             Эта сборка — open-core RoutineOps: весь операционный MDM работает без лицензии и
@@ -152,18 +152,18 @@ export default function License() {
   const expiringSoon = !!status?.valid && left !== null && left > 0 && left <= EXPIRY_WARN_DAYS
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <h1 className="text-xl font-semibold">Лицензия</h1>
+    <div className="flex flex-col gap-5 max-w-2xl">
+      <h1 className="text-xl font-semibold text-foreground">Лицензия</h1>
 
       {persistWarning && (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+        <div className="glass bg-red-500/[0.08] px-5 py-[18px] text-sm text-destructive dark:text-[hsl(0_72%_66%)]">
           {persistWarning}
         </div>
       )}
 
       {loadError ? (
-        <div className="rounded-lg border p-4 space-y-3 text-sm">
-          <p className="font-medium">Не удалось получить статус лицензии</p>
+        <div className="glass px-5 py-[18px] space-y-3 text-sm">
+          <p className="text-[15px] font-semibold text-foreground">Не удалось получить статус лицензии</p>
           <p className="text-muted-foreground">
             Состояние неизвестно — сервер не ответил. Это не значит, что лицензии нет.
           </p>
@@ -172,9 +172,9 @@ export default function License() {
           </Button>
         </div>
       ) : (
-        <div className="rounded-lg border p-4 space-y-2 text-sm">
+        <div className="glass px-5 py-[18px] space-y-2 text-sm">
           <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">Статус:</span>
+            <span className="text-soft">Статус:</span>
             {!status?.configured && <Badge variant="secondary">Не задана</Badge>}
             {status?.valid && <Badge variant="success">Активна</Badge>}
             {notYet && <Badge variant="secondary">Ещё не действует</Badge>}
@@ -188,7 +188,7 @@ export default function License() {
           )}
 
           {expired && (
-            <p className="text-destructive">
+            <p className="text-destructive dark:text-[hsl(0_72%_66%)]">
               Срок действия закончился, enterprise-функции отключены. Данные не затронуты:
               после применения новой лицензии всё вернётся.
             </p>
@@ -202,34 +202,36 @@ export default function License() {
           )}
 
           {inGrace && (
-            <p className="text-yellow-700 dark:text-yellow-500">
+            /* В светлой теме #f59e0b на стекле даёт ~2.2:1 — берём затемнённый
+               той же тональности, в тёмной остаётся статусный amber. */
+            <p className="text-[#b45309] dark:text-[#f59e0b]">
               Срок истёк, функции пока работают на отсрочке — продлите лицензию.
             </p>
           )}
 
           {status?.configured && (
             <>
-              <div>
-                <span className="text-muted-foreground">Кому выдана: </span>
+              <div className="text-foreground">
+                <span className="text-soft">Кому выдана: </span>
                 {status.licensee || "—"}
               </div>
-              <div>
-                <span className="text-muted-foreground">Редакция: </span>
+              <div className="text-foreground">
+                <span className="text-soft">Редакция: </span>
                 {status.edition || "—"}
               </div>
-              <div>
-                <span className="text-muted-foreground">Функции: </span>
+              <div className="text-foreground">
+                <span className="text-soft">Функции: </span>
                 {featuresLabel(status.features)}
               </div>
               {status.seats ? (
-                <div>
-                  <span className="text-muted-foreground">Устройств по договору: </span>
+                <div className="text-foreground">
+                  <span className="text-soft">Устройств по договору: </span>
                   {status.seats}
                 </div>
               ) : null}
               {hasExpiry(status.expires_at) && (
-                <div className={expiringSoon ? "text-yellow-700 dark:text-yellow-500" : ""}>
-                  <span className="text-muted-foreground">Действует до: </span>
+                <div className={expiringSoon ? "text-[#b45309] dark:text-[#f59e0b]" : "text-foreground"}>
+                  <span className={expiringSoon ? "" : "text-soft"}>Действует до: </span>
                   {new Date(status.expires_at).toLocaleDateString("ru-RU")}
                   {/* Срок словами, а не только жёлтым цветом: цвет как единственный
                       носитель смысла — это WCAG 1.4.1. */}
@@ -241,12 +243,12 @@ export default function License() {
         </div>
       )}
 
-      <form onSubmit={handleApply} className="space-y-4">
-        <h2 className="text-sm font-medium">
+      <form onSubmit={handleApply} className="glass px-5 py-[18px] space-y-4">
+        <h2 className="text-[15px] font-semibold text-foreground">
           {status?.configured ? "Заменить лицензию" : "Применить лицензию"}
         </h2>
         <div className="space-y-1.5">
-          <Label htmlFor="license-blob">Лицензионный ключ</Label>
+          <Label htmlFor="license-blob" className="text-soft">Лицензионный ключ</Label>
           <textarea
             id="license-blob"
             className="flex min-h-32 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
@@ -256,7 +258,7 @@ export default function License() {
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="license-password">Пароль активации</Label>
+          <Label htmlFor="license-password" className="text-soft">Пароль активации</Label>
           <Input
             id="license-password"
             type="password"

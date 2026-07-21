@@ -6,6 +6,32 @@ import (
 	"unicode/utf8"
 )
 
+// #7: CaptureBuffer держит потолок памяти ВО ВРЕМЯ выполнения — гигабайтный
+// вывод скрипта не раздувает RAM агента; Write всегда сообщает полный len(p)
+// (иначе exec посчитал бы это ошибкой пайпа), но буферизует не больше captureCap.
+func TestCaptureBuffer_CapsMemory(t *testing.T) {
+	var c CaptureBuffer
+	chunk := make([]byte, 1<<20) // 1 МиБ за запись
+	total := 0
+	for i := 0; i < 64; i++ { // 64 МиБ суммарно
+		n, err := c.Write(chunk)
+		if err != nil || n != len(chunk) {
+			t.Fatalf("Write вернул (%d,%v), ожидалось (%d,nil)", n, err, len(chunk))
+		}
+		total += n
+	}
+	if got := len(c.String()); got > captureCap {
+		t.Fatalf("буфер %d байт превысил потолок captureCap=%d", got, captureCap)
+	}
+	if total != 64<<20 {
+		t.Fatalf("Write недосчитал записанное: %d, want %d", total, 64<<20)
+	}
+	// Превышение captureCap → итоговый TruncateOutput дописывает пометку об обрезке.
+	if out := TruncateOutput(c.String()); !strings.Contains(out, "вывод обрезан") {
+		t.Fatal("TruncateOutput не пометил обрезку при переполнении CaptureBuffer")
+	}
+}
+
 // TestSanitizeUTF8 проверяет, что невалидные UTF-8 байты (норма на RU-Windows,
 // где stdout приезжает в cp866/cp1251) заменяются заглушкой и строка становится
 // валидной для proto3-маршалинга — иначе результат задачи/политики теряется.

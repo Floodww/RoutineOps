@@ -64,6 +64,20 @@ func TestParseLoginctl(t *testing.T) {
 			want: "",
 		},
 		{
+			// Реальный формат seatless-сеанса: колонка SEAT ПУСТА (пробелы, не
+			// "-"), strings.Fields её схлопывает и в f[3] попадает TTY (pts/0).
+			// Прежняя проверка `seat != "-"` принимала pts/0 за место и выдавала
+			// удалённому ssh-юзеру права консольного — теперь prefix "seat" режет.
+			name: "ssh с пустым SEAT (pts в f[3]) пропускается",
+			out:  "  12 1000 alice        pts/0\n",
+			want: "",
+		},
+		{
+			name: "ssh с пустым SEAT пропущен, локальный за seat0 найден",
+			out:  "  12 1000 bob          pts/1\n   3 1000 alice seat0 tty2\n",
+			want: "alice",
+		},
+		{
 			name: "ssh пропущен, локальный найден",
 			out:  "  15 1001 deploy - -\n   3 1000 alice seat0 tty2\n",
 			want: "alice",

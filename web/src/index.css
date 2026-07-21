@@ -6,6 +6,9 @@
   :root {
     --background: 40 18% 96%;
     --foreground: 220 18% 18%;
+    /* --soft: приглушённый текст тела (между foreground и muted-foreground).
+       В тёмной теме это hsl(220 10% 76%) из хендоффа: заголовки #fff, тело — 76%. */
+    --soft: 220 14% 34%;
     --card: 0 0% 100%;
     --card-foreground: 220 18% 18%;
     --border: 220 14% 88%;
@@ -15,7 +18,7 @@
     --secondary: 220 14% 92%;
     --secondary-foreground: 220 18% 30%;
     --muted: 220 14% 92%;
-    --muted-foreground: 220 10% 48%;
+    --muted-foreground: 220 10% 43%;
     --accent: 220 14% 91%;
     --accent-foreground: 220 18% 18%;
     --destructive: 0 72% 51%;
@@ -27,43 +30,83 @@
        В светлой теме сам #6699FF на белом даёт ~2.4:1 — для текста
        и границ берём затемнённый той же тональности. */
     --brand: 220 72% 52%;
+    --brand-alt: 223 70% 46%;
     --brand-deep: 219 31% 27%;
 
-    --sidebar-glass: rgba(255, 255, 255, 0.72);
+    /* Liquid glass. В светлой теме «стекло» — это белая полупрозрачная плёнка
+       на тёплом фоне; значения из хендоффа (rgba(255,255,255,0.055)) там дали бы
+       невидимую карту, поэтому у каждой темы свои. Форма (blur/radius/inset-блик)
+       общая — её задаёт .glass. */
+    --glass-bg: rgba(255, 255, 255, 0.72);
+    --glass-bg-hover: rgba(255, 255, 255, 0.85);
+    --glass-border: rgba(0, 0, 0, 0.07);
+    --glass-shadow: 0 6px 26px rgba(0, 0, 0, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+    /* Фон приложения: радиальные блики фирменного синего + база. */
+    --app-bg:
+      radial-gradient(620px circle at 78% -5%, hsla(220, 72%, 52%, 0.09), transparent 60%),
+      radial-gradient(520px circle at 4% 96%, hsla(220, 72%, 52%, 0.06), transparent 60%),
+      hsl(40 18% 96%);
+
+    --sidebar-bg: rgba(255, 255, 255, 0.72);
     --sidebar-border: rgba(0, 0, 0, 0.07);
+    --logo-plate: hsl(217 30% 94%);
+    --logo-plate-fg: hsl(219 31% 40%);
     --nav-active-bg: rgba(0, 0, 0, 0.06);
+    --nav-active-ring: rgba(0, 0, 0, 0.06);
     --nav-hover-bg: rgba(0, 0, 0, 0.04);
+    --scrollbar-thumb: rgba(0, 0, 0, 0.16);
   }
 
   .dark {
     --background: 224 14% 10%;
-    --foreground: 220 10% 76%;
+    /* Основной текст в тёмной теме — чистый белый (заголовки, имена, значения);
+       вторичный слой живёт в --soft (76%), третичный — в --muted-foreground (55%). */
+    --foreground: 0 0% 100%;
+    --soft: 220 10% 76%;
     --card: 224 13% 13%;
-    --card-foreground: 220 10% 76%;
-    --border: 224 13% 20%;
+    --card-foreground: 0 0% 100%;
+    --border: 224 13% 18%;
     --input: 224 13% 20%;
     --primary: 220 10% 80%;
     --primary-foreground: 224 14% 10%;
     --secondary: 224 13% 17%;
     --secondary-foreground: 220 10% 68%;
-    --muted: 224 13% 17%;
-    /* 55% вместо 50%: на --card (13%) даёт ~4.8:1 — проходит WCAG AA (4.5:1),
-       на 50% было ~4.3:1. */
-    --muted-foreground: 220 8% 55%;
+    --muted: 224 13% 20%;
+    /* 62%, а не 55%: мерить надо не по ровной базе, а по ХУДШЕМУ месту — под
+       радиальным бликом --app-bg стекло светлеет, и 55% там проваливалось до
+       ~4.2:1. На 62% даже под бликом остаётся выше 4.5:1. */
+    --muted-foreground: 220 8% 62%;
     --accent: 224 13% 18%;
-    --accent-foreground: 220 10% 76%;
-    --destructive: 0 52% 38%;
-    --destructive-foreground: 220 10% 90%;
-    --ring: 220 8% 42%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --ring: 221 100% 72%;
 
-    /* На тёмном фоне #6699FF читается как есть. */
-    --brand: 220 100% 70%;
-    --brand-deep: 219 31% 27%;
+    /* Перивинкл-синий из литеры «R» на логотипе — вся акцентная палитра выведена
+       из него; --brand-alt — партнёр по градиенту. */
+    --brand: 221 100% 72%;
+    --brand-alt: 223 84% 62%;
+    --brand-deep: 217 30% 18%;
 
-    --sidebar-glass: rgba(15, 16, 22, 0.78);
-    --sidebar-border: rgba(255, 255, 255, 0.06);
+    --glass-bg: rgba(255, 255, 255, 0.055);
+    --glass-bg-hover: rgba(255, 255, 255, 0.09);
+    --glass-border: rgba(255, 255, 255, 0.10);
+    --glass-shadow: 0 6px 26px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+
+    --app-bg:
+      radial-gradient(620px circle at 78% -5%, hsla(221, 100%, 68%, 0.18), transparent 60%),
+      radial-gradient(520px circle at 4% 96%, hsla(221, 90%, 55%, 0.10), transparent 60%),
+      hsl(224 14% 10%);
+
+    --sidebar-bg: hsl(224 15% 8%);
+    --sidebar-border: hsl(224 13% 18%);
+    --logo-plate: hsl(217 30% 18%);
+    --logo-plate-fg: hsl(221 40% 72%);
     --nav-active-bg: rgba(255, 255, 255, 0.07);
+    --nav-active-ring: rgba(255, 255, 255, 0.06);
     --nav-hover-bg: rgba(255, 255, 255, 0.04);
+    --scrollbar-thumb: rgba(255, 255, 255, 0.12);
   }
 }
 
@@ -74,23 +117,38 @@
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
+    background: var(--app-bg);
+    background-attachment: fixed;
     margin: 0;
     min-height: 100vh;
+    /* Базовый кегль макета — 14px: от него наследуется весь текст без явного
+       класса размера (браузерный дефолт 16px давал +2px по всему приложению). */
+    font-size: 14px;
     font-family: "Inter", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
 
+  a {
+    color: hsl(var(--brand));
+  }
+  a:hover {
+    color: hsl(var(--brand) / 0.82);
+  }
+  .dark a:hover {
+    color: hsl(221 100% 82%);
+  }
+
   /* Subtle custom scrollbar */
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 7px;
+    height: 7px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: hsl(var(--border));
+    background: var(--scrollbar-thumb);
     border-radius: 99px;
   }
   ::-webkit-scrollbar-thumb:hover {
@@ -99,18 +157,52 @@
 }
 
 @layer components {
-  /* Glass sidebar */
+  /* Liquid-glass поверхность — единственный источник правды для всех карт и
+     панелей приложения. Радиус 16px несёт сама поверхность, поэтому --radius
+     (0.5rem) остаётся у контролов — кнопок, инпутов, пунктов навигации. */
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(18px) saturate(1.3);
+    -webkit-backdrop-filter: blur(18px) saturate(1.3);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    box-shadow: var(--glass-shadow);
+  }
+
+  /* Кликабельная стеклянная карта/строка: фон чуть плотнее под курсором. */
+  .glass-hover {
+    transition: background-color 0.2s ease-out;
+  }
+  .glass-hover:hover {
+    background: var(--glass-bg-hover);
+  }
+
+  /* Фирменный градиент: плитки-иконки, полосы прогресса, primary-кнопки, бейджи. */
+  .brand-gradient {
+    background: linear-gradient(160deg, hsl(var(--brand)), hsl(var(--brand-alt)));
+  }
+  .brand-gradient-h {
+    background: linear-gradient(90deg, hsl(var(--brand)), hsl(var(--brand-alt)));
+  }
+  .alert-gradient {
+    background: linear-gradient(160deg, hsl(0 70% 62%), hsl(18 85% 58%));
+  }
+
+  /* Сайдбар — непрозрачная панель (в тёмной теме hsl(224 15% 8%)), стекло тут
+     не используется намеренно: она должна читаться как «шасси», а не как карта. */
   .sidebar-glass {
-    background: var(--sidebar-glass);
+    background: var(--sidebar-bg);
     backdrop-filter: blur(20px) saturate(1.4);
     -webkit-backdrop-filter: blur(20px) saturate(1.4);
     border-right: 1px solid var(--sidebar-border);
   }
 
-  /* Nav item base */
+  /* Nav item base: 14px, padding 9×12, радиус 6px (см. хендофф). */
   .nav-item {
-    @apply flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all duration-200 ease-out;
-    will-change: background-color, color, font-weight;
+    @apply flex items-center gap-3 rounded-md px-3 text-sm transition-all duration-200 ease-out;
+    padding-top: 9px;
+    padding-bottom: 9px;
+    will-change: background-color, color;
   }
 
   .nav-item:not(.nav-item-active):hover {
@@ -120,8 +212,8 @@
 
   .nav-item-active {
     background: var(--nav-active-bg);
-    @apply text-accent-foreground font-semibold;
-    box-shadow: inset 0 0 0 1px var(--sidebar-border);
+    @apply font-semibold text-foreground;
+    box-shadow: inset 0 0 0 1px var(--nav-active-ring);
     position: relative;
   }
 
@@ -132,8 +224,8 @@
     left: 0;
     top: 50%;
     translate: 0 -50%;
-    height: 1rem;
-    width: 2px;
+    height: 18px;
+    width: 3px;
     border-radius: 99px;
     background: hsl(var(--brand));
   }
@@ -178,14 +270,6 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .feed-item { animation: none; }
-  }
-
-  /* Card hover lift */
-  .card-hover {
-    @apply transition-all duration-200;
-  }
-  .card-hover:hover {
-    @apply shadow-md -translate-y-px;
   }
 
   /* Button press */

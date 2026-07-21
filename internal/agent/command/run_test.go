@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,28 @@ func TestRunScriptTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("скрипт не был убит по контексту вовремя")
+	}
+}
+
+// Скрипт, оставивший фонового потомка с унаследованным stdout, НЕ подвешивает
+// runScript до смерти потомка: WaitDelay принудительно закрывает пайпы, а сам
+// скрипт (вышел с кодом 0) считается успешным. Без фикса Run() ждал EOF пайпа
+// ~30с (до смерти sleep), а в бою — навсегда, вместе со слотом семафора.
+func TestRunScriptBackgroundChildDoesNotHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash-скрипт: unix-платформы")
+	}
+	start := time.Now()
+	stdout, _, err := runScript(context.Background(), "macOS", "sleep 30 & echo started")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ErrWaitDelay должен трактоваться как успех, получили err=%v", err)
+	}
+	if !strings.Contains(stdout, "started") {
+		t.Errorf("stdout=%q, ожидали вывод до фонового потомка", stdout)
+	}
+	if elapsed >= 20*time.Second {
+		t.Fatalf("runScript висел %v — WaitDelay не сработал", elapsed)
 	}
 }
 

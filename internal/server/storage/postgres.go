@@ -157,6 +157,17 @@ type Device struct {
 	SerialNumber string     `json:"serial_number"`
 	PublicIP     string     `json:"public_ip"`
 	AgentVersion string     `json:"agent_version"`
+	// Расширение инвентаря (миграция 030). Заполняются в GetDevice (карточка);
+	// в списках устройств пока не выбираются. Пусто/0 = агент не сообщил.
+	Arch           string `json:"arch"`
+	ConsoleUser    string `json:"console_user"`    // Windows: DOMAIN\user; "" = за консолью никого
+	DiskEncryption string `json:"disk_encryption"` // "enabled"/"disabled"/""
+	OSPatchDate    string `json:"os_patch_date"`   // ISO "2006-01-02"; "" = неизвестно
+	BootTime       int64  `json:"boot_time"`       // unix-время загрузки; 0 = неизвестно
+	DiskFree       string `json:"disk_free"`
+	DomainJoined   string `json:"domain_joined"` // "true"/"false"/""
+	TPM            string `json:"tpm"`           // "true"/"false"/""
+	SecureBoot     string `json:"secure_boot"`   // "true"/"false"/""
 	// Устройство может состоять в НЕСКОЛЬКИХ группах (device_group_members — m2m),
 	// поэтому это список, а не одна ссылка. Первая группа задаёт цвет рамки в UI.
 	Groups []DeviceGroupRef `json:"groups"`
@@ -233,7 +244,7 @@ func (db *DB) UpsertDeviceHeartbeat(ctx context.Context, d HeartbeatData) error 
 		INSERT INTO devices (hostname, os, ip_address, public_ip, status, certificate_fingerprint, cert_cn, last_seen_at)
         VALUES ($1, 'unknown', $2, NULLIF($5,''), 'active', $3, $4, now())
 		ON CONFLICT (certificate_fingerprint)
-		DO UPDATE SET ip_address = $2, public_ip = COALESCE(NULLIF($5,''), devices.public_ip), last_seen_at = now(), cert_cn = $4,
+		DO UPDATE SET ip_address = COALESCE(NULLIF($2,''), devices.ip_address), public_ip = COALESCE(NULLIF($5,''), devices.public_ip), last_seen_at = now(), cert_cn = $4,
 			status = CASE WHEN devices.status IN ('enrolled', 'pending') THEN 'active' ELSE devices.status END
 	`, d.DeviceID, d.IPAddress, d.CertFingerprint, d.CertCN, d.PublicIP)
 	return err
@@ -257,6 +268,28 @@ type InventoryData struct {
 	IPAddress       string
 	AgentVersion    string
 	Software        []SoftwareItem
+
+	// Расширение инвентаря (proto DeviceInfo 12–20, миграция 030). Пустая
+	// строка / 0 = «агент не знает» — такие значения не затирают известное
+	// (sticky-паттерн COALESCE(NULLIF(...))). Исключение — ConsoleUser: там
+	// пустая строка это реальный факт «за консолью никого», пишется как есть.
+	//
+	// Тот же паттерн распространён на дооктябрьские поля выше (Hostname,
+	// OSVersion, CPU, RAM, Disk, IPAddress): у агента нет канала «проба
+	// не удалась» — collector.Collect() отдаёт нулевое значение и при
+	// транзиентном сбое (WMI-икота на Windows глушит os_version+ram+disk
+	// разом, Wi-Fi-переподключение — ip_address), отчёт всё равно уходит и
+	// затирал карточку до следующего цикла. OS не sticky намеренно: это
+	// normalizeOS(runtime.GOOS), пустым не бывает.
+	Arch           string
+	ConsoleUser    string
+	DiskEncryption string
+	OSPatchDate    string
+	BootTime       int64
+	DiskFree       string
+	DomainJoined   string
+	TPM            string
+	SecureBoot     string
 }
 
 type HeartbeatData struct {
@@ -279,15 +312,30 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 	var deviceID string
 	err = tx.QueryRow(ctx, `
 		UPDATE devices
-		SET hostname = $1, os = $2, os_version = $3, cpu = $4,
-		    ram = $5, disk = $6, ip_address = $7,
+		SET hostname = COALESCE(NULLIF($1,''), devices.hostname),
+		    os = $2,
+		    os_version = COALESCE(NULLIF($3,''), devices.os_version),
+		    cpu = COALESCE(NULLIF($4,''), devices.cpu),
+		    ram = COALESCE(NULLIF($5::bigint, 0), devices.ram),
+		    disk = COALESCE(NULLIF($6,''), devices.disk),
+		    ip_address = COALESCE(NULLIF($7,''), devices.ip_address),
 		    mac_address = COALESCE(NULLIF($9,''), devices.mac_address),
 		    serial_number = COALESCE(NULLIF($10,''), devices.serial_number),
 		    agent_version = COALESCE(NULLIF($11,''), devices.agent_version),
+		    arch = COALESCE(NULLIF($12,''), devices.arch),
+		    console_user = $13,
+		    disk_encryption = COALESCE(NULLIF($14,''), devices.disk_encryption),
+		    os_patch_date = COALESCE(NULLIF($15,''), devices.os_patch_date),
+		    boot_time = COALESCE(NULLIF($16::bigint, 0), devices.boot_time),
+		    disk_free = COALESCE(NULLIF($17,''), devices.disk_free),
+		    domain_joined = COALESCE(NULLIF($18,''), devices.domain_joined),
+		    tpm = COALESCE(NULLIF($19,''), devices.tpm),
+		    secure_boot = COALESCE(NULLIF($20,''), devices.secure_boot),
 		    last_seen_at = now()
 		WHERE certificate_fingerprint = $8
 		RETURNING id
-	`, d.Hostname, d.OS, d.OSVersion, d.CPU, d.RAM, d.Disk, d.IPAddress, d.CertFingerprint, d.MACAddress, d.SerialNumber, d.AgentVersion).
+	`, d.Hostname, d.OS, d.OSVersion, d.CPU, d.RAM, d.Disk, d.IPAddress, d.CertFingerprint, d.MACAddress, d.SerialNumber, d.AgentVersion,
+		d.Arch, d.ConsoleUser, d.DiskEncryption, d.OSPatchDate, d.BootTime, d.DiskFree, d.DomainJoined, d.TPM, d.SecureBoot).
 		Scan(&deviceID)
 	if err != nil {
 		return fmt.Errorf("update device: %w", err)
@@ -317,12 +365,18 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
          COALESCE(cert_cn, ''), enrolled_at,
          COALESCE(cpu, ''), COALESCE(ram, 0), COALESCE(disk, ''),
        COALESCE(mac_address, ''), COALESCE(serial_number, ''), COALESCE(public_ip, ''),
-       COALESCE(agent_version, '')
+       COALESCE(agent_version, ''),
+       COALESCE(arch, ''), COALESCE(console_user, ''), COALESCE(disk_encryption, ''),
+       COALESCE(os_patch_date, ''), COALESCE(boot_time, 0), COALESCE(disk_free, ''),
+       COALESCE(domain_joined, ''), COALESCE(tpm, ''), COALESCE(secure_boot, '')
   FROM devices WHERE id = $1
  `, id).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LockStatus, &d.LastSeenAt, &d.CreatedAt,
 		&d.CertCN, &d.EnrolledAt, &d.CPU, &d.RAM, &d.Disk, &d.MACAddress, &d.SerialNumber, &d.PublicIP,
-		&d.AgentVersion)
+		&d.AgentVersion,
+		&d.Arch, &d.ConsoleUser, &d.DiskEncryption,
+		&d.OSPatchDate, &d.BootTime, &d.DiskFree,
+		&d.DomainJoined, &d.TPM, &d.SecureBoot)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil
@@ -399,14 +453,24 @@ const (
 	LockModeFileVault = "filevault"
 )
 
+// ErrDeviceNotActive — попытка создать скрипт-задачу для устройства не в статусе
+// 'active' (pending_approval/rejected/blocked/decommissioned/pending). Скрипт-канал =
+// RCE от SYSTEM/root; неодобренная/отрезанная машина не должна его получать даже
+// пушем (парный гейт к FetchScriptPolicies на pull-канале).
+var ErrDeviceNotActive = errors.New("device is not active")
+
 func (db *DB) CreateTask(ctx context.Context, deviceID, scriptContent, platform, priority string) (*Task, error) {
 	var t Task
 	err := db.pool.QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status)
-  VALUES ($1, $2, $3, $4, 'pending')
+  SELECT $1, $2, $3, $4, 'pending'
+  WHERE EXISTS (SELECT 1 FROM devices WHERE id = $1 AND status = 'active')
   RETURNING id, device_id, script_content, platform, priority, status, created_at
  `, deviceID, scriptContent, platform, priority).
 		Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrDeviceNotActive // устройство не active → задачу не создаём
+	}
 	return &t, err
 }
 
@@ -429,19 +493,41 @@ func (db *DB) AckTask(ctx context.Context, taskID, deviceID string) error {
 	return nil
 }
 
-func (db *DB) CompleteTask(ctx context.Context, taskID, deviceID, status, output, errLog string) error {
-	tag, err := db.pool.Exec(ctx, `
-  UPDATE tasks
+// CompleteTask записывает результат и возвращает статус, который был у задачи ДО этого.
+//
+// Предыдущий статус нужен из-за гонки с FailStaleAckedTasks: тот закрывает задачу как
+// 'failed' по таймауту, а результат от живого агента может приехать позже (общий FIFO-outbox
+// агента — одна застрявшая запись задерживает все остальные). Раньше поздний результат
+// молча перетирал 'failed' на 'completed' вместе с completed_at: данные в итоге верные,
+// но факт, что консоль какое-то время показывала неправду, исчезал бесследно.
+//
+// Результат при этом ПРИНИМАЕТСЯ, а не отвергается. Гард `AND status='acked'` был бы
+// проще, но он сохранял бы ложь навсегда: задача реально выполнилась, агент это доказал,
+// а мы бы оставили 'failed' только потому, что доставка опоздала. Плюс RowsAffected()==0
+// вернуло бы ErrTaskNotOwned, а это по контракту Report*-RPC poison-pill — агент счёл бы
+// запись безнадёжной, и в логе стояло бы «не твоя задача» вместо «опоздал».
+//
+// Видимым исправление делает вызывающий (аудит + WARN) — см. gateway.ReportTaskResult.
+//
+// Старый статус берётся самоджойном: `FROM tasks old` видит строку в снимке ДО апдейта,
+// RETURNING OLD.* в Postgres не поддерживается.
+// taskType возвращается вместе с prevStatus: gateway по нему решает пост-эффект
+// завершения (decommission-задача с SUCCESS → пометить устройство списанным).
+func (db *DB) CompleteTask(ctx context.Context, taskID, deviceID, status, output, errLog string) (prevStatus, taskType string, err error) {
+	err = db.pool.QueryRow(ctx, `
+  UPDATE tasks t
   SET status = $3, output = $4, error_log = $5, completed_at = now()
-  WHERE id = $1 AND device_id = $2
- `, taskID, deviceID, status, output, errLog)
+  FROM tasks old
+  WHERE t.id = $1 AND t.device_id = $2 AND old.id = t.id
+  RETURNING old.status, old.task_type
+ `, taskID, deviceID, status, output, errLog).Scan(&prevStatus, &taskType)
 	if err != nil {
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", ErrTaskNotOwned
+		}
+		return "", "", err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrTaskNotOwned
-	}
-	return nil
+	return prevStatus, taskType, nil
 }
 
 // StaleAckedTimeoutMinutes — сколько ждать ReportTaskResult после ack, прежде чем
@@ -505,6 +591,50 @@ func (db *DB) UpdateDeviceLockStatus(ctx context.Context, deviceID, lockStatus s
 	_, err := db.pool.Exec(ctx,
 		`UPDATE devices SET lock_status = $2 WHERE id = $1`, deviceID, lockStatus)
 	return err
+}
+
+// CreateDecommissionTask ставит задачу полного самоудаления агента (вывод устройства
+// из эксплуатации). task_type='decommission'; lock_*-поля берут DEFAULT (миграция 013 —
+// NOT NULL DEFAULT), поэтому их не задаём. Агент выполняет teardown и подтверждает
+// ОБЫЧНЫМ ReportTaskResult(SUCCESS) — по task_type gateway флипает устройство в
+// 'decommissioned' (см. gateway.ReportTaskResult, MarkDeviceDecommissioned).
+//
+// Статус устройства здесь НЕ трогаем: он должен остаться прежним (обычно 'active'),
+// пока задача не доставлена — иначе Connect отклонил бы устройство раньше, чем оно
+// получит команду сноса. Флип делает gateway по подтверждению агента.
+func (db *DB) CreateDecommissionTask(ctx context.Context, deviceID string) (*Task, error) {
+	var t Task
+	err := db.pool.QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type)
+  VALUES ($1, '', COALESCE((SELECT os FROM devices WHERE id = $1), 'unknown'), 'high', 'pending', 'decommission')
+  RETURNING id, device_id, script_content, platform, priority, status, created_at, task_type, lock_hash, lock_reason, lock_unlock, lock_mode
+ `, deviceID).
+		Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode)
+	return &t, err
+}
+
+// MarkDeviceDecommissioned переводит устройство в терминальный статус 'decommissioned'.
+// Вызывается ТОЛЬКО после подтверждения агентом приёма decommission-задачи
+// (ReportTaskResult SUCCESS) — до этого статус держим прежним, чтобы Connect успел
+// доставить команду. Терминальный: gateway рвёт Connect/heartbeat и режет все agent-RPC
+// (как 'blocked'), а UpsertDeviceHeartbeat не воскрешает (CASE поднимает только
+// enrolled/pending) — списанная машина не оживает своим же прощальным heartbeat'ом.
+// Безусловный UPDATE: из любого статуса (active/blocked) → decommissioned терминален.
+func (db *DB) MarkDeviceDecommissioned(ctx context.Context, deviceID string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE devices SET status = 'decommissioned' WHERE id = $1`, deviceID)
+	return err
+}
+
+// GetDeviceStatusByID — статус устройства по его id (для guard'а админ-ручек).
+// "" (а не ошибка) при отсутствии строки: вызывающий сам решает 404.
+func (db *DB) GetDeviceStatusByID(ctx context.Context, id string) (string, error) {
+	var s string
+	err := db.pool.QueryRow(ctx, `SELECT status FROM devices WHERE id = $1`, id).Scan(&s)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return s, err
 }
 
 func (db *DB) GetDeviceLockStatus(ctx context.Context, deviceID string) (string, error) {
@@ -1854,6 +1984,11 @@ func (db *DB) FanOutScriptToGroup(ctx context.Context, groupID, scriptContent, p
   FROM device_group_members m
   JOIN devices d ON d.id = m.device_id
   WHERE m.group_id = $1
+    -- Скрипт-канал = RCE от SYSTEM/root: гоним ТОЛЬКО на active. Неодобренное
+    -- (pending_approval) устройство — член группы ДО одобрения, но скриптов не
+    -- получает (пуш-двойник pull-гейта в FetchScriptPolicies); rejected/blocked/
+    -- decommissioned тоже исключены (не в парке).
+    AND d.status = 'active'
     AND CASE
           WHEN d.os ILIKE '%win%' THEN 'Windows'
           WHEN d.os ILIKE '%mac%' OR d.os ILIKE '%darwin%' THEN 'macOS'

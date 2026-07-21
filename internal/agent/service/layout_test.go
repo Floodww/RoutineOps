@@ -34,5 +34,13 @@ func TestInstallLayout(t *testing.T) {
 		if lay.Relocate {
 			t.Fatalf("на %s раскладка должна быть выключена (установка через MSI)", runtime.GOOS)
 		}
+		// Windows: перекладка бинаря/сертов — забота MSI, но каталог изменяемого
+		// состояния обязан быть задан и абсолютен (ProgramData\RoutineOps\state),
+		// иначе state снова уедет в CWD службы (C:\Windows\System32).
+		if runtime.GOOS == "windows" {
+			if lay.DataDir == "" || !filepath.IsAbs(lay.DataDir) {
+				t.Errorf("на windows DataDir должен быть абсолютным, got %q", lay.DataDir)
+			}
+		}
 	}
 }

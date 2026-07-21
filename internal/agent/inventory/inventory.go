@@ -4,18 +4,21 @@
 package inventory
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/agent/admin"
 	"github.com/Floodww/RoutineOps/internal/agent/collector"
 	"github.com/Floodww/RoutineOps/internal/agent/transport"
 	pb "github.com/Floodww/RoutineOps/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // initialDelay — задержка перед первым отчётом, чтобы heartbeat успел
@@ -63,8 +66,14 @@ func (r *Reporter) Run(ctx context.Context) {
 
 func (r *Reporter) reportOnce(ctx context.Context) {
 	report := build(r.Version)
-	h := hashReport(report)
-	if h == r.lastHash {
+	h, err := hashReport(report)
+	if err != nil {
+		// Fail-open: без хэша шлём всегда — лишняя отправка честнее снимка,
+		// застывшего из-за сломанного дедупа.
+		r.Log.Warn("inventory: хэш снимка не построен — отправка без дедупа", slog.Any("error", err))
+		h = ""
+	}
+	if h != "" && h == r.lastHash {
 		r.Log.Debug("inventory без изменений — пропуск отправки")
 		return
 	}
@@ -102,33 +111,64 @@ func (r *Reporter) dialAndSend(ctx context.Context, report *pb.InventoryReport) 
 	return ack.GetReceived(), nil
 }
 
-// hashReport — стабильный хэш снимка (поля устройства + отсортированный список ПО),
-// чтобы пропускать отправку неизменившейся инвентаризации.
-func hashReport(r *pb.InventoryReport) string {
-	d := r.GetDeviceInfo()
-	var sb strings.Builder
-	// agent_version в хэше: после self-update версия меняется даже если прочий
-	// снимок тот же — иначе новая версия не доехала бы до сервера до след. смены.
-	fmt.Fprintf(&sb, "%s|%s|%s|%s|%d|%s|%s|%s|%s|%s\n",
-		d.GetHostname(), d.GetOs(), d.GetOsVersion(), d.GetCpu(),
-		d.GetRam(), d.GetDisk(), d.GetIpAddress(), d.GetMacAddress(),
-		d.GetSerialNumber(), d.GetAgentVersion())
+// hashReport — стабильный хэш снимка (поля устройства + список ПО без учёта
+// порядка), чтобы пропускать отправку неизменившейся инвентаризации.
+//
+// DeviceInfo и каждый SoftwareItem сериализуются протобуфом ЦЕЛИКОМ
+// (детерминированный маршалинг): новое proto-поле попадает в хэш само.
+// Ручное перечисление полей здесь было миной: забытое поле уезжало на сервер
+// один раз при первой отправке и после этого застывало навсегда — без ошибки
+// и следа в логах (TestHashReport_CoversEveryDeviceInfoField сторожит).
+//
+// Обратный инвариант — на КОЛЛЕКТОРЕ: раз в хэш входит всё, каждое поле
+// DeviceInfo обязано быть стабильным между снимками, пока машина реально не
+// изменилась. Поэтому BootTime — абсолютное время загрузки (не uptime), а
+// DiskFree огрублён до корзины (diskFreeBucket). Новое волатильное поле
+// (счётчик, метрика «сейчас») молча вернёт отправку каждые 5 минут — без
+// ошибки и следа в логах.
+//
+// Каждый блоб пишется с length-префиксом — конкатенация без него склеивала бы
+// разные снимки в одинаковый вход хэша. Детерминизм гарантирован в пределах
+// одного бинаря; после self-update библиотека может сериализовать иначе — цена
+// этого одна лишняя отправка инвентаря, и она уходит всегда (agent_version в
+// снимке меняется тем же событием).
+func hashReport(r *pb.InventoryReport) (string, error) {
+	mo := proto.MarshalOptions{Deterministic: true}
+	h := sha256.New()
+	writeBlob := func(b []byte) {
+		var n [8]byte
+		binary.LittleEndian.PutUint64(n[:], uint64(len(b)))
+		h.Write(n[:])
+		h.Write(b)
+	}
 
-	lines := make([]string, 0, len(r.GetSoftware()))
+	di, err := mo.Marshal(r.GetDeviceInfo())
+	if err != nil {
+		return "", fmt.Errorf("marshal device_info: %w", err)
+	}
+	writeBlob(di)
+
+	// Порядок списка ПО зависит от пакетного менеджера/реестра и не является
+	// изменением снимка — сортируем сериализованные записи.
+	items := make([][]byte, 0, len(r.GetSoftware()))
 	for _, s := range r.GetSoftware() {
-		lines = append(lines, s.GetSoftwareName()+"\t"+s.GetVersion())
+		b, err := mo.Marshal(s)
+		if err != nil {
+			return "", fmt.Errorf("marshal software %q: %w", s.GetSoftwareName(), err)
+		}
+		items = append(items, b)
 	}
-	sort.Strings(lines)
-	for _, l := range lines {
-		sb.WriteString(l)
-		sb.WriteByte('\n')
+	sort.Slice(items, func(i, j int) bool { return bytes.Compare(items[i], items[j]) < 0 })
+	for _, b := range items {
+		writeBlob(b)
 	}
-	sum := sha256.Sum256([]byte(sb.String()))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // build собирает proto.InventoryReport. device_id не заполняется — сервер берёт
 // его из mTLS-сертификата (ADR-1). agentVersion — версия бинаря (ldflags).
+// console_user приходит из пакета admin (osConsoleUserFull), а не из collector:
+// collector собирает факты о железе/ОС, «кто за консолью» — знание admin-слоя.
 func build(agentVersion string) *pb.InventoryReport {
 	d := collector.Collect()
 	sw := collector.InstalledSoftware()
@@ -149,6 +189,16 @@ func build(agentVersion string) *pb.InventoryReport {
 			MacAddress:   d.MAC,
 			SerialNumber: d.SerialNumber,
 			AgentVersion: agentVersion,
+
+			Arch:           d.Arch,
+			ConsoleUser:    admin.ConsoleUser(),
+			DiskEncryption: d.DiskEncryption,
+			OsPatchDate:    d.OSPatchDate,
+			BootTime:       d.BootTime,
+			DiskFree:       d.DiskFree,
+			DomainJoined:   d.DomainJoined,
+			Tpm:            d.TPM,
+			SecureBoot:     d.SecureBoot,
 		},
 		Software: items,
 	}

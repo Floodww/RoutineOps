@@ -35,6 +35,7 @@ const (
 	KindAdmin    = "admin"    // pb.ReportAdminAccessRequest
 	KindScript   = "script"   // pb.ScriptResult
 	KindLock     = "lock"     // pb.ReportLockStatusRequest
+	KindTask     = "task"     // pb.TaskResult (результат ad-hoc задачи)
 )
 
 // Dispatcher доставляет одну запись серверу.
@@ -99,6 +100,11 @@ func (q *Queue) SetMaxAge(d time.Duration) { q.maxAge = d }
 
 // Enqueue ставит отчёт в очередь (durable: после успешного возврата запись на
 // диске и будет доставлена). Сразу же будит фоновый слив (best-effort).
+//
+// Возврат ошибки означает, что запись НЕ durable — в том числе когда очередь
+// забита более приоритетными (protected) видами и свежая evictable-запись не
+// помещается (см. enforceLimit): вызывающий обязан уйти в свой фолбэк
+// (executor — прямой unary, runner — лог потери), а не считать отчёт доставленным.
 func (q *Queue) Enqueue(kind string, data []byte) error {
 	e := entry{Kind: kind, Data: data, EnqueuedAt: time.Now()}
 	buf, err := json.Marshal(e)
@@ -117,7 +123,9 @@ func (q *Queue) Enqueue(kind string, data []byte) error {
 		return fmt.Errorf("outbox: фиксация %q: %w", final, err)
 	}
 
-	q.enforceLimit()
+	if err := q.enforceLimit(name); err != nil {
+		return err
+	}
 	q.wake()
 	return nil
 }
@@ -215,21 +223,92 @@ func (q *Queue) list() ([]string, error) {
 	return names, nil
 }
 
-// enforceLimit удаляет самые старые записи, если их больше q.max.
-func (q *Queue) enforceLimit() {
+// isEvictableFirst — виды, которые при переполнении вытесняются ПЕРВЫМИ:
+// script/task — операционные данные (у task есть серверная компенсация
+// late_task_result, script менее loss-sensitive). security/admin/lock —
+// ИБ-алерты, аудит прав, статусы лока — серверной компенсации не имеют, их
+// вытесняем в последнюю очередь.
+func isEvictableFirst(kind string) bool {
+	return kind == KindScript || kind == KindTask
+}
+
+// fileKind извлекает вид из имени файла (<unixnano>-<seq>-<kind>.json). Вид при
+// постановке проходит sanitize (замена /\.- на _), но реальные Kind* этих
+// символов не содержат, поэтому доезжают неизменными. "" если имя не разобрать.
+func fileKind(name string) string {
+	parts := strings.SplitN(strings.TrimSuffix(name, ".json"), "-", 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[2]
+}
+
+// enforceLimit вытесняет записи при переполнении q.max, но НЕ слепо по возрасту:
+// прежний drop-oldest молча терял единственный ИБ-алерт под флудом
+// самовосстанавливающихся script-результатов (оффлайн-ноут + частый cron).
+// Очерёдность жертв: старые evictable (script/task, FIFO) → сама свежая запись
+// newName, если она evictable → старые protected (security/admin/lock, FIFO).
+// Потеря loss-sensitive отчёта всегда логируется (не может быть немой).
+//
+// newName — только что записанный файл этого же Enqueue. Свежая evictable-запись
+// НЕ вытесняет protected-отчёты (класс выше), поэтому при очереди, забитой
+// protected-видами, жертвой становится она сама — тогда enforceLimit удаляет её
+// и возвращает ошибку, чтобы Enqueue не отрапортовал durable-успех (прежний код
+// молча удалял свежезаписанный файл и возвращал nil — вызывающий не уходил в
+// фолбэк, и результат не существовал нигде). Свежая protected-запись, наоборот,
+// вытесняет старейшую protected и остаётся — для неё ошибка невозможна.
+func (q *Queue) enforceLimit(newName string) error {
 	if q.max <= 0 {
-		return
+		return nil
 	}
 	files, err := q.list()
 	if err != nil || len(files) <= q.max {
-		return
+		return nil
 	}
 	drop := len(files) - q.max
-	for _, f := range files[:drop] {
-		os.Remove(filepath.Join(q.dir, f))
+
+	// files уже в FIFO-порядке; разложение сохраняет его внутри каждого класса.
+	var evictable, protected []string
+	for _, f := range files {
+		if f == newName {
+			continue // свежая запись — кандидат особого порядка, см. ниже
+		}
+		if isEvictableFirst(fileKind(f)) {
+			evictable = append(evictable, f)
+		} else {
+			protected = append(protected, f)
+		}
 	}
-	q.log.Warn("outbox: очередь переполнена, отброшены старые записи",
-		slog.Int("dropped", drop), slog.Int("max", q.max))
+	victims := evictable
+	newSacrificed := false
+	if len(victims) < drop && isEvictableFirst(fileKind(newName)) {
+		victims = append(victims, newName)
+		newSacrificed = true
+	}
+	if len(victims) < drop {
+		victims = append(victims, protected...)
+	}
+	if len(victims) > drop {
+		victims = victims[:drop]
+	}
+
+	droppedProtected := 0
+	for _, f := range victims {
+		os.Remove(filepath.Join(q.dir, f))
+		if kind := fileKind(f); !isEvictableFirst(kind) {
+			droppedProtected++
+			q.log.Error("outbox: ПЕРЕПОЛНЕНИЕ вытеснило loss-sensitive отчёт — серверной компенсации нет",
+				slog.String("kind", kind), slog.String("file", f))
+		}
+	}
+	q.log.Warn("outbox: очередь переполнена, записи вытеснены",
+		slog.Int("dropped", len(victims)), slog.Int("dropped_protected", droppedProtected), slog.Int("max", q.max))
+
+	if newSacrificed {
+		return fmt.Errorf("outbox: очередь забита loss-sensitive отчётами (max %d) — запись вида %q не помещается",
+			q.max, fileKind(newName))
+	}
+	return nil
 }
 
 // enforceAge удаляет записи старше maxAge. Возраст берётся из префикса имени

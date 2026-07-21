@@ -33,45 +33,7 @@ func cpuModel() string {
 	if err != nil {
 		return runtime.GOARCH
 	}
-	return parseCPUModel(string(data))
-}
-
-// parseCPUModel достаёт имя процессора из /proc/cpuinfo. Строка "model name" есть
-// только на x86: на aarch64 ядро её не печатает вовсе, там имя SoC лежит в
-// "Hardware" (или "Model" у Raspberry Pi). Пустой CPU в инвентаре бесполезен,
-// поэтому последний рубеж — архитектура.
-func parseCPUModel(cpuinfo string) string {
-	var hardware, model string
-	sc := bufio.NewScanner(strings.NewReader(cpuinfo))
-	for sc.Scan() {
-		key, val, ok := strings.Cut(sc.Text(), ":")
-		if !ok {
-			continue
-		}
-		val = strings.TrimSpace(val)
-		if val == "" {
-			continue
-		}
-		switch strings.TrimSpace(key) {
-		case "model name":
-			return val
-		case "Hardware":
-			if hardware == "" {
-				hardware = val
-			}
-		case "Model":
-			if model == "" {
-				model = val
-			}
-		}
-	}
-	switch {
-	case hardware != "":
-		return hardware
-	case model != "":
-		return model
-	}
-	return runtime.GOARCH
+	return parseCPUModel(string(data)) // общий парсер в collector_procfs.go
 }
 
 func ramMegabytes() int64 {
@@ -103,26 +65,95 @@ func diskTotal() string {
 	return humanBytes(st.Blocks * uint64(st.Bsize))
 }
 
+// diskEncryption — зашифрован ли корневой том: в цепочке блок-устройств под "/"
+// (lsblk --inverse) есть слой TYPE=crypt (LUKS/dm-crypt). findmnt даёт источник
+// корня; у btrfs он приходит с суффиксом subvolume ("/dev/sda2[/@]").
+func diskEncryption() string {
+	src, err := exec.Command("findmnt", "-no", "SOURCE", "/").Output()
+	if err != nil {
+		return ""
+	}
+	dev := strings.TrimSpace(string(src))
+	if i := strings.IndexByte(dev, '['); i >= 0 {
+		dev = dev[:i]
+	}
+	if !strings.HasPrefix(dev, "/dev/") {
+		return "" // tmpfs/overlay/сетевой корень — не блок-устройство, статус неопределим
+	}
+	out, err := exec.Command("lsblk", "-rsno", "TYPE", dev).Output()
+	if err != nil {
+		return ""
+	}
+	return parseLsblkCrypt(string(out))
+}
+
+// parseLsblkCrypt разбирает `lsblk -rsno TYPE <dev>` (цепочка от устройства к
+// физическому диску, по типу на строку): crypt в цепочке → enabled.
+func parseLsblkCrypt(out string) string {
+	seen := false
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		seen = true
+		if t == "crypt" {
+			return "enabled"
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return "disabled"
+}
+
+// osPatchDate на Linux не собирается: универсального сигнала «когда ОС последний
+// раз обновлялась» между dpkg/rpm/pacman/apk нет, а mtime пакетной базы меняет
+// любая установка ПО — отдавать его как дату обновления ОС было бы враньём.
+// Пустая строка = честное «не знаю» (контракт proto DeviceInfo).
+func osPatchDate() string { return "" }
+
+// bootTime: /proc/stat, строка "btime <unix>" — абсолютное время загрузки
+// (стабильно между снимками, в отличие от uptime).
+func bootTime() int64 {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if v, ok := strings.CutPrefix(sc.Text(), "btime "); ok {
+			sec, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				return 0
+			}
+			return sec
+		}
+	}
+	return 0
+}
+
+func diskFree() string {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs("/", &st); err != nil {
+		return ""
+	}
+	return humanBytesBucketed(st.Bavail * uint64(st.Bsize))
+}
+
+// domainJoined — заведомое "false" (Linux в AD-домен в нашей модели не вводится,
+// контракт хендоффа); TPM/SecureBoot — Windows-специфика, не собираются.
+func domainJoined() string      { return "false" }
+func tpmPresent() string        { return "" }
+func secureBootEnabled() string { return "" }
+
 // dmiSerialPath — серийник, выложенный ядром из SMBIOS. Читается без запуска
 // dmidecode (которого на минимальных образах просто нет).
 const dmiSerialPath = "/sys/class/dmi/id/product_serial"
 
-// placeholderSerials — то, что вписывают в SMBIOS вместо серийника вендоры и
-// гипервизоры. Такое значение хуже пустого: оно одинаково на тысячах машин,
-// а сервер считает серийник идентификатором железа.
-var placeholderSerials = map[string]bool{
-	"":                       true,
-	"none":                   true,
-	"to be filled by o.e.m.": true,
-	"system serial number":   true,
-	"default string":         true,
-	"not specified":          true,
-	"0":                      true,
-}
-
-func isPlaceholderSerial(s string) bool {
-	return placeholderSerials[strings.ToLower(strings.TrimSpace(s))]
-}
+// placeholderSerials/isPlaceholderSerial вынесены в кросс-платформенный
+// collector.go (тем же фильтром пользуются Windows/darwin serialNumber).
 
 // parseDmidecode берёт значение из вывода `dmidecode -s`: часть сборок печатает в
 // stdout баннер («# dmidecode 3.3») перед самим значением, поэтому берём последнюю

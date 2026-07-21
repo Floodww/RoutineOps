@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { Plus, Trash2, ChevronDown, ChevronUp, Upload } from "lucide-react"
 import api, { Script, ScriptPlatform, scriptPlatformFromFilename } from "@/lib/api"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -31,7 +32,7 @@ const PLATFORM_COLOR: Record<string, string> = {
 }
 
 const FILTER_ITEMS: { value: "all" | ScriptPlatform; label: string; color: string }[] = [
-  { value: "all",     label: "Все",     color: "bg-primary text-primary-foreground" },
+  { value: "all",     label: "Все",     color: "brand-gradient text-white dark:text-[hsl(224_14%_10%)]" },
   { value: "macOS",   label: "macOS",   color: "bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/30" },
   { value: "linux",   label: "Linux",   color: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30" },
   { value: "Windows", label: "Windows", color: "bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-500/30" },
@@ -115,7 +116,7 @@ export default function Scripts() {
     }
   }
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
 
   const q = query.trim().toLowerCase()
   const visible = scripts
@@ -123,9 +124,9 @@ export default function Scripts() {
     .filter((s) => !q || s.name.toLowerCase().includes(q))
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Скрипты</h1>
+        <h1 className="text-xl font-semibold text-foreground">Скрипты</h1>
         <div className="flex items-center gap-2">
           <input
             ref={fileInputRef}
@@ -146,7 +147,9 @@ export default function Scripts() {
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
+      {/* Фильтры — отдельная стеклянная панель, как на «Устройствах»: карте таблицы
+          нужен overflow-hidden, и он обрезал бы всплывающие элементы фильтров. */}
+      <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
         <div className="flex items-center gap-1.5">
           {FILTER_ITEMS.map(({ value, label, color }) => (
             <button
@@ -169,20 +172,20 @@ export default function Scripts() {
         />
       </div>
 
-      <div className="rounded-lg border">
+      <div className="glass overflow-hidden">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Название</TableHead>
-              <TableHead>Платформа</TableHead>
-              <TableHead>Обновлён</TableHead>
+            <TableRow className="border-t-0 hover:bg-transparent">
+              <TableHead className="text-xs">Название</TableHead>
+              <TableHead className="text-xs">Платформа</TableHead>
+              <TableHead className="text-xs">Обновлён</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
             {visible.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-8">
                   Нет скриптов
                 </TableCell>
               </TableRow>
@@ -190,19 +193,19 @@ export default function Scripts() {
             {visible.map((s) => (
               <React.Fragment key={s.id}>
                 <TableRow
-                  className="cursor-pointer"
+                  className="cursor-pointer glass-hover"
                   onClick={() => setExpandedId(expandedId === s.id ? null : s.id)}
                 >
-                  <TableCell className="font-medium">{s.name}</TableCell>
-                  <TableCell>
-                    <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${PLATFORM_COLOR[s.platform] ?? "text-muted-foreground"}`}>
+                  <TableCell className="px-4 py-3 text-sm font-medium text-foreground">{s.name}</TableCell>
+                  <TableCell className="px-4 py-3">
+                    <Badge variant="outline" className={PLATFORM_COLOR[s.platform]}>
                       {s.platform}
-                    </span>
+                    </Badge>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
+                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">
                     {formatDistanceToNow(s.updated_at)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-4 py-3">
                     <div className="flex items-center gap-2 justify-end">
                       <button
                         type="button"
@@ -226,9 +229,11 @@ export default function Scripts() {
                   </TableCell>
                 </TableRow>
                 {expandedId === s.id && (
-                  <TableRow>
-                    <TableCell colSpan={4} className="bg-muted/30 p-0">
-                      <pre className="p-4 text-xs font-mono whitespace-pre-wrap break-all text-foreground max-h-60 overflow-auto">
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={4} className="px-4 py-3">
+                      {/* Блок кода читается как «терминал» — остаётся на bg-muted,
+                          но радиус и бордер берёт у системы (как pre в диалогах). */}
+                      <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono whitespace-pre-wrap break-all text-soft max-h-60 overflow-auto">
                         {s.content}
                       </pre>
                     </TableCell>

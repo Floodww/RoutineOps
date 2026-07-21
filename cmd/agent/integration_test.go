@@ -236,7 +236,19 @@ func TestAgentEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	executor := command.NewExecutor(dialer, log, "")
+	// Боевая проводка результата задачи: executor → outbox (KindTask) →
+	// dispatchReport → ReportTaskResult (как в runAgent), а не прямой unary.
+	ob, err := outbox.New(filepath.Join(dir, "outbox"), 0, 200*time.Millisecond, log,
+		func(ctx context.Context, kind string, data []byte) error {
+			return dispatchReport(ctx, dialer, kind, data, log)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); ob.Run(ctx) }()
+
+	executor := command.NewExecutor(dialer, log, "", ob.Enqueue)
 	hb := &heartbeat.Heartbeater{
 		Interval: 200 * time.Millisecond,
 		IPFunc:   func() string { return "9.9.9.9" },
@@ -526,6 +538,78 @@ func TestOutboxDeliversAfterOutage(t *testing.T) {
 		t.Fatal("ReportAdminAccess не доставлен после восстановления связи")
 	}
 
+	if ob.Len() != 0 {
+		t.Fatalf("очередь не очищена после доставки: Len=%d", ob.Len())
+	}
+}
+
+// TestOutboxDeliversTaskResultAfterOutage: результат ad-hoc задачи, поставленный
+// в очередь при недоступном сервере, не теряется и до-сылается ReportTaskResult
+// после восстановления связи (агентская половина фикса «результат задачи не
+// durable»; серверная — sweep зависших acked-задач).
+func TestOutboxDeliversTaskResultAfterOutage(t *testing.T) {
+	dir := t.TempDir()
+	genCerts(t, dir)
+
+	// Резервируем адрес и сразу освобождаем — на этой фазе сервера нет.
+	tmpLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := tmpLis.Addr().String()
+	tmpLis.Close()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	certs := transport.FileCertProvider{
+		CertFile: filepath.Join(dir, "agent.crt"),
+		KeyFile:  filepath.Join(dir, "agent.key"),
+		CAFile:   filepath.Join(dir, "ca.crt"),
+	}
+	dialer, err := transport.NewDialer(addr, "localhost", certs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ob, err := outbox.New(filepath.Join(dir, "outbox"), 0, time.Hour, log,
+		func(ctx context.Context, kind string, data []byte) error {
+			return dispatchReport(ctx, dialer, kind, data, log)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resData, _ := proto.Marshal(&pb.TaskResult{
+		TaskId: "task-42", Status: pb.TaskStatus_TASK_STATUS_SUCCESS, Output: "done",
+	})
+	if err := ob.Enqueue(outbox.KindTask, resData); err != nil {
+		t.Fatal(err)
+	}
+
+	ob.FlushOnce(context.Background()) // сервера нет — доставка должна провалиться
+	if ob.Len() != 1 {
+		t.Fatalf("при недоступном сервере запись должна остаться, got Len=%d", ob.Len())
+	}
+
+	c := &capture{resCh: make(chan *pb.TaskResult, 1)}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("повторный listen на %s: %v", addr, err)
+	}
+	gs := grpc.NewServer(grpc.Creds(serverTLS(t, dir)))
+	pb.RegisterAgentServiceServer(gs, &testServer{c: c})
+	go gs.Serve(lis)
+	defer gs.Stop()
+
+	ob.FlushOnce(context.Background())
+
+	select {
+	case res := <-c.resCh:
+		if res.GetTaskId() != "task-42" || res.GetStatus() != pb.TaskStatus_TASK_STATUS_SUCCESS {
+			t.Fatalf("неверный TaskResult: %+v", res)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("TaskResult не доставлен после восстановления связи")
+	}
 	if ob.Len() != 0 {
 		t.Fatalf("очередь не очищена после доставки: Len=%d", ob.Len())
 	}

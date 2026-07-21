@@ -81,14 +81,42 @@ func (osPriv) IsAdmin(user string) (bool, error) {
 	return false, nil
 }
 
-// osConsoleUser — интерактивный пользователь (без домена). Best-effort.
-func osConsoleUser() string {
+// queryConsoleUserName возвращает Win32_ComputerSystem.UserName как есть
+// (DOMAIN\user) либо ошибку опроса. Общий источник для инвентаря и admin-выдачи,
+// которые по-разному трактуют ОТКАЗ (см. ниже).
+func queryConsoleUserName() (string, error) {
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"(Get-CimInstance Win32_ComputerSystem).UserName").Output()
 	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// osConsoleUserFull — интерактивный пользователь для ИНВЕНТАРЯ в исходной форме
+// DOMAIN\user (домен не отбрасываем — по нему учётка матчится с каталогом).
+// Второй результат — успешность пробы. При отказе опроса — ("", false), НЕ
+// %USERNAME%: служба работает под LocalSystem, где env дал бы "SYSTEM" —
+// выдуманное значение уехало бы на сервер в PII-поле как «текущий пользователь».
+// false отличает отказ WMI от честного «за консолью никого» ("", true) — иначе
+// транзиентный сбой выглядел бы для сервера как логаут (см. ConsoleUser).
+func osConsoleUserFull() (string, bool) {
+	u, err := queryConsoleUserName()
+	if err != nil {
+		return "", false
+	}
+	return u, true
+}
+
+// osConsoleUser — интерактивный пользователь БЕЗ домена для ВЫДАЧИ временной
+// админки (`net localgroup` ждёт голое имя локальной учётки). При отказе опроса
+// сохраняется прежний env-фолбэк: тут неверное имя лишь безвредно уронит
+// net localgroup, наружу (в инвентарь/каталог) оно не уходит.
+func osConsoleUser() string {
+	u, err := queryConsoleUserName()
+	if err != nil {
 		return os.Getenv("USERNAME")
 	}
-	u := strings.TrimSpace(string(out))
 	if i := strings.LastIndex(u, `\`); i >= 0 {
 		u = u[i+1:] // DOMAIN\user -> user
 	}

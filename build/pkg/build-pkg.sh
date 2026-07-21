@@ -131,7 +131,10 @@ consume_enroll_env() {
         echo "Игнорирую $f: доступен на запись group/other (mode $perms)." >&2
         return 1
     fi
-    while IFS='=' read -r k v; do
+    # `|| [ -n "$k" ]` — не терять последнюю строку файла без финального \n
+    # (read тогда заполняет переменные, но возвращает ненулевой код).
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        k=${k%$'\r'}; v=${v%$'\r'}   # срезать хвостовой CR (файл, сохранённый с Windows CRLF)
         v=${v%\"}; v=${v#\"}   # снять парные кавычки, если оператор их поставил
         case "$k" in
             ENROLL_URL)    ENROLL_URL=$v ;;

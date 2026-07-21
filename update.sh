@@ -15,6 +15,11 @@ if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="do
 [ -f .env.prod ]          || { echo "Нет .env.prod — сначала ./install.sh"; exit 1; }
 [ -f release_ed25519.pem ] || { echo "Нет release_ed25519.pem — сначала ./install.sh"; exit 1; }
 
+# .env.prod правится руками и гитигнорится → может доехать с Windows в CRLF. Тут CR
+# падает громко (DATABASE_DSN=...sslmode=disable\r → publish-release не коннектится),
+# но чиним симметрично install.sh, а не по месту падения.
+grep -q $'\r' .env.prod && { sed -i 's/\r$//' .env.prod; echo "!! .env.prod был в CRLF (Windows) — привёл к LF"; }
+
 set -a; . ./.env.prod; set +a
 
 echo "=== MDM Update ==="

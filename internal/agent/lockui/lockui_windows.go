@@ -156,12 +156,32 @@ func Run(statePath string, log *slog.Logger) {
 	unlocked := false
 
 	submit := func() {
-		if bcrypt.CompareHashAndPassword([]byte(st.Hash), []byte(pwEdit.Text())) != nil {
+		// Сверяем со СВЕЖИМ состоянием, а не с прочитанным при старте оверлея:
+		// окно может висеть часами, и за это время демон мог применить НОВЫЙ лок
+		// (эскалация ИБ, другой hash). Кэшированный хеш принимал бы пароль уже
+		// снятой заявки и затирал новый лок (см. lock.MarkUnlocked).
+		cur, err := lock.ReadState(statePath)
+		if err != nil {
+			// Fail-closed, симметрично сторожу-тикеру и демону (оба на ошибке
+			// чтения держат текущее состояние): транзиентный сбой I/O — не повод
+			// закрывать замок. Повторный Enter попробует ещё раз.
+			errLabel.SetText("Не удалось проверить состояние блокировки — попробуйте ещё раз")
+			return
+		}
+		if !cur.Locked {
+			unlocked = true // разблокировано сервером, пока вводили пароль
+			mw.Close()
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(cur.Hash), []byte(pwEdit.Text())) != nil {
 			errLabel.SetText("Неверный пароль")
 			pwEdit.SetText("")
 			return
 		}
-		if err := lock.ClearState(statePath); err != nil {
+		// Маркер сверенного hash — демон (detectOfflineUnlock) по нему отличает
+		// снятие текущего лока от гонки со сменой лока и не примет устаревшее
+		// снятие за легитимное.
+		if err := lock.MarkUnlocked(statePath, cur.Hash); err != nil {
 			log.Error("lock-screen: не удалось снять блокировку", slog.Any("error", err))
 		}
 		unlocked = true

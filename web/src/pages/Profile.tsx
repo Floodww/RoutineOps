@@ -40,33 +40,46 @@ export default function Profile() {
   }
 
   return (
-    <div className="p-6 space-y-6 max-w-lg">
-      <h1 className="text-xl font-semibold">Профиль</h1>
+    <div className="flex flex-col gap-5 max-w-lg">
+      <h1 className="text-xl font-semibold text-foreground">Профиль</h1>
 
-      <div className="space-y-2 text-sm rounded-lg border p-4">
-        <div><span className="text-muted-foreground">Имя: </span>{me?.name ?? "—"}</div>
-        <div><span className="text-muted-foreground">Email: </span>{me?.email ?? "—"}</div>
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">Роль:</span>
-          {me && <Badge variant={me.role === "it_admin" ? "default" : "secondary"}>{roleLabels[me.role] ?? me.role}</Badge>}
+      <div className="glass px-5 py-[18px]">
+        <h2 className="text-[15px] font-semibold text-foreground">Учётная запись</h2>
+        <p className="text-xs text-muted-foreground mb-3.5">Данные пользователя</p>
+        <div className="flex flex-col gap-2.5 text-[13px]">
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-soft">Имя</span>
+            <span className="text-foreground truncate">{me?.name ?? "—"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-soft">Email</span>
+            <span className="text-foreground truncate">{me?.email ?? "—"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-soft">Роль</span>
+            {me && <Badge variant={me.role === "it_admin" ? "default" : "secondary"}>{roleLabels[me.role] ?? me.role}</Badge>}
+          </div>
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <h2 className="text-sm font-medium">Смена пароля</h2>
+      <form onSubmit={handleSubmit} className="glass px-5 py-[18px] flex flex-col gap-4">
+        <div>
+          <h2 className="text-[15px] font-semibold text-foreground">Смена пароля</h2>
+          <p className="text-xs text-muted-foreground">Введите текущий и новый пароль</p>
+        </div>
         <div className="space-y-1.5">
-          <Label>Текущий пароль</Label>
+          <Label className="text-soft">Текущий пароль</Label>
           <Input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
         </div>
         <div className="space-y-1.5">
-          <Label>Новый пароль</Label>
+          <Label className="text-soft">Новый пароль</Label>
           <Input type="password" value={next} onChange={(e) => setNext(e.target.value)} required autoComplete="new-password" />
         </div>
         <div className="space-y-1.5">
-          <Label>Повторите новый пароль</Label>
+          <Label className="text-soft">Повторите новый пароль</Label>
           <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
         </div>
-        <Button type="submit" disabled={loading}>{loading ? "Сохранение..." : "Сменить пароль"}</Button>
+        <Button type="submit" disabled={loading} className="self-start">{loading ? "Сохранение..." : "Сменить пароль"}</Button>
       </form>
     </div>
   )

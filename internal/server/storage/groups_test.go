@@ -161,9 +161,9 @@ func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
-	winDev := mustCreateDevice(t, db, "win-"+suffix, "Windows")
-	macDev := mustCreateDevice(t, db, "mac-"+suffix, "macos")
-	linuxDev := mustCreateDevice(t, db, "lin-"+suffix, "linux")
+	winDev := mustCreateActiveDevice(t, db, "win-"+suffix, "Windows")
+	macDev := mustCreateActiveDevice(t, db, "mac-"+suffix, "macos")
+	linuxDev := mustCreateActiveDevice(t, db, "lin-"+suffix, "linux")
 	for _, d := range []string{winDev.ID, macDev.ID, linuxDev.ID} {
 		if err := db.AddDeviceToGroup(ctx, d, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup %s: %v", d, err)

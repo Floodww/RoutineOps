@@ -17,7 +17,8 @@ const DropdownMenuContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        "z-50 min-w-[8rem] overflow-hidden rounded-lg border bg-background/90 backdrop-blur-md p-1 text-foreground shadow-lg",
+        // Меню — контрол, а не карта: стеклянная поверхность, но радиус меньше карточного.
+        "glass rounded-lg z-50 min-w-[8rem] overflow-hidden p-1 text-foreground",
         "data-[state=open]:animate-dropdown-in data-[state=closed]:animate-dropdown-out",
         className
       )}
@@ -51,7 +52,7 @@ const DropdownMenuSeparator = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DropdownMenuPrimitive.Separator
     ref={ref}
-    className={cn("-mx-1 my-1 h-px bg-muted", className)}
+    className={cn("-mx-1 my-1 h-px bg-border", className)}
     {...props}
   />
 ))

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,21 +28,13 @@ func osVersion() string {
 }
 
 func cpuModel() string {
-	f, err := os.Open("/proc/cpuinfo")
+	// Тот же парсер и GOARCH-флор, что на Linux (collector_procfs.go): пустой CPU
+	// в инвентаре бесполезен, а aarch64 "model name" не печатает.
+	data, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
-		return ""
+		return runtime.GOARCH
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "model name") {
-			if _, v, ok := strings.Cut(line, ":"); ok {
-				return strings.TrimSpace(v)
-			}
-		}
-	}
-	return ""
+	return parseCPUModel(string(data))
 }
 
 func ramMegabytes() int64 {
@@ -80,6 +73,17 @@ func serialNumber() string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// Расширенный инвентарь на нецелевых платформах не собирается: всё «не знаю»
+// (пустые строки / 0), включая domain_joined — в отличие от macOS/Linux, где
+// "false" заведомое.
+func diskEncryption() string    { return "" }
+func osPatchDate() string       { return "" }
+func bootTime() int64           { return 0 }
+func diskFree() string          { return "" }
+func domainJoined() string      { return "" }
+func tpmPresent() string        { return "" }
+func secureBootEnabled() string { return "" }
 
 // installedSoftware пробует dpkg (Debian/Ubuntu). Best-effort.
 func installedSoftware() []Software {

@@ -55,6 +55,7 @@ check-escrow-tags:
 	fi
 
 .PHONY: help proto tidy fmt agent mockserver build certs up down logs run-mock run-agent test clean \
+        pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \
         build-win build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win check-escrow-tags
 
 help: ## Список целей
@@ -147,6 +148,41 @@ build-linux-arm64: check-escrow-tags ## Кросс-компиляция аген
 		-o bin/agent_linux_arm64 ./cmd/agent
 
 build-all: build build-win build-mac build-linux build-linux-arm64 ## Собрать всё (сервер + агент 3 платформы)
+
+# ── Linux-пакеты (.deb/.rpm) через nfpm ──
+# Один nfpm.yaml на оба формата; арх/версия/бинарь передаются через окружение.
+# Юнит systemd в пакет НЕ кладём — его генерит `enroll -install-service` (см.
+# build/nfpm/nfpm.yaml). NFPM берётся из PATH или ~/go/bin.
+NFPM ?= $(shell command -v nfpm 2>/dev/null || echo $(HOME)/go/bin/nfpm)
+
+# pkg-linux собирает .deb и .rpm под amd64 и arm64 (4 артефакта в bin/).
+pkg-linux: pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 ## Собрать .deb+.rpm (amd64+arm64)
+
+# nfpmPackage <arch> <bin> <format>: staging бинаря + сборка. Каталог staging и
+# сгенерированный конфиг УНИКАЛЬНЫ per (arch,format) — иначе под `make -j`
+# arm64-cp перетёр бы amd64-payload между cp и nfpm (amd64-пакет с arm64-ELF).
+# src подставляется через sed (nfpm не разворачивает ${env} в glob src); пути
+# scripts/src — repo-relative, nfpm резолвит их от CWD (корень репо).
+define nfpmPackage
+	rm -rf build/nfpm/stage-$(1)-$(3)
+	mkdir -p build/nfpm/stage-$(1)-$(3)
+	cp $(2) build/nfpm/stage-$(1)-$(3)/RoutineOps-agent
+	sed 's#__SRC__#build/nfpm/stage-$(1)-$(3)/RoutineOps-agent#' build/nfpm/nfpm.yaml \
+		> build/nfpm/stage-$(1)-$(3)/nfpm.yaml
+	PKG_ARCH=$(1) PKG_VERSION=$(VERSION) $(NFPM) package -f build/nfpm/stage-$(1)-$(3)/nfpm.yaml -p $(3) -t bin/
+endef
+
+pkg-deb: build-linux ## .deb amd64
+	$(call nfpmPackage,amd64,bin/agent_linux_amd64,deb)
+
+pkg-rpm: build-linux ## .rpm amd64
+	$(call nfpmPackage,amd64,bin/agent_linux_amd64,rpm)
+
+pkg-deb-arm64: build-linux-arm64 ## .deb arm64
+	$(call nfpmPackage,arm64,bin/agent_linux_arm64,deb)
+
+pkg-rpm-arm64: build-linux-arm64 ## .rpm arm64
+	$(call nfpmPackage,arm64,bin/agent_linux_arm64,rpm)
 
 msi-exe: build-win ## Подготовить exe для сборки MSI: bin -> build/msi/mdm-agent.exe
 	cp bin/agent_windows_amd64.exe build/msi/mdm-agent.exe

@@ -34,6 +34,10 @@ const statusVariant: Record<string, "default" | "secondary" | "success" | "destr
   revoked: "outline",
 }
 
+// Строки таблицы разделяются верхней границей (как ленты на «Обзоре»),
+// поэтому border-b примитива гасится, а border-t проставляется явно.
+const ROW = "hover:bg-transparent"
+
 export default function AdminAccess() {
   const [requests, setRequests] = useState<AdminAccessRequest[]>([])
   const [query, setQuery] = useState("")
@@ -103,69 +107,80 @@ export default function AdminAccess() {
   if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">Заявки на права</h1>
-        {pending.length > 0 && <Badge variant="destructive">{pending.length}</Badge>}
+        <h1 className="text-xl font-semibold text-foreground">Заявки на права</h1>
+        {pending.length > 0 && <Badge variant="secondary">{pending.length}</Badge>}
       </div>
 
-      <Input
-        placeholder="Поиск по устройству..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="max-w-sm"
-      />
+      {/* overflow-hidden: янтарная подсветка последней pending-строки иначе вылезает
+          за 16px-скругление стеклянной карты. */}
+      <div className="glass overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-3">
+          <div>
+            <h2 className="text-[15px] font-semibold text-foreground">Запросы доступа</h2>
+            <p className="text-xs text-muted-foreground">Временные права администратора на устройстве</p>
+          </div>
+          <Input
+            placeholder="Поиск по устройству..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="max-w-[240px]"
+          />
+        </div>
 
-      <div className="rounded-lg border">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Устройство</TableHead>
-              <TableHead>Причина</TableHead>
-              <TableHead>Запрошено</TableHead>
-              <TableHead>Истекает</TableHead>
-              <TableHead>Статус</TableHead>
-              <TableHead />
+            <TableRow className={ROW}>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Устройство</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Причина</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Запрошено</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Истекает</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Статус</TableHead>
+              <TableHead className="px-5" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {visible.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
+              <TableRow className={ROW}>
+                <TableCell colSpan={6} className="text-center text-xs text-muted-foreground py-8">
                   {requests.length === 0 ? "Нет заявок" : "Ничего не найдено"}
                 </TableCell>
               </TableRow>
             )}
             {visible.map((req) => (
-              <TableRow key={req.id} className={req.status === "pending" ? "bg-yellow-500/5" : ""}>
-                <TableCell className="font-medium">{req.device_hostname || req.device_id.slice(0, 8)}</TableCell>
-                <TableCell className="text-sm max-w-xs">
+              // Ожидающие заявки подсвечены янтарным — тем же цветом, что и статус pending.
+              <TableRow key={req.id} className={`${ROW} ${req.status === "pending" ? "bg-amber-500/[0.06]" : ""}`}>
+                <TableCell className="px-5 py-3 text-sm font-medium text-foreground">{req.device_hostname || req.device_id.slice(0, 8)}</TableCell>
+                <TableCell className="px-5 py-3 text-[13px] max-w-xs">
                   {req.reason ? (
                     <button
                       type="button"
                       onClick={() => setReasonReq(req)}
-                      className="truncate block max-w-xs text-left hover:text-foreground text-muted-foreground transition-colors hover:underline underline-offset-2"
+                      className="truncate block max-w-xs text-left text-soft hover:text-foreground transition-colors hover:underline underline-offset-2"
                       title="Нажмите, чтобы увидеть полностью"
                     >
                       {req.reason}
                     </button>
-                  ) : "—"}
+                  ) : <span className="text-muted-foreground">—</span>}
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{formatDistanceToNow(req.requested_at)}</TableCell>
-                <TableCell className="text-xs text-muted-foreground">
+                <TableCell className="px-5 py-3 text-xs text-muted-foreground">{formatDistanceToNow(req.requested_at)}</TableCell>
+                <TableCell className="px-5 py-3 text-xs text-muted-foreground">
                   {req.expires_at ? formatDistanceToNow(req.expires_at) : req.pending_expires_at ? formatDistanceToNow(req.pending_expires_at) : "—"}
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-5 py-3">
                   <Badge variant={statusVariant[req.status] ?? "default"}>
                     {statusLabel[req.status] ?? req.status}
                   </Badge>
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-5 py-3">
                   {req.status === "pending" && (
                     <div className="flex gap-2">
                       <Dialog open={approveOpen === req.id} onOpenChange={(o) => setApproveOpen(o ? req.id : null)}>
                         <DialogTrigger asChild>
-                          <Button size="sm" variant="outline" className="text-green-700 border-green-200 hover:bg-green-50 dark:text-green-400 dark:border-green-900 dark:hover:bg-green-950">
+                          {/* Одобрение — единственное «продвигающее» действие строки, поэтому
+                              фирменный градиент; отказ и отзыв остаются вторичными. */}
+                          <Button size="sm">
                             Одобрить
                           </Button>
                         </DialogTrigger>
@@ -174,11 +189,11 @@ export default function AdminAccess() {
                             <DialogTitle>Одобрить доступ</DialogTitle>
                           </DialogHeader>
                           <div className="space-y-4 pt-2">
-                            <p className="text-sm text-muted-foreground">
+                            <p className="text-[13px] text-soft">
                               Устройство: <span className="font-medium text-foreground">{req.device_hostname}</span>
                             </p>
                             <div className="space-y-1.5">
-                              <Label>Срок действия</Label>
+                              <Label className="text-soft">Срок действия</Label>
                               <div className="flex gap-2">
                                 <Input
                                   type="number"
@@ -216,7 +231,8 @@ export default function AdminAccess() {
                       </Dialog>
                       <Button
                         size="sm"
-                        variant="destructive"
+                        variant="outline"
+                        className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
                         disabled={submitting}
                         onClick={() => respond(req.id, "rejected")}
                       >
@@ -225,17 +241,16 @@ export default function AdminAccess() {
                     </div>
                   )}
                   {req.status === "approved" && (
-  <Button
-    size="sm"
-    variant="outline"
-    className="text-destructive border-destructive/30 hover:bg-destructive/10"
-    disabled={submitting}
-    onClick={() => revoke(req.id)}
-  >
-    Отозвать
-  </Button>
-)}
-
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+                      disabled={submitting}
+                      onClick={() => revoke(req.id)}
+                    >
+                      Отозвать
+                    </Button>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -250,10 +265,10 @@ export default function AdminAccess() {
           </DialogHeader>
           {reasonReq && (
             <div className="space-y-4 pt-1">
-              <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <p className="text-xs text-muted-foreground mb-0.5">Устройство</p>
-                  <p className="font-medium">{reasonReq.device_hostname || reasonReq.device_id.slice(0, 8)}</p>
+                  <p className="text-sm font-medium text-foreground">{reasonReq.device_hostname || reasonReq.device_id.slice(0, 8)}</p>
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground mb-0.5">Статус</p>
@@ -263,12 +278,12 @@ export default function AdminAccess() {
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground mb-0.5">Запрошено</p>
-                  <p>{formatDistanceToNow(reasonReq.requested_at)}</p>
+                  <p className="text-[13px] text-soft">{formatDistanceToNow(reasonReq.requested_at)}</p>
                 </div>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground mb-1.5">Причина</p>
-                <div className="rounded-md border bg-muted px-3 py-2.5 text-sm leading-relaxed break-words">
+                <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-[13px] leading-relaxed text-soft break-words">
                   {reasonReq.reason}
                 </div>
               </div>

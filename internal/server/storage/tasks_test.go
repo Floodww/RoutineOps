@@ -10,7 +10,7 @@ import (
 
 func TestCreateTask_ReturnsTask(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-task-%s", uniq(t)), "macos")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-task-%s", uniq(t)), "macos")
 
 	task, err := db.CreateTask(context.Background(), d.ID, "echo hello", "macos", "normal")
 	if err != nil {
@@ -29,7 +29,7 @@ func TestCreateTask_ReturnsTask(t *testing.T) {
 
 func TestGetTask_Found(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-gettask-%s", uniq(t)), "windows")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-gettask-%s", uniq(t)), "windows")
 	created, _ := db.CreateTask(context.Background(), d.ID, "ipconfig", "windows", "normal")
 
 	got, err := db.GetTask(context.Background(), created.ID)
@@ -57,7 +57,7 @@ func TestGetTask_NotFound_ReturnsNil(t *testing.T) {
 
 func TestGetPendingTasks_ReturnsPendingOnly(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-pending-%s", uniq(t)), "macos")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-pending-%s", uniq(t)), "macos")
 
 	t1, _ := db.CreateTask(context.Background(), d.ID, "task1", "macos", "normal")
 	t2, _ := db.CreateTask(context.Background(), d.ID, "task2", "macos", "normal")
@@ -79,7 +79,7 @@ func TestGetPendingTasks_ReturnsPendingOnly(t *testing.T) {
 
 func TestAckTask_ChangesStatusToAcked(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-ack-%s", uniq(t)), "macos")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-ack-%s", uniq(t)), "macos")
 	task, _ := db.CreateTask(context.Background(), d.ID, "ls", "macos", "normal")
 
 	if err := db.AckTask(context.Background(), task.ID, d.ID); err != nil {
@@ -93,11 +93,18 @@ func TestAckTask_ChangesStatusToAcked(t *testing.T) {
 
 func TestCompleteTask_Success(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-complete-%s", uniq(t)), "windows")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-complete-%s", uniq(t)), "windows")
 	task, _ := db.CreateTask(context.Background(), d.ID, "dir", "windows", "normal")
 
-	if err := db.CompleteTask(context.Background(), task.ID, d.ID, "completed", "output text", ""); err != nil {
+	prev, tt, err := db.CompleteTask(context.Background(), task.ID, d.ID, "completed", "output text", "")
+	if err != nil {
 		t.Fatalf("CompleteTask: %v", err)
+	}
+	if prev != "pending" {
+		t.Errorf("prevStatus = %q, want pending (задача не была ackнута)", prev)
+	}
+	if tt != "script" {
+		t.Errorf("taskType = %q, want script (дефолт task_type)", tt)
 	}
 	got, _ := db.GetTask(context.Background(), task.ID)
 	if got.Status != "completed" {
@@ -108,9 +115,52 @@ func TestCompleteTask_Success(t *testing.T) {
 	}
 }
 
+// Гонка свипа и поздней доставки: задачу закрыл FailStaleAckedTasks по таймауту, а
+// результат от живого агента приехал после. Результат ДОЛЖЕН быть принят (задача
+// реально отработала, отвергнуть — значит навсегда оставить ложный 'failed'), но
+// CompleteTask обязан сообщить, что перезаписывает именно свипнутый 'failed' —
+// иначе исправление задним числом остаётся невидимым. По этому prevStatus
+// gateway пишет аудит late_task_result.
+func TestCompleteTask_LateResultAfterSweepReportsPrevStatus(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-late-%s", uniq(t)), "windows")
+	task, _ := db.CreateTask(ctx, d.ID, "dir", "windows", "normal")
+
+	if err := db.AckTask(ctx, task.ID, d.ID); err != nil {
+		t.Fatalf("AckTask: %v", err)
+	}
+	// Отматываем acked_at за порог, чтобы свип его забрал (тест не ждёт 15 минут).
+	if _, err := db.Pool().Exec(ctx,
+		`UPDATE tasks SET acked_at = now() - interval '1 hour' WHERE id = $1`, task.ID); err != nil {
+		t.Fatalf("сдвиг acked_at: %v", err)
+	}
+	if _, err := db.FailStaleAckedTasks(ctx, storage.StaleAckedTimeoutMinutes); err != nil {
+		t.Fatalf("FailStaleAckedTasks: %v", err)
+	}
+	if got, _ := db.GetTask(ctx, task.ID); got.Status != "failed" {
+		t.Fatalf("после свипа status = %q, want failed", got.Status)
+	}
+
+	prev, _, err := db.CompleteTask(ctx, task.ID, d.ID, "completed", "поздний вывод", "")
+	if err != nil {
+		t.Fatalf("поздний CompleteTask не должен отвергаться: %v", err)
+	}
+	if prev != "failed" {
+		t.Errorf("prevStatus = %q, want failed — иначе gateway не узнает, что исправляет свипнутую задачу", prev)
+	}
+	got, _ := db.GetTask(ctx, task.ID)
+	if got.Status != "completed" {
+		t.Errorf("status = %q, want completed — поздний результат обязан быть принят", got.Status)
+	}
+	if got.Output == nil || *got.Output != "поздний вывод" {
+		t.Errorf("output = %v, want 'поздний вывод'", got.Output)
+	}
+}
+
 func TestListDeviceTasks_ReturnsMostRecent(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-listtasks-%s", uniq(t)), "macos")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-listtasks-%s", uniq(t)), "macos")
 	db.CreateTask(context.Background(), d.ID, "cmd1", "macos", "normal")
 	db.CreateTask(context.Background(), d.ID, "cmd2", "macos", "normal")
 
@@ -125,7 +175,7 @@ func TestListDeviceTasks_ReturnsMostRecent(t *testing.T) {
 
 func TestCreateLockTask_ReturnsLockTask(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, "host-lock-"+uniq(t), "windows")
+	d := mustCreateActiveDevice(t, db, "host-lock-"+uniq(t), "windows")
 	task, err := db.CreateLockTask(context.Background(), d.ID, "$2a$10$hash", "нарушение ИБ", false, "overlay")
 	if err != nil {
 		t.Fatalf("CreateLockTask: %v", err)
@@ -152,7 +202,7 @@ func TestCreateLockTask_ReturnsLockTask(t *testing.T) {
 
 func TestCreateLockTask_Unlock(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, "host-unlock-"+uniq(t), "windows")
+	d := mustCreateActiveDevice(t, db, "host-unlock-"+uniq(t), "windows")
 	task, err := db.CreateLockTask(context.Background(), d.ID, "", "", true, "overlay")
 	if err != nil {
 		t.Fatalf("CreateLockTask: %v", err)
@@ -166,7 +216,7 @@ func TestCreateLockTask_Unlock(t *testing.T) {
 // захардкожен "windows" — иначе задачи на блок мака помечались как windows.
 func TestCreateLockTask_PlatformFromDeviceOS(t *testing.T) {
 	db := newDB(t)
-	d := mustCreateDevice(t, db, "host-lock-mac-"+uniq(t), "darwin")
+	d := mustCreateActiveDevice(t, db, "host-lock-mac-"+uniq(t), "darwin")
 	task, err := db.CreateLockTask(context.Background(), d.ID, "$2a$10$hash", "тест", false, "overlay")
 	if err != nil {
 		t.Fatalf("CreateLockTask: %v", err)
@@ -179,7 +229,7 @@ func TestCreateLockTask_PlatformFromDeviceOS(t *testing.T) {
 func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
-	d := mustCreateDevice(t, db, "host-updatelock-"+uniq(t), "windows")
+	d := mustCreateActiveDevice(t, db, "host-updatelock-"+uniq(t), "windows")
 
 	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "locked"); err != nil {
 		t.Fatalf("UpdateDeviceLockStatus(locked): %v", err)
@@ -212,7 +262,7 @@ func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 func TestFailStaleAckedTasks(t *testing.T) {
 	ctx := context.Background()
 	db := newDB(t)
-	d := mustCreateDevice(t, db, fmt.Sprintf("host-stale-%s", uniq(t)), "windows")
+	d := mustCreateActiveDevice(t, db, fmt.Sprintf("host-stale-%s", uniq(t)), "windows")
 
 	script, err := db.CreateTask(ctx, d.ID, "whoami", "windows", "normal")
 	if err != nil {

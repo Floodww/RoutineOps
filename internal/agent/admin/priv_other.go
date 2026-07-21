@@ -20,3 +20,7 @@ func (osPriv) Revoke(string) error {
 func (osPriv) IsAdmin(string) (bool, error) { return false, nil }
 
 func osConsoleUser() string { return "" }
+
+// osConsoleUserFull: консольного пользователя тут не собираем; проба «успешна»
+// тривиально, чтобы ConsoleUser не залипал на last-known-значении.
+func osConsoleUserFull() (string, bool) { return "", true }

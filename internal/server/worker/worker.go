@@ -128,6 +128,16 @@ func (h *Handler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 			// enumerate-ит держателей Secure Token по гейту G2, исключая escrow-админа.
 		}
 	}
+	if task.TaskType == "decommission" {
+		// request_id = task.ID: агент подтверждает ОБЫЧНЫМ ReportTaskResult(task_id,
+		// SUCCESS) до сноса серта — по task_id gateway флипает устройство в
+		// decommissioned. reason — advisory (агент логирует); детальная причина
+		// оператора живёт в аудите (decommission_device), не в задаче.
+		pbTask.Decommission = &pb.DecommissionCommand{
+			RequestId: task.ID,
+			Reason:    "устройство выведено из эксплуатации администратором",
+		}
+	}
 	sent := h.registry.Send(cn, pbTask)
 	if !sent {
 		return fmt.Errorf("send to device %s failed, will retry", cn)

@@ -4,11 +4,13 @@ export type Theme = "light" | "dark"
 
 const STORAGE_KEY = "theme"
 
-// getInitialTheme: сохранённый выбор пользователя, иначе системная тема.
+// getInitialTheme: сохранённый выбор пользователя, иначе тёмная.
+// Тёмная — фирменная тема панели (liquid-glass рассчитан на неё), поэтому она
+// дефолт, а не системная настройка: светлая остаётся полноценной, но по выбору.
 export function getInitialTheme(): Theme {
   const saved = localStorage.getItem(STORAGE_KEY)
   if (saved === "light" || saved === "dark") return saved
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+  return "dark"
 }
 
 // applyTheme переключает класс .dark на <html> (Tailwind darkMode: class).

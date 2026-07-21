@@ -237,6 +237,11 @@ func TestProcessTask_EmptyCN_ReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePendingDevice: %v", err)
 	}
+	// Активируем (cert_cn остаётся NULL): CreateTask гейтит по status='active', а тест
+	// проверяет именно ветку пустого cert_cn в ProcessTask, а не гейт создания задачи.
+	if err := db.UpdateDeviceStatus(ctx, dev.ID, "active"); err != nil {
+		t.Fatalf("UpdateDeviceStatus: %v", err)
+	}
 	task, err := db.CreateTask(ctx, dev.ID, "echo hi", "macos", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)

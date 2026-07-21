@@ -71,59 +71,69 @@ export default function Users() {
   }
 
   return (
-    <div className="p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Пользователи</h1>
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-xl font-semibold text-foreground">Пользователи</h1>
         <Button onClick={() => setInviteOpen(true)}>
-          <UserPlus className="w-4 h-4 mr-2" />
+          <UserPlus className="h-4 w-4 mr-2" strokeWidth={2} />
           Пригласить
         </Button>
       </div>
 
-      <Input
-        placeholder="Поиск по email..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="max-w-sm"
-      />
+      <div className="glass">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-3">
+          <div>
+            <h2 className="text-[15px] font-semibold text-foreground">Учётные записи</h2>
+            <p className="text-xs text-muted-foreground">Доступ к панели управления</p>
+          </div>
+          <Input
+            placeholder="Поиск по email..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="max-w-[240px]"
+          />
+        </div>
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Имя</TableHead>
-            <TableHead>Email</TableHead>
-            <TableHead>Роль</TableHead>
-            <TableHead>Добавлен</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {loading ? (
-            <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground py-8">Загрузка...</TableCell></TableRow>
-          ) : users.length === 0 ? (
-            <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground py-8">Пользователей нет</TableCell></TableRow>
-          ) : (() => {
-            const q = query.trim().toLowerCase()
-            const filtered = q ? users.filter((u) => u.email.toLowerCase().includes(q)) : users
-            if (filtered.length === 0) {
-              return <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground py-8">Ничего не найдено</TableCell></TableRow>
-            }
-            return filtered.map((u) => (
-            <TableRow key={u.id}>
-              <TableCell className="font-medium">{u.name}</TableCell>
-              <TableCell className="text-muted-foreground">{u.email}</TableCell>
-              <TableCell>
-                <Badge variant={u.role === "it_admin" ? "default" : "secondary"}>
-                  {roleLabels[u.role] ?? u.role}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-muted-foreground text-sm">
-                {new Date(u.created_at).toLocaleDateString("ru-RU")}
-              </TableCell>
+        {/* Строки таблицы разделяются верхней границей (как ленты на «Обзоре»),
+            поэтому border-b примитива гасится, а border-t проставляется явно. */}
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Имя</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Email</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Роль</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Добавлен</TableHead>
             </TableRow>
-            ))
-          })()}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {loading ? (
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Загрузка...</TableCell></TableRow>
+            ) : users.length === 0 ? (
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Пользователей нет</TableCell></TableRow>
+            ) : (() => {
+              const q = query.trim().toLowerCase()
+              const filtered = q ? users.filter((u) => u.email.toLowerCase().includes(q)) : users
+              if (filtered.length === 0) {
+                return <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Ничего не найдено</TableCell></TableRow>
+              }
+              return filtered.map((u) => (
+              <TableRow key={u.id} className="hover:bg-transparent">
+                <TableCell className="px-5 py-3 text-sm font-medium text-foreground">{u.name}</TableCell>
+                <TableCell className="px-5 py-3 text-[13px] text-soft">{u.email}</TableCell>
+                <TableCell className="px-5 py-3">
+                  <Badge variant={u.role === "it_admin" ? "default" : "outline"}>
+                    {roleLabels[u.role] ?? u.role}
+                  </Badge>
+                </TableCell>
+                <TableCell className="px-5 py-3 text-xs text-muted-foreground tabular-nums">
+                  {new Date(u.created_at).toLocaleDateString("ru-RU")}
+                </TableCell>
+              </TableRow>
+              ))
+            })()}
+          </TableBody>
+        </Table>
+      </div>
 
       <Dialog open={inviteOpen} onOpenChange={(o) => { setInviteOpen(o); if (!o) { setInviteLink(null); setInviteEmail("") } }}>
         <DialogContent>
@@ -132,7 +142,7 @@ export default function Users() {
           </DialogHeader>
           <form onSubmit={handleInvite} className="space-y-4 pt-2">
             <div className="space-y-1.5">
-              <Label>Email</Label>
+              <Label className="text-soft">Email</Label>
               <Input
                 type="email"
                 value={inviteEmail}
@@ -143,7 +153,7 @@ export default function Users() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Роль</Label>
+              <Label className="text-soft">Роль</Label>
               <Select
                 value={inviteRole}
                 onChange={setInviteRole}
@@ -155,7 +165,7 @@ export default function Users() {
             </div>
             {inviteLink && (
               <div className="space-y-1.5">
-                <Label>Ссылка-приглашение (передайте вручную)</Label>
+                <Label className="text-soft">Ссылка-приглашение (передайте вручную)</Label>
                 <Input readOnly value={inviteLink} onFocus={(e) => e.currentTarget.select()} />
                 <p className="text-xs text-muted-foreground">
                   Письмо не отправлено (SMTP выключен или недоступен). Скопируйте ссылку и передайте пользователю.

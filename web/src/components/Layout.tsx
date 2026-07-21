@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom"
-import { LayoutDashboard, Monitor, Bell, Shield, LogOut, KeyRound, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck } from "lucide-react"
+import { LayoutDashboard, Monitor, Bell, Shield, LogOut, LogIn, KeyRound, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck } from "lucide-react"
 import { logout } from "@/lib/auth"
 import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import { useMe } from "@/lib/useMe"
@@ -17,6 +17,7 @@ export default function Layout() {
   const { theme, toggleTheme } = useTheme()
   const { isAdmin, me } = useMe()
   const [pendingCount, setPendingCount] = useState(0)
+  const [queueCount, setQueueCount] = useState(0)
   const [tgOpen, setTgOpen] = useState(false)
   const [tgLinked, setTgLinked] = useState(false)
   const [tgToken, setTgToken] = useState<string | null>(null)
@@ -25,13 +26,29 @@ export default function Layout() {
   const [tgBotUsername, setTgBotUsername] = useState("")
 
   useEffect(() => {
-    api.get<{ id: string }[]>("/admin-access-requests?status=pending")
-      .then((r) => setPendingCount(r.data?.length ?? 0))
-      .catch(() => { })
     api.get<{ linked: boolean }>("/profile/telegram")
       .then((r) => setTgLinked(r.data.linked))
       .catch(() => { })
   }, [])
+
+  // Счётчики бейджей — отдельным эффектом, потому что у них другой жизненный цикл:
+  // (1) оба admin-only, а без гейта viewer тянул бы ВЕСЬ список устройств ради бейджа,
+  //     который ему даже не рисуется;
+  // (2) isAdmin приезжает асинхронно из /me, поэтому он в зависимостях — иначе бейджи
+  //     навсегда остались бы нулевыми при первом входе;
+  // (3) ключ по pathname: считалось один раз за сессию, и после одобрения всей очереди
+  //     сайдбар продолжал показывать старое число, споря с пустой таблицей рядом.
+  // Отдельной ручки-счётчика на сервере нет — считаем по общему списку.
+  // ponytail: клиентский подсчёт, серверный счётчик — когда списки получат пагинацию
+  useEffect(() => {
+    if (!isAdmin) return
+    api.get<{ id: string }[]>("/admin-access-requests?status=pending")
+      .then((r) => setPendingCount(r.data?.length ?? 0))
+      .catch(() => { })
+    api.get<{ status: string }[]>("/devices")
+      .then((r) => setQueueCount((r.data ?? []).filter((d) => d.status === "pending_approval").length))
+      .catch(() => { })
+  }, [isAdmin, location.pathname])
 
   async function openTelegramDialog() {
     setTgOpen(true)
@@ -68,6 +85,7 @@ export default function Layout() {
     { to: "/", label: "Обзор", icon: LayoutDashboard, badge: 0, adminOnly: false },
     { to: "/devices", label: "Устройства", icon: Monitor, badge: 0, adminOnly: false },
     { to: "/alerts", label: "Алерты", icon: Bell, badge: 0, adminOnly: false },
+    { to: "/enrollment", label: "Энроллмент", icon: LogIn, badge: queueCount, adminOnly: true },
     { to: "/admin-access", label: "Заявки на права", icon: KeyRound, badge: pendingCount, adminOnly: true },
     { to: "/policies", label: "Политики", icon: Shield, badge: 0, adminOnly: true },
     { to: "/scripts", label: "Скрипты", icon: FileCode2, badge: 0, adminOnly: true },
@@ -80,16 +98,25 @@ export default function Layout() {
   ].filter((i) => !i.adminOnly || isAdmin)
 
   return (
-    <div className="flex h-screen bg-background">
-      <aside className="w-56 flex flex-col sidebar-glass z-10">
-        <div className="h-14 flex items-center px-4 border-b border-[var(--sidebar-border)]">
-          <NavLink to="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-            <RoutineOpsLogo size={24} />
-            <span className="text-sm font-semibold tracking-tight">RoutineOps</span>
+    <div className="flex h-screen">
+      <aside className="w-[236px] flex-shrink-0 flex flex-col sidebar-glass z-10">
+        {/* Плашка логотипа: тёмно-синяя, как круг на знаке. Почта живёт здесь
+            (а не внизу списка) — так шапка сайдбара отвечает «кто вошёл». */}
+        <div className="h-[72px] flex items-center gap-2.5 px-5 border-b border-[var(--sidebar-border)] bg-[var(--logo-plate)]">
+          <NavLink to="/" className="flex items-center gap-2.5 min-w-0 hover:opacity-80 transition-opacity">
+            <RoutineOpsLogo size={30} />
+            <div className="min-w-0">
+              <div className="text-[15px] font-semibold text-foreground leading-tight">RoutineOps</div>
+              {me && (
+                <div className="text-[11px] text-[var(--logo-plate-fg)] truncate" title={me.email}>
+                  {me.email}
+                </div>
+              )}
+            </div>
           </NavLink>
         </div>
 
-        <nav className="flex-1 px-2 py-3 space-y-0.5">
+        <nav className="flex-1 overflow-y-auto px-2.5 py-3.5 flex flex-col gap-0.5">
           {navItems.map(({ to, label, icon: Icon, badge }) => (
             <NavLink
               key={to}
@@ -102,12 +129,14 @@ export default function Layout() {
               {({ isActive }) => (
                 <>
                   <Icon className={cn(
-                    "h-4 w-4 flex-shrink-0 transition-colors duration-200",
+                    "h-[17px] w-[17px] flex-shrink-0 transition-colors duration-200",
                     isActive ? "text-brand" : "text-muted-foreground"
                   )} />
                   <span className="flex-1 truncate">{label}</span>
                   {badge > 0 && (
-                    <span className="ml-auto bg-destructive text-destructive-foreground text-xs font-semibold rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center leading-none">
+                    // Цифры на градиенте — тёмные по той же причине, что и подпись
+                    // primary-кнопки: белые дали бы 2.6:1 на самом мелком тексте оболочки.
+                    <span className="ml-auto brand-gradient text-white dark:text-[hsl(224_14%_10%)] text-xs font-semibold rounded-full px-1.5 h-[22px] min-w-[22px] flex items-center justify-center leading-none">
                       {badge}
                     </span>
                   )}
@@ -117,10 +146,10 @@ export default function Layout() {
           ))}
         </nav>
 
-        <div className="p-2 border-t border-[var(--sidebar-border)] space-y-0.5">
+        <div className="p-2.5 border-t border-[var(--sidebar-border)] flex flex-col gap-0.5">
           {me && (
-            <div className="px-3 py-1.5 text-xs text-muted-foreground truncate" title={me.email}>
-              {me.email} · {me.role === "it_admin" ? "Админ" : "Наблюдатель"}
+            <div className="px-3 pb-1 text-[11px] text-muted-foreground truncate">
+              {me.role === "it_admin" ? "Админ" : "Наблюдатель"}
             </div>
           )}
           <button
@@ -129,8 +158,8 @@ export default function Layout() {
             className="nav-item text-muted-foreground w-full"
           >
             {theme === "dark"
-              ? <Sun className="h-4 w-4" />
-              : <Moon className="h-4 w-4" />}
+              ? <Sun className="h-[17px] w-[17px]" />
+              : <Moon className="h-[17px] w-[17px]" />}
             {theme === "dark" ? "Светлая тема" : "Тёмная тема"}
           </button>
           <button
@@ -138,7 +167,7 @@ export default function Layout() {
             onClick={openTelegramDialog}
             className="nav-item text-muted-foreground w-full"
           >
-            <Send className="h-4 w-4" />
+            <Send className="h-[17px] w-[17px]" />
             {tgLinked ? "Telegram ✓" : "Подключить Telegram"}
           </button>
           <button
@@ -146,7 +175,7 @@ export default function Layout() {
             onClick={handleLogout}
             className="nav-item text-muted-foreground hover:!text-destructive w-full"
           >
-            <LogOut className="h-4 w-4" />
+            <LogOut className="h-[17px] w-[17px]" />
             Выход
           </button>
         </div>
@@ -185,7 +214,7 @@ export default function Layout() {
                     <>Отправьте Telegram-боту вашей организации команду:</>
                   )}
                 </p>
-                <code className="block bg-muted px-3 py-2 rounded-lg text-sm select-all break-all font-mono">
+                <code className="block rounded-md border border-border bg-muted px-3 py-2.5 text-sm select-all break-all font-mono">
                   /start {tgToken}
                 </code>
                 <p className="text-xs text-muted-foreground">Токен одноразовый. Если не сработал — сгенерируйте новый.</p>
@@ -198,8 +227,13 @@ export default function Layout() {
         </DialogContent>
       </Dialog>
 
+      {/* Верхней градиентной панели нет намеренно (хендофф): первый элемент
+          контента — H1 страницы. Колонка ограничена 1180px, чтобы карты не
+          растягивались в ленты на широких мониторах. */}
       <main key={location.pathname} className="flex-1 overflow-auto p-6 animate-page-in">
-        <Outlet />
+        <div className="max-w-[1180px]">
+          <Outlet />
+        </div>
       </main>
     </div>
   )

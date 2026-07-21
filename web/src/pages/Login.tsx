@@ -30,18 +30,19 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
+    // Без bg-background: карта стоит прямо на фоне body с радиальными бликами.
+    <div className="min-h-screen flex items-center justify-center p-4">
       <SpotlightCard as={Card} className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center justify-center gap-2.5 py-2">
+        <CardHeader className="px-5 pt-6 pb-2">
+          <CardTitle className="flex items-center justify-center gap-2.5 py-2 text-foreground">
             <RoutineOpsLogo size={32} />
             <span className="text-lg font-semibold tracking-tight">RoutineOps</span>
           </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-5 pb-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email" className="text-soft">Email</Label>
               <Input
                 id="email"
                 type="email"
@@ -52,7 +53,7 @@ export default function Login() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="password">Пароль</Label>
+              <Label htmlFor="password" className="text-soft">Пароль</Label>
               <Input
                 id="password"
                 type="password"
@@ -61,11 +62,13 @@ export default function Login() {
                 required
               />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
+                берём тот же красный, что у алерт-цифры на дашборде. */}
+            {error && <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Вход..." : "Войти"}
             </Button>
-            <Link to="/forgot-password" className="text-sm text-muted-foreground hover:underline block text-center">
+            <Link to="/forgot-password" className="block text-center text-sm text-muted-foreground hover:text-foreground transition-colors">
               Забыли пароль?
             </Link>
           </form>

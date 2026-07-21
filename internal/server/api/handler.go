@@ -172,12 +172,19 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 
 		// Read-only — все роли
 		r.Get("/me", h.me)
-		r.Post("/me/password", h.changePassword)
+		// requireHuman: у сервисного токена нет личного аккаунта, а claims.UserID —
+		// это создавший админ. Без гарда viewer-токен менял бы админу пароль (и
+		// сбрасывал все его живые сессии), зная лишь текущий пароль.
+		r.With(requireHuman).Post("/me/password", h.changePassword)
 		r.Get("/devices", h.listDevices)
 		r.Get("/devices/{id}", h.getDevice)
 		r.Get("/devices/{id}/tasks", h.listTasks)
 		r.Get("/alerts", h.listAlerts)
-		r.Get("/profile/telegram", h.getTelegramStatus)
+		// requireHuman: ручка отдаёт telegram link_token ВЛАДЕЛЬЦА claims.UserID.
+		// Под токеном это админ-создатель → его непогашенный линк-токен утекал
+		// держателю read-only токена, а тот, скормив его боту, перехватывал
+		// админские алерты. Привязка Telegram — личное действие человека.
+		r.With(requireHuman).Get("/profile/telegram", h.getTelegramStatus)
 		r.Get("/admin-access-requests", h.listAdminAccessRequests)
 		r.Get("/policies", h.listPolicies)
 		r.Get("/policies/compliance", h.listPolicyCompliance)
@@ -200,11 +207,28 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Delete("/devices/{id}", h.deleteDevice)
 			r.Post("/devices/{id}/lock", h.lockDevice)
 			r.Post("/devices/{id}/unlock", h.unlockDevice)
+			// requireHuman: вывод из эксплуатации необратим и деструктивен — агент сносит
+			// серт/службу/состояние, устройство уходит в терминальный decommissioned.
+			// Автоматике/сервисному токену такое запрещаем (🔴 правило requireHuman).
+			r.With(requireHuman).Post("/devices/{id}/decommission", h.decommissionDevice)
+			// Bulk enrollment. requireHuman на выпуск токена и одобрение (выпускают доступ
+			// к парку — только человеком); reject/batch-reject НЕ гейтим (защитное действие).
+			r.With(requireHuman).Post("/enrollment-tokens/bulk", h.issueBulkEnrollmentToken)
+			r.With(requireHuman).Post("/devices/{id}/approve", h.approveDevice)
+			r.Post("/devices/{id}/reject", h.rejectDevice)
+			r.With(requireHuman).Post("/enrollment-queue/approve", h.approvePendingDevices)
+			r.Post("/enrollment-queue/reject", h.rejectPendingDevices)
 			r.Get("/devices/{id}/enrollment-token", h.getEnrollmentToken)
 			r.Post("/devices/{id}/reenroll", h.reenrollDevice)
 			r.Post("/alerts/{id}/acknowledge", h.acknowledgeAlert)
-			r.Post("/profile/telegram-link", h.generateTelegramLinkToken)
-			r.Post("/admin-access-requests/{id}/respond", h.respondAdminRequest)
+			r.With(requireHuman).Post("/profile/telegram-link", h.generateTelegramLinkToken)
+			// requireHuman: одобрение выдаёт сотруднику ЛОКАЛЬНОГО АДМИНА на устройстве —
+			// решение человека, а не автоматизации. Плюс RespondToAdminRequest пишет
+			// claims.UserID в durable-колонку approved_by, и под токеном там оказался бы
+			// админ-создатель: при разборе инцидента единственным одобрившим числился бы
+			// человек, который ничего не одобрял.
+			r.With(requireHuman).Post("/admin-access-requests/{id}/respond", h.respondAdminRequest)
+			// Отзыв НЕ гейтим: это защитное действие, автоматике его запрещать вредно.
 			r.Post("/admin-access-requests/{id}/revoke", h.revokeAdminRequest)
 			r.Post("/policies", h.createPolicy)
 			r.Delete("/policies/{id}", h.deletePolicy)
@@ -224,7 +248,22 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Post("/device-groups/{id}/software-policies", h.assignSoftwarePolicyToGroup)
 			r.Delete("/device-groups/{id}/software-policies/{ruleId}", h.unassignSoftwarePolicyFromGroup)
 			r.Post("/device-groups/{id}/run-script", h.runScriptOnGroup)
-			r.Post("/users/invite", h.inviteUser)
+			// requireHuman: приглашение выпускает УЧЁТНЫЕ ДАННЫЕ ЧЕЛОВЕКА с любой ролью,
+			// включая it_admin, а accept-invite не требует авторизации. Без гарда утёкший
+			// токен заводил себе живого админа: при выключенном SMTP хендлер отдаёт сырой
+			// invite_url прямо в теле ответа. И это ХУЖЕ теневого токена — строки в users
+			// нет в списке /api-tokens, поэтому при разборе инцидента её не находят, а
+			// отзыв утёкшего токена доступ не отбирает.
+			r.With(requireHuman).Post("/users/invite", h.inviteUser)
+			// Сервисные токены — только it_admin И только человеком (requireHuman).
+			// Токен это учётные данные с ролью, выпуск их равносилен заведению
+			// пользователя. 🔴 Без requireHuman модель отзыва была фикцией: утёкший
+			// токен выписывал себе теневой (created_by копировался с исходного, так что
+			// в списке он неотличим от выданного руками), теневой переживал удаление
+			// исходного, и «отозвали строку — доступа нет» переставало быть правдой.
+			r.With(requireHuman).Get("/api-tokens", h.listAPITokens)
+			r.With(requireHuman).Post("/api-tokens", h.createAPIToken)
+			r.With(requireHuman).Delete("/api-tokens/{id}", h.deleteAPIToken)
 		})
 
 		// Enterprise-оверлей монтирует свои роуты/политику в authed-группу
@@ -439,6 +478,10 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.db.CreateTask(r.Context(), id, req.ScriptContent, req.Platform, req.Priority)
 	if err != nil {
+		if errors.Is(err, storage.ErrDeviceNotActive) {
+			http.Error(w, "device is not active (pending approval / blocked / rejected)", http.StatusConflict)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -567,6 +610,24 @@ func (h *Handler) updateDeviceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Status != "active" && req.Status != "blocked" {
 		http.Error(w, "status must be 'active' or 'blocked'", http.StatusBadRequest)
+		return
+	}
+	// Это ручка block/unblock (active↔blocked). НЕ бэкдор в managed-статусы: иначе
+	// сервисный токен (не requireHuman) флипнул бы pending_approval→active в обход
+	// approve, воскресил rejected/decommissioned. Их меняют только выделенные ручки
+	// (approve/reject/decommission) с правильным гейтом.
+	cur, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if cur == "" {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	switch cur {
+	case "pending_approval", "rejected", "decommissioned":
+		http.Error(w, "device in "+cur+": use approve/reject/decommission, not status", http.StatusConflict)
 		return
 	}
 	if err := h.db.UpdateDeviceStatus(r.Context(), id, req.Status); err != nil {
@@ -790,6 +851,14 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token not found or expired", http.StatusUnauthorized)
 		return
 	}
+
+	// Bulk-токен (device_id NULL): устройство создаётся САМО, лимит/срок и статус
+	// решает storage; легаси одноразовый токен (device_id задан) — прежний путь.
+	if tok.DeviceID == "" {
+		h.enrollBulk(w, r, tok, req)
+		return
+	}
+
 	if tok.UsedAt != nil {
 		http.Error(w, "token already used", http.StatusUnauthorized)
 		return
@@ -821,6 +890,43 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 		"cert_pem":       string(certPEM),
 		"ca_pem":         string(h.ca.CAPem()),
 		"release_pubkey": h.releasePubKey, // универсальный агент берёт ключ self-update отсюда
+	})
+}
+
+// enrollBulk — энролл по многоразовому bulk-токену: устройство создаётся само,
+// лимит/срок и статус (pending_approval vs enrolled) решает storage. Ответ идентичен
+// обычному энроллу (агент не различает bulk/single).
+func (h *Handler) enrollBulk(w http.ResponseWriter, r *http.Request, tok *storage.EnrollmentToken, req enrollRequest) {
+	// Резервируем использование + создаём устройство ДО подписи (CN серта = id устройства).
+	deviceID, requireApproval, err := h.db.BeginBulkEnroll(r.Context(), tok.ID, req.Hostname, req.OS)
+	if err != nil {
+		if errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
+			http.Error(w, "token exhausted or expired", http.StatusUnauthorized)
+			return
+		}
+		slog.Error("bulk enroll begin", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	certPEM, certSerial, fingerprint, err := h.ca.SignCSR([]byte(req.CSRPem), deviceID)
+	if err != nil {
+		slog.Error("bulk enroll CSR parse", "err", err)
+		http.Error(w, "invalid CSR", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.db.FinalizeBulkEnroll(r.Context(), deviceID, certSerial, fingerprint, requireApproval); err != nil {
+		slog.Error("bulk enroll finalize", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"device_id":      deviceID,
+		"cert_pem":       string(certPEM),
+		"ca_pem":         string(h.ca.CAPem()),
+		"release_pubkey": h.releasePubKey,
 	})
 }
 
@@ -1012,11 +1118,189 @@ func (h *Handler) unlockDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"task_id": task.ID})
 }
 
+// decommissionDevice ставит задачу полного самоудаления агента (вывод устройства из
+// эксплуатации). requireHuman (см. маршрут): необратимая деструктивная операция.
+// Статус устройства здесь НЕ меняем — оно должно принять Connect, чтобы получить
+// команду сноса; терминальный флип в 'decommissioned' делает gateway.ReportTaskResult
+// по подтверждению агента. reason — только для аудита (агенту едет фиксированный текст).
+func (h *Handler) decommissionDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	// Тело необязательно (reason — advisory для аудита); пустой/битый body не блокирует.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	// Guard: устройство существует и ещё не списано (не плодим мёртвые задачи —
+	// списанное всё равно не примет Connect, задача бы висела pending до свипа).
+	st, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if st == "" {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	if st == "decommissioned" {
+		http.Error(w, "device already decommissioned", http.StatusConflict)
+		return
+	}
+
+	task, err := h.db.CreateDecommissionTask(r.Context(), id)
+	if err != nil {
+		http.Error(w, "failed to create decommission task", http.StatusInternalServerError)
+		return
+	}
+	if err := worker.Enqueue(h.asynqClient, task.ID); err != nil {
+		slog.Error("enqueue decommission task", "task_id", task.ID, "err", err)
+		http.Error(w, "enqueue failed", http.StatusInternalServerError)
+		return
+	}
+
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "decommission_device", "device", id,
+		map[string]string{"task_id": task.ID, "reason": req.Reason})
+	writeJSON(w, http.StatusOK, map[string]string{"task_id": task.ID})
+}
+
+// bulkTokenDefaultTTLHours — окно раскатки по умолчанию для bulk-токена (7 дней),
+// длиннее одноразового (24ч): GPO-раскатка по парку занимает не один день.
+const bulkTokenDefaultTTLHours = 168
+
+type bulkEnrollTokenRequest struct {
+	GroupID         string `json:"group_id"`         // "" = без группы
+	MaxUses         *int   `json:"max_uses"`         // nil = безлимит до TTL
+	RequireApproval *bool  `json:"require_approval"` // nil = true (очередь одобрения ВКЛ по умолчанию)
+	TTLHours        int    `json:"ttl_hours"`        // 0 = дефолт
+}
+
+// issueBulkEnrollmentToken выпускает многоразовый bulk-токен (requireHuman: токен
+// даёт устройствам вход в парк — выпускает доступ, только человеком). Возвращает
+// токен + ca_sha256 для параметров MSI (server URL + CA_SHA256 + токен → GPO).
+func (h *Handler) issueBulkEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	var req bulkEnrollTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	requireApproval := true // дефолт: очередь одобрения включена (нельзя запирать за деньги смягчение риска)
+	if req.RequireApproval != nil {
+		requireApproval = *req.RequireApproval
+	}
+	if req.MaxUses != nil && *req.MaxUses <= 0 {
+		http.Error(w, "max_uses must be positive (omit for unlimited)", http.StatusBadRequest)
+		return
+	}
+	ttl := time.Duration(bulkTokenDefaultTTLHours) * time.Hour
+	if req.TTLHours > 0 {
+		ttl = time.Duration(req.TTLHours) * time.Hour
+	}
+	token := uuid.New().String()
+	expiresAt := time.Now().Add(ttl)
+	if err := h.db.CreateBulkEnrollmentToken(r.Context(), token, req.GroupID, req.MaxUses, requireApproval, expiresAt); err != nil {
+		slog.Error("create bulk token", "err", err)
+		http.Error(w, "internal error (invalid group_id?)", http.StatusInternalServerError)
+		return
+	}
+
+	caSHA256 := ""
+	if h.ca != nil {
+		caSum := sha256.Sum256(h.ca.CAPem())
+		caSHA256 = hex.EncodeToString(caSum[:])
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "create_bulk_token", "enrollment_token", "",
+		map[string]any{"group_id": req.GroupID, "require_approval": requireApproval, "max_uses": req.MaxUses})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"enrollment_token": token,
+		"expires_at":       expiresAt,
+		"ca_sha256":        caSHA256,
+		"require_approval": requireApproval,
+	})
+}
+
+// approveDevice одобряет устройство из очереди (requireHuman: решение о членстве в
+// парке — человеком). pending_approval → active.
+func (h *Handler) approveDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ok, err := h.db.ApproveDevice(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "device not in approval queue", http.StatusConflict)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "approve_device", "device", id, nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "active"})
+}
+
+// rejectDevice отклоняет устройство из очереди (НЕ requireHuman: защитное действие —
+// закрывает доступ, автоматике запрещать вредно, как revoke admin-request).
+// pending_approval → rejected (gateway режет Connect).
+func (h *Handler) rejectDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ok, err := h.db.RejectDevice(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "device not in approval queue", http.StatusConflict)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "reject_device", "device", id, nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+type pendingBatchRequest struct {
+	GroupID string `json:"group_id"` // "" = все pending_approval
+}
+
+// approvePendingDevices — batch-одобрение всей очереди (± фильтр по группе). requireHuman.
+func (h *Handler) approvePendingDevices(w http.ResponseWriter, r *http.Request) {
+	var req pendingBatchRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // тело опционально
+	n, err := h.db.ApprovePendingDevices(r.Context(), req.GroupID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "approve_pending_bulk", "device", "",
+		map[string]any{"group_id": req.GroupID, "count": n})
+	writeJSON(w, http.StatusOK, map[string]int64{"approved": n})
+}
+
+// rejectPendingDevices — batch-отклонение (симметрично, НЕ requireHuman).
+func (h *Handler) rejectPendingDevices(w http.ResponseWriter, r *http.Request) {
+	var req pendingBatchRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	n, err := h.db.RejectPendingDevices(r.Context(), req.GroupID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "reject_pending_bulk", "device", "",
+		map[string]any{"group_id": req.GroupID, "count": n})
+	writeJSON(w, http.StatusOK, map[string]int64{"rejected": n})
+}
+
 func (h *Handler) reenrollDevice(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(24 * time.Hour)
 	if err := h.db.ResetDeviceForReenroll(r.Context(), id, token, expiresAt); err != nil {
+		// Несуществующее устройство сюда же: WHERE не нашёл строку — 409 честнее 500-й.
+		if errors.Is(err, storage.ErrDeviceNotReenrollable) {
+			http.Error(w, "device status forbids reenroll: use approve/unblock first", http.StatusConflict)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1151,7 +1435,6 @@ func (h *Handler) inviteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	validRoles := map[string]bool{"it_admin": true, "viewer": true}
 	if req.Role == "" {
 		req.Role = "viewer" // least-privilege: неуказанная роль = наименьшие права
 	}

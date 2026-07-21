@@ -119,6 +119,20 @@ type Config struct {
 	FilevaultDryRun bool
 }
 
+// Дефолтные ОТНОСИТЕЛЬНЫЕ пути изменяемого состояния. Вынесены в константы,
+// чтобы раскладка службы (applyStatePaths в cmd/agent) могла отличить «оператор
+// оставил дефолт» (путь переводится в машинный DataDir) от «путь задан явно»
+// (не трогаем). Менять значения нельзя без миграции: по этим именам агент ищет
+// состояние прежних установок (см. migrateLegacyState в cmd/agent).
+const (
+	DefaultOutboxDir          = "agent_outbox"
+	DefaultTaskStateFile      = "agent_tasks.seen"
+	DefaultScriptDedupFile    = "agent_scripts.seen"
+	DefaultForbiddenListFile  = "forbidden_software.txt"
+	DefaultUpdateFloorFile    = "agent_update_floor.txt"
+	DefaultFilevaultEscrowDir = "filevault_escrow"
+)
+
 // Load парсит флаги/env. fs передаётся для тестируемости; args — без имени программы.
 func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
@@ -139,11 +153,11 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		"период полной инвентаризации ReportInventory (env ROUTINEOPS_INVENTORY_INTERVAL)")
 	fs.DurationVar(&c.SecurityScanInterval, "security-scan", envDuration("ROUTINEOPS_SECURITY_SCAN", 30*time.Second),
 		"период проверки процессов Security Monitor (env ROUTINEOPS_SECURITY_SCAN)")
-	fs.StringVar(&c.ForbiddenListFile, "forbidden-list", env("ROUTINEOPS_FORBIDDEN_LIST", "forbidden_software.txt"),
+	fs.StringVar(&c.ForbiddenListFile, "forbidden-list", env("ROUTINEOPS_FORBIDDEN_LIST", DefaultForbiddenListFile),
 		"локальный кэш политики ПО (FetchPolicy), читается Security Monitor (env ROUTINEOPS_FORBIDDEN_LIST)")
 	fs.DurationVar(&c.PolicySyncInterval, "policy-sync", envDuration("ROUTINEOPS_POLICY_SYNC", 5*time.Minute),
 		"период синхронизации политики ПО через FetchPolicy (env ROUTINEOPS_POLICY_SYNC)")
-	fs.StringVar(&c.TaskStateFile, "task-state", env("ROUTINEOPS_TASK_STATE", "agent_tasks.seen"),
+	fs.StringVar(&c.TaskStateFile, "task-state", env("ROUTINEOPS_TASK_STATE", DefaultTaskStateFile),
 		"файл идемпотентности выполненных задач (env ROUTINEOPS_TASK_STATE)")
 	fs.StringVar(&c.LockStateFile, "lock-state", env("ROUTINEOPS_LOCK_STATE", ""),
 		"файл состояния блокировки (пусто = машинный каталог: ProgramData\\RoutineOps\\lock.json), env ROUTINEOPS_LOCK_STATE")
@@ -156,7 +170,7 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.Reason, "reason", "", "обоснование для подкоманды request-admin")
 	fs.BoolVar(&c.AdminDryRun, "admin-dry-run", envBool("ROUTINEOPS_ADMIN_DRYRUN"),
 		"не применять админ-права к системе, только логировать (env ROUTINEOPS_ADMIN_DRYRUN)")
-	fs.StringVar(&c.OutboxDir, "outbox-dir", env("ROUTINEOPS_OUTBOX_DIR", "agent_outbox"),
+	fs.StringVar(&c.OutboxDir, "outbox-dir", env("ROUTINEOPS_OUTBOX_DIR", DefaultOutboxDir),
 		"каталог устойчивой очереди отчётов (env ROUTINEOPS_OUTBOX_DIR)")
 	fs.IntVar(&c.OutboxMax, "outbox-max", envInt("ROUTINEOPS_OUTBOX_MAX", 1000),
 		"максимум записей в очереди отчётов, 0=без лимита (env ROUTINEOPS_OUTBOX_MAX)")
@@ -166,7 +180,7 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		"период фоновых попыток до-доставки очереди (env ROUTINEOPS_OUTBOX_FLUSH)")
 	fs.DurationVar(&c.ScriptPollInterval, "script-poll", envDuration("ROUTINEOPS_SCRIPT_POLL", time.Minute),
 		"период синхронизации скрипт-политик FetchScriptPolicies (env ROUTINEOPS_SCRIPT_POLL)")
-	fs.StringVar(&c.ScriptDedupFile, "script-dedup", env("ROUTINEOPS_SCRIPT_DEDUP", "agent_scripts.seen"),
+	fs.StringVar(&c.ScriptDedupFile, "script-dedup", env("ROUTINEOPS_SCRIPT_DEDUP", DefaultScriptDedupFile),
 		"файл дедупа on_connect-запусков скриптов (env ROUTINEOPS_SCRIPT_DEDUP)")
 	fs.DurationVar(&c.EventScanInterval, "event-scan", envDuration("ROUTINEOPS_EVENT_SCAN", 15*time.Second),
 		"период опроса событий ОС login/logout/network_change (env ROUTINEOPS_EVENT_SCAN)")
@@ -176,7 +190,7 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		"период проверки обновлений (env ROUTINEOPS_UPDATE_INTERVAL)")
 	fs.StringVar(&c.UpdatePubKey, "update-pubkey", env("ROUTINEOPS_UPDATE_PUBKEY", ""),
 		"base64 ed25519 публичного ключа релиза (env ROUTINEOPS_UPDATE_PUBKEY)")
-	fs.StringVar(&c.UpdateFloorFile, "update-floor", env("ROUTINEOPS_UPDATE_FLOOR", "agent_update_floor.txt"),
+	fs.StringVar(&c.UpdateFloorFile, "update-floor", env("ROUTINEOPS_UPDATE_FLOOR", DefaultUpdateFloorFile),
 		"файл high-water mark версии самообновления, защита от replay старого релиза (env ROUTINEOPS_UPDATE_FLOOR)")
 	fs.StringVar(&c.EnrollURL, "enroll-url", env("ROUTINEOPS_ENROLL_URL", ""),
 		"URL эндпоинта энроллмента для подкоманды enroll (env ROUTINEOPS_ENROLL_URL)")
@@ -194,7 +208,7 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		"метка идентичности в хранилище ОС для cert-source=keystore, обычно device_id (env ROUTINEOPS_KEYSTORE_LABEL)")
 	fs.BoolVar(&c.Probe, "probe", false,
 		"diag: дополнительно проверить mTLS-соединение с сервером")
-	fs.StringVar(&c.FilevaultEscrowDir, "filevault-escrow-dir", env("ROUTINEOPS_FILEVAULT_ESCROW_DIR", "filevault_escrow"),
+	fs.StringVar(&c.FilevaultEscrowDir, "filevault-escrow-dir", env("ROUTINEOPS_FILEVAULT_ESCROW_DIR", DefaultFilevaultEscrowDir),
 		"каталог write-ahead escrow-записей FileVault (enterprise; env ROUTINEOPS_FILEVAULT_ESCROW_DIR)")
 	fs.BoolVar(&c.FilevaultDryRun, "filevault-dry-run", envBool("ROUTINEOPS_FILEVAULT_DRYRUN"),
 		"не выполнять привилегированные FileVault-операции, только логировать (env ROUTINEOPS_FILEVAULT_DRYRUN)")
@@ -234,6 +248,12 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if c.UpdateInterval <= 0 {
 		return nil, fmt.Errorf("update interval must be > 0, got %s", c.UpdateInterval)
+	}
+	// OutboxFlush используется как сырое time.NewTicker(cfg.OutboxFlush) в фоновом
+	// escrow-доборе (cmd/agent) — 0/отрицательное уронило бы весь агент паникой
+	// NewTicker, а не только эту горутину. Валидируем как остальные интервалы.
+	if c.OutboxFlush <= 0 {
+		return nil, fmt.Errorf("outbox flush interval must be > 0, got %s", c.OutboxFlush)
 	}
 	return c, nil
 }

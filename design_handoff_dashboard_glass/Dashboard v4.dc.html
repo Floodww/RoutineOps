@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  body { margin: 0; font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; background: hsl(224 14% 10%); }
+  * { box-sizing: border-box; }
+  a { color: hsl(221 100% 72%); text-decoration: none; }
+  a:hover { color: hsl(221 100% 82%); }
+  .lucide { width: 1em; height: 1em; stroke-width: 2; display: block; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 99px; }
+  @keyframes feed-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes page-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</helmet>
+<div style="display:flex; height:100vh; background:radial-gradient(620px circle at 78% -5%, hsla(221,100%,68%,0.18), transparent 60%), radial-gradient(520px circle at 4% 96%, hsla(221,90%,55%,0.10), transparent 60%), hsl(224 14% 10%); color:hsl(220 10% 76%); font-size:14px;">
+
+  <!-- Sidebar -->
+  <aside style="width:236px; flex-shrink:0; display:flex; flex-direction:column; background:hsl(224 15% 8%); border-right:1px solid hsl(224 13% 18%);">
+    <div style="height:72px; display:flex; align-items:center; gap:10px; padding:0 20px; background:hsl(217 30% 18%); border-bottom:1px solid hsl(224 13% 18%);">
+      <img src="./web/public/logo.png" width="30" height="30" alt="RoutineOps" style="display:block;">
+      <div style="min-width:0;">
+        <div style="font-size:15px; font-weight:600; color:#fff;">RoutineOps</div>
+        <div style="font-size:11px; color:hsl(221 40% 72%);">admin@routineops.io</div>
+      </div>
+    </div>
+
+    <nav style="flex:1; padding:14px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; font-weight:600; color:#fff; background:rgba(255,255,255,0.07); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); position:relative;">
+        <span style="position:absolute; left:0; top:50%; transform:translateY(-50%); height:18px; width:3px; border-radius:99px; background:hsl(221 100% 72%);"></span>
+        <span style="font-size:17px; color:hsl(221 100% 72%); display:inline-flex;"><i data-lucide="layout-dashboard"></i></span><span style="flex:1;">Обзор</span>
+      </a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="monitor"></i></span><span style="flex:1;">Устройства</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="bell"></i></span><span style="flex:1;">Алерты</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="key-round"></i></span><span style="flex:1;">Заявки на права</span><span style="margin-left:auto; height:22px; min-width:22px; padding:0 6px; border-radius:99px; background:linear-gradient(135deg,hsl(221 100% 72%),hsl(223 84% 62%)); color:#fff; font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center;">2</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="shield"></i></span><span style="flex:1;">Политики</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="file-code-2"></i></span><span style="flex:1;">Скрипты</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="list-checks"></i></span><span style="flex:1;">Политики скриптов</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="boxes"></i></span><span style="flex:1;">Группы</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="history"></i></span><span style="flex:1;">Журнал</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="users"></i></span><span style="flex:1;">Пользователи</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="badge-check"></i></span><span style="flex:1;">Лицензия</span></a>
+      <a href="#" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%);"><span style="font-size:17px; display:inline-flex;"><i data-lucide="user-circle"></i></span><span style="flex:1;">Профиль</span></a>
+    </nav>
+
+    <div style="padding:10px; border-top:1px solid hsl(224 13% 18%); display:flex; flex-direction:column; gap:2px;">
+      <button type="button" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%); background:none; border:none; cursor:pointer; width:100%; text-align:left; font-family:inherit;"><span style="font-size:17px; display:inline-flex;"><i data-lucide="sun"></i></span>Светлая тема</button>
+      <button type="button" style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:6px; font-size:14px; color:hsl(220 8% 58%); background:none; border:none; cursor:pointer; width:100%; text-align:left; font-family:inherit;"><span style="font-size:17px; display:inline-flex;"><i data-lucide="log-out"></i></span>Выход</button>
+    </div>
+  </aside>
+
+  <!-- Main column -->
+  <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+
+    <!-- Content -->
+    <main style="flex:1; overflow:auto; padding:24px; animation:page-in 0.22s cubic-bezier(0.16,1,0.3,1);">
+      <div style="display:flex; flex-direction:column; gap:20px; max-width:1180px;">
+        <h1 style="font-size:20px; font-weight:600; margin:0; color:#fff;">Обзор</h1>
+
+        <!-- Stat cards (v2 arrangement, v3 tile styling) -->
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px;">
+          <div style="display:flex; background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); overflow:hidden; min-height:104px;">
+            <div style="width:64px; flex-shrink:0; background:linear-gradient(160deg,hsl(221 100% 72%),hsl(223 84% 62%)); display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;"><i data-lucide="monitor"></i></div>
+            <div style="flex:1; padding:14px 16px; display:flex; flex-direction:column;">
+              <span style="font-size:13px; color:hsl(220 8% 60%);">Всего устройств</span>
+              <span style="font-size:30px; font-weight:300; color:#fff; line-height:1.1; margin-top:2px;">48</span>
+              <span style="font-size:12px; color:hsl(220 8% 55%); margin-top:auto;">31 онлайн</span>
+            </div>
+          </div>
+          <div style="display:flex; background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); overflow:hidden; min-height:104px;">
+            <div style="width:64px; flex-shrink:0; background:linear-gradient(160deg,hsl(221 100% 72%),hsl(223 84% 62%)); display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;"><i data-lucide="file-code-2"></i></div>
+            <div style="flex:1; padding:14px 16px; display:flex; flex-direction:column;">
+              <span style="font-size:13px; color:hsl(220 8% 60%);">Скриптов</span>
+              <span style="font-size:30px; font-weight:300; color:#fff; line-height:1.1; margin-top:2px;">12</span>
+              <span style="font-size:12px; color:hsl(220 8% 55%); margin-top:auto;">в библиотеке</span>
+            </div>
+          </div>
+          <div style="display:flex; background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); overflow:hidden; min-height:104px;">
+            <div style="width:64px; flex-shrink:0; background:linear-gradient(160deg,hsl(221 100% 72%),hsl(223 84% 62%)); display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;"><i data-lucide="shield"></i></div>
+            <div style="flex:1; padding:14px 16px; display:flex; flex-direction:column;">
+              <span style="font-size:13px; color:hsl(220 8% 60%);">Политик</span>
+              <span style="font-size:30px; font-weight:300; color:#fff; line-height:1.1; margin-top:2px;">7</span>
+              <span style="font-size:12px; color:hsl(220 8% 55%); margin-top:auto;">правил ПО</span>
+            </div>
+          </div>
+          <div style="display:flex; background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); overflow:hidden; min-height:104px;">
+            <div style="width:64px; flex-shrink:0; background:linear-gradient(160deg,hsl(0 70% 62%),hsl(18 85% 58%)); display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;"><i data-lucide="bell"></i></div>
+            <div style="flex:1; padding:14px 16px; display:flex; flex-direction:column;">
+              <span style="font-size:13px; color:hsl(220 8% 60%);">Алертов</span>
+              <span style="font-size:30px; font-weight:300; color:hsl(0 72% 66%); line-height:1.1; margin-top:2px;">3</span>
+              <span style="font-size:12px; color:hsl(220 8% 55%); margin-top:auto;">неподтверждённых</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Two-column (v2 arrangement) -->
+        <div style="display:grid; grid-template-columns:2fr 3fr; gap:20px;">
+
+          <!-- Left column -->
+          <div style="display:flex; flex-direction:column; gap:20px;">
+            <div style="background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); padding:18px 20px;">
+              <div style="font-size:15px; font-weight:600; color:#fff;">Устройства по ОС</div>
+              <div style="font-size:12px; color:hsl(220 8% 55%); margin-bottom:16px;">Всего 48</div>
+              <div style="display:flex; flex-direction:column; gap:14px;">
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:6px;"><span style="font-size:13px; color:hsl(220 10% 72%);">Windows</span><span style="font-size:13px; color:#fff;">26<span style="color:hsl(220 8% 55%);"> · 54%</span></span></div>
+                  <div style="height:8px; width:100%; background:hsl(224 13% 20%); border-radius:99px; overflow:hidden;"><div style="height:100%; width:54%; border-radius:99px; background:linear-gradient(90deg,hsl(221 100% 72%),hsl(223 84% 62%));"></div></div>
+                </div>
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:6px;"><span style="font-size:13px; color:hsl(220 10% 72%);">macOS</span><span style="font-size:13px; color:#fff;">14<span style="color:hsl(220 8% 55%);"> · 29%</span></span></div>
+                  <div style="height:8px; width:100%; background:hsl(224 13% 20%); border-radius:99px; overflow:hidden;"><div style="height:100%; width:29%; border-radius:99px; background:linear-gradient(90deg,hsl(221 100% 72%),hsl(223 84% 62%));"></div></div>
+                </div>
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:6px;"><span style="font-size:13px; color:hsl(220 10% 72%);">Linux</span><span style="font-size:13px; color:#fff;">8<span style="color:hsl(220 8% 55%);"> · 17%</span></span></div>
+                  <div style="height:8px; width:100%; background:hsl(224 13% 20%); border-radius:99px; overflow:hidden;"><div style="height:100%; width:17%; border-radius:99px; background:linear-gradient(90deg,hsl(221 100% 72%),hsl(223 84% 62%));"></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); padding:18px 20px;">
+              <div style="font-size:15px; font-weight:600; color:#fff;">Статусы</div>
+              <div style="font-size:12px; color:hsl(220 8% 55%); margin-bottom:14px;">Распределение парка</div>
+              <div style="display:flex; flex-direction:column; gap:10px;">
+                <div style="display:flex; align-items:center; justify-content:space-between;"><div style="display:flex; align-items:center; gap:9px;"><span style="height:8px; width:8px; border-radius:99px; background:#10b981;"></span><span style="font-size:13px; color:hsl(220 10% 72%);">Активных</span></div><span style="font-size:13px; font-weight:600; color:#fff;">31</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between;"><div style="display:flex; align-items:center; gap:9px;"><span style="height:8px; width:8px; border-radius:99px; background:#3b82f6;"></span><span style="font-size:13px; color:hsl(220 10% 72%);">Зарегистрированных</span></div><span style="font-size:13px; font-weight:600; color:#fff;">9</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between;"><div style="display:flex; align-items:center; gap:9px;"><span style="height:8px; width:8px; border-radius:99px; background:#f59e0b;"></span><span style="font-size:13px; color:hsl(220 10% 72%);">Ожидающих</span></div><span style="font-size:13px; font-weight:600; color:#fff;">5</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between;"><div style="display:flex; align-items:center; gap:9px;"><span style="height:8px; width:8px; border-radius:99px; background:#ef4444;"></span><span style="font-size:13px; color:hsl(220 10% 72%);">Заблокированных</span></div><span style="font-size:13px; font-weight:600; color:#fff;">3</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Activity feed -->
+          <div style="background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09); display:flex; flex-direction:column;">
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:16px 20px 12px;">
+              <div><div style="font-size:15px; font-weight:600; color:#fff;">Активность</div><div style="font-size:12px; color:hsl(220 8% 55%);">Последние события</div></div>
+              <a href="#" style="display:flex; align-items:center; gap:4px; font-size:12px; color:hsl(220 8% 60%);">Все события <span style="font-size:13px; display:inline-flex;"><i data-lucide="chevron-right"></i></span></a>
+            </div>
+            <div data-feed></div>
+          </div>
+        </div>
+
+        <!-- Recent devices (v2 arrangement) -->
+        <div style="background:rgba(255,255,255,0.055); backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); border:1px solid rgba(255,255,255,0.10); border-radius:16px; box-shadow:0 6px 26px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.09);">
+          <div style="display:flex; align-items:center; justify-content:space-between; padding:16px 20px 12px;">
+            <div><div style="font-size:15px; font-weight:600; color:#fff;">Последние устройства</div><div style="font-size:12px; color:hsl(220 8% 55%);">Недавно на связи</div></div>
+            <a href="#" style="display:flex; align-items:center; gap:4px; font-size:12px; color:hsl(220 8% 60%);">Все устройства <span style="font-size:13px; display:inline-flex;"><i data-lucide="chevron-right"></i></span></a>
+          </div>
+          <div data-devices></div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  componentDidMount() {
+    this.renderFeed();
+    this.renderDevices();
+    if (window.lucide) window.lucide.createIcons();
+  }
+  componentDidUpdate() { if (window.lucide) window.lucide.createIcons(); }
+
+  renderFeed() {
+    const CAT = {
+      security: { icon: "shield-alert", fg: "hsl(0 90% 71%)",  bg: "rgba(239,68,68,0.12)" },
+      auth:     { icon: "key-round",    fg: "hsl(199 90% 62%)", bg: "rgba(14,165,233,0.12)" },
+      admin:    { icon: "user-cog",     fg: "hsl(255 92% 76%)", bg: "rgba(139,92,246,0.12)" },
+      device:   { icon: "monitor",      fg: "hsl(158 64% 52%)", bg: "rgba(16,185,129,0.12)" },
+      content:  { icon: "file-code-2",  fg: "hsl(220 8% 60%)",  bg: "hsl(224 13% 20%)" },
+    };
+    const feed = [
+      ["admin@routineops.io", "заблокировал устройство", "security", "только что"],
+      ["k.orlov@company.ru", "вошёл в систему", "auth", "4 мин. назад"],
+      ["admin@routineops.io", "одобрил заявку на права", "admin", "18 мин. назад"],
+      ["ci-bot@company.ru", "запустил скрипт на группе", "device", "32 мин. назад"],
+      ["admin@routineops.io", "создал политику", "content", "1 ч. назад"],
+      ["k.orlov@company.ru", "неудачная попытка входа", "security", "1 ч. назад"],
+      ["admin@routineops.io", "добавил устройство", "device", "2 ч. назад"],
+      ["m.sokolova@company.ru", "пригласил пользователя", "admin", "3 ч. назад"],
+      ["admin@routineops.io", "создал скрипт", "content", "5 ч. назад"],
+      ["k.orlov@company.ru", "сменил пароль", "auth", "8 ч. назад"],
+    ];
+    const all = document.querySelectorAll("[data-feed]");
+    const host = all[all.length - 1];
+    if (!host) return;
+    host.innerHTML = feed.map(([user, action, cat, when], i) => {
+      const c = CAT[cat];
+      const sec = cat === "security";
+      return `<div style="display:flex; align-items:flex-start; gap:12px; padding:10px 20px; ${sec ? "background:rgba(239,68,68,0.06);" : ""} border-top:1px solid hsl(224 13% 18%); animation:feed-in 0.25s ease-out both; animation-delay:${i*25}ms;">
+        <div style="margin-top:1px; height:26px; width:26px; border-radius:99px; background:${c.bg}; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:${c.fg}; font-size:14px;"><i data-lucide="${c.icon}"></i></div>
+        <div style="min-width:0;">
+          <p style="font-size:13px; line-height:1.4; margin:0; color:hsl(220 10% 76%);"><span style="font-weight:500; color:#fff;">${user}</span> <span style="color:${sec ? c.fg : "hsl(220 8% 58%)"};">${action}</span></p>
+          <p style="font-size:11px; color:hsl(220 8% 50%); margin:2px 0 0;">${when}</p>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  renderDevices() {
+    const DOT = { active: "#10b981", enrolled: "#3b82f6", pending: "#f59e0b", blocked: "#ef4444" };
+    const rows = [
+      ["MB-DESIGN-04", "macOS 14.5 Sonoma", "active", "10.0.12.41", "только что"],
+      ["WIN-FIN-workstation", "Windows 11 Pro", "active", "10.0.12.88", "3 мин. назад"],
+      ["ubuntu-build-01", "Ubuntu 22.04 LTS", "enrolled", "10.0.20.7", "12 мин. назад"],
+      ["WIN-HR-07", "Windows 10 Pro", "pending", "—", "1 ч. назад"],
+      ["mac-mini-ci", "macOS 13.6 Ventura", "blocked", "10.0.20.15", "2 д. назад"],
+    ];
+    const all = document.querySelectorAll("[data-devices]");
+    const host = all[all.length - 1];
+    if (!host) return;
+    host.innerHTML = rows.map(([host_, os, st, ip, seen]) => `
+      <button type="button" style="width:100%; display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-top:1px solid hsl(224 13% 18%); border-left:none; border-right:none; border-bottom:none; background:none; cursor:pointer; text-align:left; font-family:inherit;">
+        <div style="display:flex; align-items:center; gap:12px; min-width:0;">
+          <span style="height:8px; width:8px; border-radius:99px; flex-shrink:0; background:${DOT[st]};"></span>
+          <div style="min-width:0;">
+            <p style="font-size:14px; font-weight:500; margin:0; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${host_}</p>
+            <p style="font-size:12px; color:hsl(220 8% 55%); margin:1px 0 0;">${os}</p>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:16px; flex-shrink:0; margin-left:16px;">
+          <span style="font-size:12px; color:hsl(220 8% 55%);">${ip}</span>
+          <span style="font-size:12px; color:hsl(220 8% 55%);">${seen}</span>
+          <span style="font-size:14px; color:hsl(220 8% 55%); display:inline-flex;"><i data-lucide="chevron-right"></i></span>
+        </div>
+      </button>`).join("");
+  }
+}
+</script>
+</body>
+</html>

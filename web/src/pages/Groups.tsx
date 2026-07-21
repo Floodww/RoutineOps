@@ -7,7 +7,6 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Select } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { toast } from "@/lib/toast"
 
 // ColorPalette — выбор цвета группы. Цветом обводятся рамки её устройств в списке,
@@ -209,14 +208,16 @@ export default function Groups() {
       )
     : devices
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
+  if (loading) {
+    return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+  }
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Группы устройств</h1>
+        <h1 className="text-xl font-semibold text-foreground">Группы устройств</h1>
         <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
+          <Plus className="h-4 w-4 mr-1.5" strokeWidth={2} />
           Новая группа
         </Button>
       </div>
@@ -229,27 +230,25 @@ export default function Groups() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {groups.map((g) => (
-          <Card key={g.id} className="overflow-hidden">
+          <div key={g.id} className="glass overflow-hidden">
             {/* Полоса цвета группы — тот же цвет обводит её устройства в списке. */}
             <div className="h-1 w-full" style={{ backgroundColor: g.color }} />
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  <Users className="h-4 w-4" style={{ color: g.color }} />
-                  {g.name}
-                </CardTitle>
+            <div className="flex flex-col gap-3 px-5 pt-4 pb-[18px]">
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2 min-w-0">
+                  <Users className="h-4 w-4 flex-shrink-0" strokeWidth={2} style={{ color: g.color }} />
+                  <span className="truncate">{g.name}</span>
+                </h2>
                 <button
                   type="button"
                   onClick={() => handleDeleteGroup(g.id)}
-                  className="text-muted-foreground hover:text-destructive transition-colors"
+                  className="text-muted-foreground hover:text-destructive transition-colors flex-shrink-0"
                   aria-label="Удалить группу"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
                 </button>
               </div>
-            </CardHeader>
-            <CardContent className="space-y-3 text-xs text-muted-foreground">
-              <p>
+              <p className="text-xs text-muted-foreground">
                 {g.device_ids.length} устройств · {g.policy_ids.length} скрипт-политик · {g.software_rules.length} софт-правил
               </p>
               <div className="flex gap-2">
@@ -268,12 +267,12 @@ export default function Groups() {
                   onClick={() => { setRunGroupId(g.id); setRunForm({ script_id: "", priority: "medium" }) }}
                   disabled={scripts.length === 0 || g.device_ids.length === 0}
                 >
-                  <Play className="h-3.5 w-3.5 mr-1" />
+                  <Play className="h-3.5 w-3.5 mr-1" strokeWidth={2} />
                   Прогнать скрипт
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         ))}
       </div>
 
@@ -285,7 +284,7 @@ export default function Groups() {
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="space-y-1.5">
-              <Label>Название группы</Label>
+              <Label className="text-soft">Название группы</Label>
               <Input
                 placeholder="MacBook-и бухгалтерии"
                 value={groupName}
@@ -293,7 +292,7 @@ export default function Groups() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Цвет</Label>
+              <Label className="text-soft">Цвет</Label>
               <ColorPalette value={groupColor} onChange={setGroupColor} />
               <p className="text-xs text-muted-foreground">
                 Этим цветом будут обведены устройства группы в списке.
@@ -316,7 +315,7 @@ export default function Groups() {
             <div className="space-y-5 pt-2">
               {/* Цвет */}
               <div className="space-y-2">
-                <p className="text-sm font-medium">Цвет</p>
+                <p className="text-sm font-medium text-foreground">Цвет</p>
                 <ColorPalette
                   value={managedGroup.color}
                   onChange={(c) => handleChangeColor(managedGroup.id, c)}
@@ -325,7 +324,7 @@ export default function Groups() {
 
               {/* Устройства */}
               <div className="space-y-2">
-                <p className="text-sm font-medium">Устройства</p>
+                <p className="text-sm font-medium text-foreground">Устройства</p>
                 <Input
                   placeholder="Фильтр: имя, IP, серийник..."
                   value={deviceQuery}
@@ -337,7 +336,7 @@ export default function Groups() {
                     const inGroup = managedGroup.device_ids.includes(d.id)
                     return (
                       <div key={d.id} className="flex items-center justify-between text-sm py-1">
-                        <span className={inGroup ? "font-medium" : "text-muted-foreground"}>{d.hostname}</span>
+                        <span className={inGroup ? "font-medium text-foreground" : "text-muted-foreground"}>{d.hostname}</span>
                         <Button
                           size="sm"
                           variant={inGroup ? "destructive" : "outline"}
@@ -362,13 +361,13 @@ export default function Groups() {
 
               {/* Скрипт-политики */}
               <div className="space-y-2">
-                <p className="text-sm font-medium">Политики скриптов</p>
+                <p className="text-sm font-medium text-foreground">Политики скриптов</p>
                 <div className="space-y-1 max-h-40 overflow-auto">
                   {scriptPolicies.map((p) => {
                     const assigned = managedGroup.policy_ids.includes(p.id)
                     return (
                       <div key={p.id} className="flex items-center justify-between text-sm py-1">
-                        <span className={assigned ? "font-medium" : "text-muted-foreground"}>{p.name}</span>
+                        <span className={assigned ? "font-medium text-foreground" : "text-muted-foreground"}>{p.name}</span>
                         <Button
                           size="sm"
                           variant={assigned ? "destructive" : "outline"}
@@ -389,15 +388,15 @@ export default function Groups() {
 
               {/* Софт-правила */}
               <div className="space-y-2">
-                <p className="text-sm font-medium flex items-center gap-1.5">
-                  <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                <p className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4 text-muted-foreground" strokeWidth={2} />
                   Софт-правила
                 </p>
                 <div className="space-y-1 max-h-40 overflow-auto">
                   {managedGroup.software_rules.map((rule) => (
                     <div key={rule.id} className="flex items-center justify-between text-sm py-1">
                       <span className="flex items-center gap-2">
-                        <span className="font-medium">{rule.software_name}</span>
+                        <span className="font-medium text-foreground">{rule.software_name}</span>
                         <Badge variant={rule.rule_type === "forbidden" ? "destructive" : "secondary"}>
                           {rule.rule_type === "forbidden" ? "Запрещено" : "Разрешено"}
                         </Badge>
@@ -418,7 +417,7 @@ export default function Groups() {
                 </div>
                 <div className="flex items-end gap-2 pt-1">
                   <div className="flex-1 space-y-1">
-                    <Label className="text-xs">ПО</Label>
+                    <Label className="text-xs text-soft">ПО</Label>
                     <Input
                       placeholder="chrome.exe"
                       value={softwareForm.software_name}
@@ -426,7 +425,7 @@ export default function Groups() {
                     />
                   </div>
                   <div className="w-36 space-y-1">
-                    <Label className="text-xs">Тип</Label>
+                    <Label className="text-xs text-soft">Тип</Label>
                     <Select
                       value={softwareForm.rule_type}
                       onChange={(v) => setSoftwareForm({ ...softwareForm, rule_type: v as "allowed" | "forbidden" })}
@@ -458,7 +457,7 @@ export default function Groups() {
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="space-y-1.5">
-              <Label>Скрипт</Label>
+              <Label className="text-soft">Скрипт</Label>
               <Select
                 value={runForm.script_id}
                 onChange={(v) => setRunForm({ ...runForm, script_id: v })}
@@ -467,7 +466,7 @@ export default function Groups() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Приоритет</Label>
+              <Label className="text-soft">Приоритет</Label>
               <Select
                 value={runForm.priority}
                 onChange={(v) => setRunForm({ ...runForm, priority: v as typeof runForm.priority })}

@@ -27,7 +27,7 @@ export default function ConfirmDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
-        {description && <p className="text-sm text-muted-foreground pt-1">{description}</p>}
+        {description && <p className="text-sm text-soft pt-1">{description}</p>}
         <div className="flex justify-end gap-2 pt-4">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Отмена

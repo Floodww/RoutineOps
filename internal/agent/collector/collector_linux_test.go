@@ -213,3 +213,26 @@ func assertSoftware(t *testing.T, got, want []Software) {
 		}
 	}
 }
+
+func TestParseLsblkCrypt(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"LUKS-цепочка", "lvm\ncrypt\npart\ndisk\n", "enabled"},
+		{"без шифрования", "part\ndisk\n", "disabled"},
+		{"пустой вывод", "\n", ""},
+		{"crypt в конце", "part\ncrypt\n", "enabled"},
+	}
+	for _, c := range cases {
+		if got := parseLsblkCrypt(c.in); got != c.want {
+			t.Errorf("%s: parseLsblkCrypt = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// bootTime читает /proc/stat живьём: на linux-CI обязан быть > 0.
+func TestBootTimeLive(t *testing.T) {
+	if bootTime() <= 0 {
+		t.Error("bootTime на живой linux-системе должен быть > 0")
+	}
+}

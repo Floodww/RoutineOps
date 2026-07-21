@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown } from "lucide-react"
-import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform } from "@/lib/api"
+import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS } from "@/lib/api"
 import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Select } from "@/components/ui/select"
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table"
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
@@ -20,13 +18,7 @@ type TaskForm = { script: string; platform: string; priority: string }
 type TaskMode = "library" | "manual"
 
 const statusBadge = (status: Device["status"]) => {
-  const map: Record<Device["status"], { label: string; variant: "success" | "default" | "secondary" | "destructive" | "outline" }> = {
-    active:   { label: "Активен",         variant: "success"     },
-    enrolled: { label: "Зарегистрирован", variant: "default"     },
-    pending:  { label: "Ожидает",         variant: "secondary"   },
-    blocked:  { label: "Заблокирован",    variant: "destructive" },
-  }
-  const { label, variant } = map[status] ?? { label: status, variant: "outline" as const }
+  const { label, variant } = DEVICE_STATUS[status] ?? { label: status, variant: "outline" as const }
   return <Badge variant={variant}>{label}</Badge>
 }
 
@@ -248,16 +240,16 @@ export default function DeviceDetail() {
   if (!device) return <p className="text-destructive text-sm">Устройство не найдено</p>
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center gap-3">
         <button
           type="button"
           onClick={() => navigate("/devices")}
           className="text-muted-foreground hover:text-foreground transition-colors"
         >
-          <ChevronLeft className="h-5 w-5" />
+          <ChevronLeft className="h-5 w-5" strokeWidth={2} />
         </button>
-        <h1 className="text-xl font-semibold">{device.hostname}</h1>
+        <h1 className="text-xl font-semibold text-foreground">{device.hostname}</h1>
         {statusBadge(device.status)}
         {device.lock_status === "locked" && <Badge variant="destructive">Экран заблокирован</Badge>}
         {device.groups?.map((g) => <GroupBadge key={g.id} group={g} />)}
@@ -288,9 +280,14 @@ export default function DeviceDetail() {
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
+              {/* Разблокировка = PUT status=active, а сервер такой переход из очереди
+                  одобрения и терминальных состояний отбивает 409-й (handler.go:629).
+                  Раньше пункт для них был ВКЛЮЧЁН и звал «Разблокировать доступ» —
+                  клик приводил к сырому английскому тексту ошибки в тосте.
+                  Разрешаем только там, где блокировка реально применима. */}
               <DropdownMenuItem
                 destructive
-                disabled={blocking || device.status === "pending" || device.status === "enrolled"}
+                disabled={blocking || (device.status !== "active" && device.status !== "blocked")}
                 onSelect={() => device.status === "active" ? setConfirmBlock(true) : toggleBlock()}
               >
                 {device.status === "active" ? "Заблокировать доступ" : "Разблокировать доступ"}
@@ -313,7 +310,7 @@ export default function DeviceDetail() {
                 <div className="space-y-4 pt-2">
                   <p className="text-sm text-muted-foreground">Запустите на устройстве. Токен действует 24ч.</p>
                   <div className="relative">
-                    <pre className="rounded-md border bg-muted px-3 py-3 text-xs font-mono break-all whitespace-pre-wrap pr-10">
+                    <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono break-all whitespace-pre-wrap pr-10 text-soft">
                       {reenrollCommand()}
                     </pre>
                     <button
@@ -321,7 +318,7 @@ export default function DeviceDetail() {
                       onClick={copyCommand}
                       className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:text-foreground transition-colors"
                     >
-                      {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                      {copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-500" /> : <Copy className="h-4 w-4" />}
                     </button>
                   </div>
                   <p className="text-xs text-muted-foreground font-mono">{reenrollResult.enrollment_token}</p>
@@ -348,7 +345,7 @@ export default function DeviceDetail() {
               </DialogHeader>
               <div className="space-y-4 pt-2">
                 {/* Переключатель режима */}
-                <div className="flex rounded-md border p-0.5 gap-0.5">
+                <div className="flex rounded-md border border-border p-0.5 gap-0.5">
                   {(["library", "manual"] as TaskMode[]).map((mode) => (
                     <button
                       type="button"
@@ -357,7 +354,7 @@ export default function DeviceDetail() {
                       className={[
                         "flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors",
                         taskMode === mode
-                          ? "bg-primary text-primary-foreground"
+                          ? "brand-gradient text-white dark:text-[hsl(224_14%_10%)]"
                           : "text-muted-foreground hover:text-foreground",
                       ].join(" ")}
                     >
@@ -384,7 +381,7 @@ export default function DeviceDetail() {
                       )}
                     </div>
                     {selectedScript && (
-                      <pre className="rounded-md border bg-muted px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-auto">
+                      <pre className="rounded-md border border-border bg-muted px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-auto text-soft">
                         {selectedScript.content}
                       </pre>
                     )}
@@ -443,172 +440,144 @@ export default function DeviceDetail() {
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {[
-          { label: "ОС",              value: `${device.os} ${device.os_version}`, color: "text-blue-500"   },
-          { label: "IP",              value: device.ip_address || "—",             color: "text-violet-500" },
-          { label: "Последний раз",   value: device.last_seen_at ? formatDistanceToNow(device.last_seen_at) : "—", color: "text-emerald-500" },
-          { label: "Зарегистрировано",value: formatDistanceToNow(device.created_at), color: "text-amber-500" },
-        ].map(({ label, value, color }) => (
-          <Card key={label} className="overflow-hidden">
-            <div className={`h-0.5 w-full ${color.replace("text-", "bg-")}`} />
-            <CardContent className="pt-4">
-              <p className="text-xs text-muted-foreground">{label}</p>
-              <p className={`text-sm font-medium mt-0.5 ${color}`}>{value}</p>
-            </CardContent>
-          </Card>
+          { label: "ОС",              value: `${device.os} ${device.os_version}` },
+          { label: "IP",              value: device.ip_address || "—"            },
+          { label: "Последний раз",   value: device.last_seen_at ? formatDistanceToNow(device.last_seen_at) : "—" },
+          { label: "Зарегистрировано",value: formatDistanceToNow(device.created_at) },
+        ].map(({ label, value }) => (
+          <div key={label} className="glass px-5 py-[18px]">
+            <p className="text-xs text-muted-foreground">{label}</p>
+            <p className="text-sm font-medium text-foreground mt-1 truncate">{value}</p>
+          </div>
         ))}
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-emerald-500" />
-            Диагностика
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="space-y-3">
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Device ID (cert CN)</p>
-                <p className="text-sm font-mono">{device.cert_cn || "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Энроллмент</p>
-                <p className="text-sm">{device.enrolled_at ? formatDistanceToNow(device.enrolled_at) : "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">MAC-адрес</p>
-                <p className="text-sm font-mono">{device.mac_address || "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Серийный номер (SN)</p>
-                <p className="text-sm font-mono">{device.serial_number || "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Версия агента</p>
-                <p className="text-sm font-mono">{device.agent_version || "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Внутренний IP</p>
-                <p className="text-sm font-mono">{device.ip_address || "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-0.5">Внешний IP</p>
-                <p className="text-sm font-mono">{device.public_ip || "—"}</p>
-              </div>
+      <div className="glass px-5 py-[18px]">
+        <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2 mb-4">
+          <ShieldCheck className="h-[17px] w-[17px] text-muted-foreground" strokeWidth={2} />
+          Диагностика
+        </h2>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="space-y-3">
+            <div>
+              <p className="text-xs text-soft mb-0.5">Device ID (cert CN)</p>
+              <p className="text-sm font-mono text-foreground">{device.cert_cn || "—"}</p>
             </div>
-            <div className="space-y-3">
-              {device.cpu && (
-                <div className="flex items-start gap-2">
-                  <Cpu className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">CPU</p>
-                    <p className="text-sm">{device.cpu}</p>
-                  </div>
-                </div>
-              )}
-              {device.ram_mb > 0 && (
-                <div className="flex items-start gap-2">
-                  <MemoryStick className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">RAM</p>
-                    <p className="text-sm">{(device.ram_mb / 1024).toFixed(1)} ГБ</p>
-                  </div>
-                </div>
-              )}
-              {device.disk && (
-                <div className="flex items-start gap-2">
-                  <HardDrive className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">Диск (C:)</p>
-                    <p className="text-sm">{device.disk}</p>
-                  </div>
-                </div>
-              )}
+            <div>
+              <p className="text-xs text-soft mb-0.5">Энроллмент</p>
+              <p className="text-sm text-foreground">{device.enrolled_at ? formatDistanceToNow(device.enrolled_at) : "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-soft mb-0.5">MAC-адрес</p>
+              <p className="text-sm font-mono text-foreground">{device.mac_address || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-soft mb-0.5">Серийный номер (SN)</p>
+              <p className="text-sm font-mono text-foreground">{device.serial_number || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-soft mb-0.5">Версия агента</p>
+              <p className="text-sm font-mono text-foreground">{device.agent_version || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-soft mb-0.5">Внутренний IP</p>
+              <p className="text-sm font-mono text-foreground">{device.ip_address || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-soft mb-0.5">Внешний IP</p>
+              <p className="text-sm font-mono text-foreground">{device.public_ip || "—"}</p>
             </div>
           </div>
-        </CardContent>
-      </Card>
+          <div className="space-y-3">
+            {device.cpu && (
+              <div className="flex items-start gap-2">
+                <Cpu className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" strokeWidth={2} />
+                <div>
+                  <p className="text-xs text-soft">CPU</p>
+                  <p className="text-sm text-foreground">{device.cpu}</p>
+                </div>
+              </div>
+            )}
+            {device.ram_mb > 0 && (
+              <div className="flex items-start gap-2">
+                <MemoryStick className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" strokeWidth={2} />
+                <div>
+                  <p className="text-xs text-soft">RAM</p>
+                  <p className="text-sm text-foreground">{(device.ram_mb / 1024).toFixed(1)} ГБ</p>
+                </div>
+              </div>
+            )}
+            {device.disk && (
+              <div className="flex items-start gap-2">
+                <HardDrive className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" strokeWidth={2} />
+                <div>
+                  <p className="text-xs text-soft">Диск (C:)</p>
+                  <p className="text-sm text-foreground">{device.disk}</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Terminal className="h-4 w-4 text-violet-500" />
+      <div className="glass">
+        <div className="px-5 pt-4 pb-3">
+          <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
+            <Terminal className="h-[17px] w-[17px] text-muted-foreground" strokeWidth={2} />
             Задачи
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Статус</TableHead>
-                <TableHead>Платформа</TableHead>
-                <TableHead>Приоритет</TableHead>
-                <TableHead>Создана</TableHead>
-                <TableHead />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {tasks.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground py-6">
-                    Нет задач
-                  </TableCell>
-                </TableRow>
-              )}
-              {tasks.map((t) => {
-                const hasLog = !!(t.output || t.error_log || t.script_content)
-                return (
-                  <TableRow
-                    key={t.id}
-                    className={hasLog ? "cursor-pointer hover:bg-accent/40" : undefined}
-                    onClick={() => hasLog && setLogTask(t)}
-                  >
-                    <TableCell>
-                      <Badge variant={taskStatusVariant[t.status]}>
-                        {taskStatusLabel[t.status] ?? t.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{t.platform}</TableCell>
-                    <TableCell className="text-muted-foreground">{t.priority}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</TableCell>
-                    <TableCell className="text-right">
-                      {hasLog && (
-                        <span className="text-xs text-muted-foreground">лог →</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+          </h2>
+        </div>
+        <div>
+          {tasks.length === 0 && (
+            <p className="border-t border-border px-5 py-6 text-center text-xs text-muted-foreground">
+              Нет задач
+            </p>
+          )}
+          {tasks.map((t) => {
+            const hasLog = !!(t.output || t.error_log || t.script_content)
+            return (
+              <div
+                key={t.id}
+                className={[
+                  "flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl",
+                  hasLog ? "cursor-pointer glass-hover" : "",
+                ].join(" ")}
+                onClick={() => hasLog && setLogTask(t)}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Badge variant={taskStatusVariant[t.status]}>
+                    {taskStatusLabel[t.status] ?? t.status}
+                  </Badge>
+                  <span className="text-[13px] text-soft truncate">{t.platform}</span>
+                  <span className="text-xs text-muted-foreground">{t.priority}</span>
+                </div>
+                <div className="flex items-center gap-4 flex-shrink-0">
+                  <span className="text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</span>
+                  {hasLog && <span className="text-xs text-brand">лог →</span>}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
 
       {software.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Программное обеспечение</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Название</TableHead>
-                  <TableHead>Версия</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {software.map((s) => (
-                  <TableRow key={s.name}>
-                    <TableCell className="font-medium">{s.name}</TableCell>
-                    <TableCell className="text-muted-foreground">{s.version}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+        <div className="glass">
+          <div className="px-5 pt-4 pb-3">
+            <h2 className="text-[15px] font-semibold text-foreground">Программное обеспечение</h2>
+          </div>
+          <div>
+            {software.map((s) => (
+              <div
+                key={s.name}
+                className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl"
+              >
+                <span className="text-sm font-medium text-foreground truncate">{s.name}</span>
+                <span className="text-xs text-muted-foreground flex-shrink-0">{s.version}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Task log dialog */}
@@ -616,7 +585,7 @@ export default function DeviceDetail() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Terminal className="h-4 w-4 text-violet-500" />
+              <Terminal className="h-4 w-4 text-muted-foreground" strokeWidth={2} />
               Лог задачи
               {logTask && (
                 <Badge variant={taskStatusVariant[logTask.status]} className="ml-1">
@@ -636,7 +605,7 @@ export default function DeviceDetail() {
               {logTask.script_content && (
                 <div className="space-y-1">
                   <p className="text-xs font-medium text-muted-foreground">Скрипт</p>
-                  <pre className="rounded-md border bg-muted px-3 py-2.5 text-xs font-mono whitespace-pre-wrap break-all max-h-40 overflow-auto">
+                  <pre className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs font-mono whitespace-pre-wrap break-all max-h-40 overflow-auto text-soft">
                     {logTask.script_content}
                   </pre>
                 </div>
@@ -702,7 +671,7 @@ export default function DeviceDetail() {
             <div className="space-y-4 pt-2">
               <p className="text-sm text-muted-foreground">Команда отправлена. Сохраните пароль — он не будет показан повторно.</p>
               <div className="relative">
-                <pre className="rounded-md border bg-muted px-3 py-3 text-sm font-mono pr-10">{lockPassword}</pre>
+                <pre className="rounded-md border border-border bg-muted px-3 py-3 text-sm font-mono pr-10 text-foreground">{lockPassword}</pre>
                 <button
                   type="button"
                   onClick={async () => {
@@ -712,7 +681,7 @@ export default function DeviceDetail() {
                   }}
                   className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  {lockCopied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  {lockCopied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-500" /> : <Copy className="h-4 w-4" />}
                 </button>
               </div>
               <Button className="w-full" variant="outline" onClick={() => setLockOpen(false)}>Закрыть</Button>

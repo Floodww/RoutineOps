@@ -1,0 +1,34 @@
+# nfpm-конфиг для .deb/.rpm агента RoutineOps.
+# Один файл на оба формата (nfpm package -p deb|rpm). Значения — из окружения,
+# которое задают цели Makefile (pkg-deb/pkg-rpm): PKG_ARCH, PKG_VERSION, PKG_BIN.
+#
+# Пакет кладёт ТОЛЬКО бинарь. systemd-юнит НЕ входит в пакет намеренно: его
+# генерирует сам агент в `enroll -install-service` (internal/agent/service/
+# install_linux.go) — статический юнит в пакете разъехался бы с рантайм-шаблоном.
+# postinstall завершает установку через enroll (по доверенному env-файлу) либо
+# печатает подсказку; preremove снимает службу.
+name: routineops-agent
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: admin
+priority: optional
+maintainer: Pavel Smirnov <charmander020104@gmail.com>
+description: |
+  RoutineOps Agent — RMM/MDM-агент (heartbeat, инвентаризация, задачи,
+  блокировка устройства, самообновление). Связь с сервером по gRPC mTLS.
+vendor: RoutineOps
+homepage: https://github.com/Floodww/RoutineOps
+license: Apache-2.0
+
+contents:
+  # __SRC__ подставляет цель Makefile (pkg-*): nfpm не разворачивает ${env} в glob
+  # src, поэтому путь уникален per (arch,format) через sed — без гонки под make -j.
+  - src: __SRC__
+    dst: /usr/local/bin/RoutineOps-agent
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: build/nfpm/scripts/postinstall.sh
+  preremove: build/nfpm/scripts/preremove.sh

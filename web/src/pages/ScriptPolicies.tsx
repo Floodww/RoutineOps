@@ -37,7 +37,7 @@ function PassFail({ c }: { c?: ScriptPolicyCompliance }) {
   }
   return (
     <span className="flex items-center gap-2 text-sm tabular-nums">
-      <span className="text-emerald-600 dark:text-emerald-400" title="Последний прогон завершился с кодом 0">
+      <span className="text-emerald-600 dark:text-emerald-400 font-medium" title="Последний прогон завершился с кодом 0">
         {c.pass}
       </span>
       <span className="text-muted-foreground/40">/</span>
@@ -177,12 +177,12 @@ export default function ScriptPolicies() {
     ? policies.filter((p) => p.name.toLowerCase().includes(q) || p.script_name.toLowerCase().includes(q))
     : policies
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Политики скриптов</h1>
+        <h1 className="text-xl font-semibold text-foreground">Политики скриптов</h1>
         <Button size="sm" onClick={() => setCreatePolicyOpen(true)} disabled={scripts.length === 0}>
           <Plus className="h-4 w-4 mr-1.5" />
           Новая политика
@@ -192,78 +192,84 @@ export default function ScriptPolicies() {
         <p className="text-sm text-muted-foreground">Сначала создайте скрипты в разделе «Скрипты».</p>
       )}
 
-      <Input
-        placeholder="Поиск по названию..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="max-w-sm"
-      />
+      {/* Поиск — отдельная стеклянная панель, как на «Скриптах»: карте таблицы нужен
+          overflow-hidden, и он обрезал бы всплывающие элементы фильтров. */}
+      <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
+        <Input
+          placeholder="Поиск по названию..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="max-w-xs"
+        />
+      </div>
 
-      <div className="rounded-lg border">
+      <div className="glass overflow-hidden">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Название</TableHead>
-              <TableHead>Скрипт</TableHead>
-              <TableHead title="Устройств прошло / не прошло по последнему прогону">Pass / Fail</TableHead>
-              <TableHead>Триггер</TableHead>
-              <TableHead>Назначение</TableHead>
-              <TableHead>Активна</TableHead>
-              <TableHead>Создана</TableHead>
+            <TableRow className="border-t-0 hover:bg-transparent">
+              <TableHead className="text-xs">Название</TableHead>
+              <TableHead className="text-xs">Скрипт</TableHead>
+              <TableHead className="text-xs" title="Устройств прошло / не прошло по последнему прогону">Pass / Fail</TableHead>
+              <TableHead className="text-xs">Триггер</TableHead>
+              <TableHead className="text-xs">Назначение</TableHead>
+              <TableHead className="text-xs">Активна</TableHead>
+              <TableHead className="text-xs">Создана</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
             {visiblePolicies.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground">
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
                   {policies.length === 0 ? "Нет политик" : "Ничего не найдено"}
                 </TableCell>
               </TableRow>
             )}
             {visiblePolicies.map((p) => (
-              <TableRow key={p.id}>
-                <TableCell className="font-medium">{p.name}</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{p.script_name}</TableCell>
-                <TableCell>
+              <TableRow key={p.id} className="hover:bg-transparent">
+                <TableCell className="px-4 py-3 text-sm font-medium text-foreground">{p.name}</TableCell>
+                <TableCell className="px-4 py-3 text-sm text-soft">{p.script_name}</TableCell>
+                <TableCell className="px-4 py-3">
                   <PassFail c={compliance[p.id]} />
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-4 py-3">
                   <Badge variant={triggerVariant[p.trigger_type] ?? "default"}>
                     {triggerLabel[p.trigger_type] ?? p.trigger_type}
                   </Badge>
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-4 py-3">
                   {p.group_names.length === 0 ? (
-                    <span
-                      className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+                    <Badge
+                      variant="secondary"
                       title="Политика не назначена ни одной группе — она не выполнится. Назначьте группу в разделе «Группы»."
                     >
                       ⚠ Не назначена
-                    </span>
+                    </Badge>
                   ) : (
                     <div className="flex flex-wrap gap-1">
                       {p.group_names.map((g) => (
-                        <Badge key={g} variant="secondary">{g}</Badge>
+                        <Badge key={g} variant="outline">{g}</Badge>
                       ))}
                     </div>
                   )}
                 </TableCell>
-                <TableCell>
+                <TableCell className="px-4 py-3">
+                  {/* Включённая политика — фирменный градиент; выключенная остаётся
+                      нейтральной. Зелёный тут читался бы как статус устройства. */}
                   <button
                     type="button"
                     aria-label={p.is_active ? "Деактивировать политику" : "Активировать политику"}
                     onClick={() => handleTogglePolicy(p.id, !p.is_active)}
-                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${p.is_active ? "bg-emerald-600" : "bg-input"}`}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${p.is_active ? "brand-gradient-h" : "bg-input"}`}
                   >
                     <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${p.is_active ? "translate-x-[19px]" : "translate-x-[3px]"}`} />
                   </button>
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">
+                <TableCell className="px-4 py-3 text-xs text-muted-foreground">
                   {formatDistanceToNow(p.created_at)}
                 </TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-3">
+                <TableCell className="px-4 py-3">
+                  <div className="flex items-center gap-3 justify-end">
                     <button
                       type="button"
                       aria-label="Результаты запусков"
@@ -389,22 +395,22 @@ export default function ScriptPolicies() {
             ) : (
               <div className="space-y-3">
                 {results.map((r) => (
-                  <div key={r.id} className="rounded-lg border p-3 space-y-2">
+                  <div key={r.id} className="rounded-xl border border-border px-5 py-[18px] space-y-2">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2">
-                        <Badge variant={r.exit_code === 0 ? "default" : "destructive"}>
+                        <Badge variant={r.exit_code === 0 ? "success" : "destructive"}>
                           {r.exit_code === 0 ? "Успех" : `Код ${r.exit_code}`}
                         </Badge>
-                        <span className="text-sm font-medium">{r.device_hostname || r.device_id}</span>
+                        <span className="text-sm font-medium text-foreground">{r.device_hostname || r.device_id}</span>
                         <Badge variant="outline">{triggerLabel[r.trigger] ?? r.trigger}</Badge>
                       </div>
                       <span className="text-xs text-muted-foreground">{formatDistanceToNow(r.finished_at)}</span>
                     </div>
                     {r.stdout && (
-                      <pre className="text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40">{r.stdout}</pre>
+                      <pre className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs font-mono text-soft whitespace-pre-wrap break-all max-h-40 overflow-auto">{r.stdout}</pre>
                     )}
                     {r.stderr && (
-                      <pre className="text-xs bg-destructive/10 text-destructive rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40">{r.stderr}</pre>
+                      <pre className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs font-mono text-destructive whitespace-pre-wrap break-all max-h-40 overflow-auto">{r.stderr}</pre>
                     )}
                   </div>
                 ))}

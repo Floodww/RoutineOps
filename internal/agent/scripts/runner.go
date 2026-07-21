@@ -5,7 +5,6 @@
 package scripts
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -99,15 +98,25 @@ func defaultExec(ctx context.Context, interpreter, content string) execResult {
 		return execResult{exitCode: -1, stderr: "неизвестный интерпретатор: " + interpreter}
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	var stdout, stderr bytes.Buffer
+	// Capped-буферы (scriptenc): потолок памяти ВО ВРЕМЯ выполнения — скрипт-
+	// политика с гигабайтным выводом не роняет агента под root в OOM.
+	var stdout, stderr scriptenc.CaptureBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Без WaitDelay политика, поднявшая фоновую службу (`daemon &` с унаследованным
+	// stdout), подвешивала Run() до смерти потомка (см. scriptenc.PipeWaitDelay).
+	cmd.WaitDelay = scriptenc.PipeWaitDelay
 	err := cmd.Run()
 
 	res := execResult{stdout: stdout.String(), stderr: stderr.String()}
 	switch {
 	case err == nil:
 		res.exitCode = 0
+	case errors.Is(err, exec.ErrWaitDelay):
+		// Подменяет ТОЛЬКО nil: сам скрипт вышел с кодом 0, но фоновый потомок
+		// держал stdout — пайпы закрыты принудительно. Это успех, не ошибка.
+		res.exitCode = 0
+		res.stderr += "\n[фоновые потомки скрипта продолжают работать — их дальнейший вывод не захвачен]"
 	case ctx.Err() == context.DeadlineExceeded:
 		res.exitCode = -1
 		res.stderr += "\n[прервано по таймауту]"

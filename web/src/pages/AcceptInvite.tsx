@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
+import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
+import SpotlightCard from "@/components/SpotlightCard"
 
 export default function AcceptInvite() {
   const [searchParams] = useSearchParams()
@@ -57,16 +59,19 @@ export default function AcceptInvite() {
   }
 
   if (inviteValid === null) {
-    return <div className="min-h-screen flex items-center justify-center bg-background"><p className="text-muted-foreground">Проверка приглашения...</p></div>
+    return <div className="min-h-screen flex items-center justify-center p-4"><p className="text-sm text-muted-foreground">Проверка приглашения...</p></div>
   }
 
   if (!inviteValid) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
+      // Без bg-background: карта стоит прямо на фоне body с радиальными бликами.
+      <div className="min-h-screen flex items-center justify-center p-4">
         <Card className="w-full max-w-sm">
-          <CardContent className="pt-6 space-y-2">
-            <p className="text-destructive text-sm">Приглашение недействительно или истекло.</p>
-            <Link to="/login" className="text-sm text-primary hover:underline block">На страницу входа</Link>
+          <CardContent className="px-5 py-[18px] space-y-2">
+            {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
+                берём тот же красный, что у алерт-цифры на дашборде. */}
+            <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">Приглашение недействительно или истекло.</p>
+            <Link to="/login" className="text-sm text-brand hover:underline block">На страницу входа</Link>
           </CardContent>
         </Card>
       </div>
@@ -74,16 +79,20 @@ export default function AcceptInvite() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Создание аккаунта</CardTitle>
+    // Без bg-background: карта стоит прямо на фоне body с радиальными бликами.
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <SpotlightCard as={Card} className="w-full max-w-sm">
+        <CardHeader className="px-5 pt-6 pb-2">
+          <CardTitle className="flex items-center justify-center gap-2.5 py-2 text-foreground">
+            <RoutineOpsLogo size={32} />
+            <span className="text-lg font-semibold tracking-tight">Создание аккаунта</span>
+          </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-5 pb-6">
           <p className="text-sm text-muted-foreground mb-4">Email: <span className="font-medium text-foreground">{inviteEmail}</span></p>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="name">Имя</Label>
+              <Label htmlFor="name" className="text-soft">Имя</Label>
               <Input
                 id="name"
                 type="text"
@@ -94,7 +103,7 @@ export default function AcceptInvite() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="password">Пароль</Label>
+              <Label htmlFor="password" className="text-soft">Пароль</Label>
               <Input
                 id="password"
                 type="password"
@@ -104,7 +113,7 @@ export default function AcceptInvite() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="confirm">Подтвердите пароль</Label>
+              <Label htmlFor="confirm" className="text-soft">Подтвердите пароль</Label>
               <Input
                 id="confirm"
                 type="password"
@@ -113,13 +122,15 @@ export default function AcceptInvite() {
                 required
               />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
+                берём тот же красный, что у алерт-цифры на дашборде. */}
+            {error && <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Создание..." : "Создать аккаунт"}
             </Button>
           </form>
         </CardContent>
-      </Card>
+      </SpotlightCard>
     </div>
   )
 }

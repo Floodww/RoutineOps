@@ -58,9 +58,9 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 		g.logger.Error("connect rejected: status check", "device_id", deviceID, "err", err)
 		return status.Errorf(codes.Internal, "status check: %v", err)
 	}
-	if devStatus == "blocked" {
-		g.logger.Warn("connect rejected: device blocked", "device_id", deviceID)
-		return status.Errorf(codes.PermissionDenied, "device is blocked")
+	if isCutOff(devStatus) {
+		g.logger.Warn("connect rejected", "device_id", deviceID, "status", devStatus)
+		return status.Errorf(codes.PermissionDenied, "device is %s", devStatus)
 	}
 	if devStatus == "" {
 		// Отпечаток неизвестен в БД: устройство переустановлено, а enroll не сохранил
@@ -155,8 +155,8 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 				// Не рвём стрим на временной ошибке БД (иначе дисконнект-шторм на
 				// блипе), но логируем — раньше ошибка молча терялась (БАГ 7).
 				g.logger.Error("heartbeat: status check", "device_id", deviceID, "err", err)
-			} else if s == "blocked" {
-				done <- status.Errorf(codes.PermissionDenied, "device is blocked")
+			} else if isCutOff(s) {
+				done <- status.Errorf(codes.PermissionDenied, "device is %s", s)
 				return
 			}
 		}
@@ -219,6 +219,15 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 		MACAddress:      req.DeviceInfo.MacAddress,
 		SerialNumber:    req.DeviceInfo.SerialNumber,
 		AgentVersion:    req.DeviceInfo.AgentVersion,
+		Arch:            req.DeviceInfo.Arch,
+		ConsoleUser:     req.DeviceInfo.ConsoleUser,
+		DiskEncryption:  req.DeviceInfo.DiskEncryption,
+		OSPatchDate:     req.DeviceInfo.OsPatchDate,
+		BootTime:        req.DeviceInfo.BootTime,
+		DiskFree:        req.DeviceInfo.DiskFree,
+		DomainJoined:    req.DeviceInfo.DomainJoined,
+		TPM:             req.DeviceInfo.Tpm,
+		SecureBoot:      req.DeviceInfo.SecureBoot,
 		Software:        software,
 	}); err != nil {
 		g.logger.Error("upsert inventory", "device_id", deviceID, "err", err)
@@ -245,7 +254,8 @@ func (g *Gateway) ReportTaskResult(ctx context.Context, req *pb.TaskResult) (*pb
 	if req.Status == pb.TaskStatus_TASK_STATUS_ERROR {
 		taskStatus = "failed"
 	}
-	if err := g.db.CompleteTask(ctx, req.TaskId, deviceID, taskStatus, req.Output, req.ErrorLog); err != nil {
+	prevStatus, taskType, err := g.db.CompleteTask(ctx, req.TaskId, deviceID, taskStatus, req.Output, req.ErrorLog)
+	if err != nil {
 		if errors.Is(err, storage.ErrTaskNotOwned) {
 			// Чужой/несуществующий task_id: accept-and-drop (Received:true, без gRPC-ошибки),
 			// чтобы не отравить FIFO-outbox агента и не палить существование задачи.
@@ -255,14 +265,82 @@ func (g *Gateway) ReportTaskResult(ctx context.Context, req *pb.TaskResult) (*pb
 		g.logger.Error("complete task", "task_id", req.TaskId, "err", err)
 		return &pb.TaskResultAck{Received: false}, nil
 	}
+	// Задача уже была закрыта по таймауту (FailStaleAckedTasks), а результат приехал
+	// после — консоль какое-то время показывала 'failed' для задачи, которая на самом
+	// деле отработала. Результат мы приняли, но подменять статус задним числом молча
+	// нельзя: по 'failed' могли завести тикет или перезапустить задачу вручную.
+	// Поэтому WARN + запись в аудит. WithoutCancel — событие уже свершилось и должно
+	// пережить обрыв соединения (тот же приём, что в api.Handler.audit).
+	if prevStatus == "failed" {
+		g.logger.Warn("task result received after timeout sweep — статус исправлен задним числом",
+			"task_id", req.TaskId, "device_id", deviceID, "prev_status", prevStatus, "status", taskStatus)
+		if err := g.db.WriteAuditLog(context.WithoutCancel(ctx), "", "agent:"+deviceID,
+			"late_task_result", "task", req.TaskId,
+			map[string]any{"prev_status": prevStatus, "status": taskStatus}); err != nil {
+			g.logger.Warn("late task result: аудит не записан", "task_id", req.TaskId, "err", err)
+		}
+	}
+	// Decommission-задача подтверждена агентом (он уже сносится) → флипаем устройство
+	// в терминальный 'decommissioned': Connect/heartbeat/все RPC теперь отклоняются (как
+	// blocked), heartbeat не воскрешает. Флип строго ПОСЛЕ приёма отчёта — до него статус
+	// оставался прежним, чтобы Connect успел доставить команду. Только SUCCESS: FAILED
+	// значит агент не смог снестись, устройство ещё живо — списывать нельзя.
+	// Ошибку флипа НЕ возвращаем агенту: он не ретраит (ReportTaskResult у decommission
+	// идёт мимо durable-очереди, агент уже мёртв) — но это ВИДИМАЯ ошибка в логе.
+	// ponytail: остаточный потолок — если флип упал по транзиентной ошибке БД, устройство
+	// останется 'active' с уже мёртвым сертом (active-unreachable); лечится повторной
+	// ручкой или ручным статусом. Серверного форс-отзыва (без ack агента) здесь нет.
+	if taskType == "decommission" && taskStatus == "completed" {
+		if err := g.db.MarkDeviceDecommissioned(context.WithoutCancel(ctx), deviceID); err != nil {
+			g.logger.Error("decommission: не удалось пометить устройство списанным",
+				"device_id", deviceID, "task_id", req.TaskId, "err", err)
+		} else {
+			g.logger.Warn("decommission: устройство помечено списанным (отозвано)",
+				"device_id", deviceID, "task_id", req.TaskId)
+		}
+	}
+
 	g.logger.Info("task result received", "task_id", req.TaskId, "device_id", deviceID, "status", taskStatus)
 	return &pb.TaskResultAck{Received: true}, nil
+}
+
+// isCutOff — терминальные/отклоняющие статусы, при которых gateway полностью
+// отрезает устройство (Connect/heartbeat/все agent-RPC): 'blocked' (kill-switch),
+// 'decommissioned' (снесён), 'rejected' (отклонён из очереди одобрения). Отличается
+// от pending_approval — тот режется ТОЛЬКО на политиках/скриптах.
+func isCutOff(deviceStatus string) bool {
+	switch deviceStatus {
+	case "blocked", "decommissioned", "rejected":
+		return true
+	}
+	return false
+}
+
+// pendingApproval сообщает, стоит ли устройство в очереди одобрения (bulk-энролл).
+// Такому режем ТОЛЬКО автоматические каналы исполнения (политики/скрипты) — Connect/
+// heartbeat/инвентарь остаются, поэтому это НЕ blocked-интерсептор (тот рубит всё), а
+// точечный гейт в FetchPolicy/FetchScriptPolicies.
+func (g *Gateway) pendingApproval(ctx context.Context, fingerprint string) (bool, error) {
+	st, err := g.db.GetDeviceStatusByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return false, err
+	}
+	return st == "pending_approval", nil
 }
 
 func (g *Gateway) FetchPolicy(ctx context.Context, req *pb.FetchPolicyRequest) (*pb.FetchPolicyResponse, error) {
 	_, fingerprint, err := extractCertInfo(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
+	}
+
+	// Неодобренное устройство (pending_approval) не получает политик: очередь одобрения
+	// гейтит АВТОМАТИЧЕСКИЕ каналы исполнения (политики/скрипты), оставляя Connect/
+	// heartbeat/инвентарь (чтобы админ видел машину). Пустой ответ = «политик нет».
+	if gated, err := g.pendingApproval(ctx, fingerprint); err != nil {
+		return nil, status.Errorf(codes.Internal, "status check: %v", err)
+	} else if gated {
+		return &pb.FetchPolicyResponse{}, nil
 	}
 
 	result, err := g.db.FetchPolicyRules(ctx, fingerprint)
@@ -469,6 +547,14 @@ func (g *Gateway) FetchScriptPolicies(ctx context.Context, req *pb.FetchScriptPo
 	_, fingerprint, err := extractCertInfo(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
+	}
+
+	// Неодобренное устройство не тянет и не исполняет скрипты (скрипт-канал = RCE от
+	// SYSTEM/root) — держим закрытым до одобрения. См. FetchPolicy.
+	if gated, err := g.pendingApproval(ctx, fingerprint); err != nil {
+		return nil, status.Errorf(codes.Internal, "status check: %v", err)
+	} else if gated {
+		return &pb.FetchScriptPoliciesResponse{}, nil
 	}
 
 	result, err := g.db.GetEffectiveScriptPoliciesForDevice(ctx, fingerprint)
@@ -766,14 +852,15 @@ type deviceStatusLookup interface {
 }
 
 // NewBlockedInterceptors — unary+stream интерсепторы, отклоняющие ЛЮБОЙ agent-RPC от
-// устройства со status='blocked'. Раньше эта проверка стояла ТОЛЬКО в Connect, и
+// устройства со status='blocked' ИЛИ 'decommissioned' (оба терминально режут доступ;
+// decommissioned — необратимо, после подтверждённого сноса). Раньше проверка стояла ТОЛЬКО в Connect, и
 // заблокированное (украденное/офбординг) устройство с валидным сертом продолжало тянуть
 // и исполнять script-политики через FetchScriptPolicies и остальные 8 RPC: прежний
 // kill-switch стоял только в Connect и покрывал 1 RPC из 10. Единая точка на границе
 // gRPC закрывает все разом и убирает дублирование по хендлерам.
 //
 // Семантика повторяет проверку в Connect: extractCertInfo → GetDeviceStatusByFingerprint;
-// "blocked" → PermissionDenied; неизвестный fingerprint ("") → пропускаем (устройство ещё
+// "blocked"/"decommissioned" → PermissionDenied; неизвестный fingerprint ("") → пропускаем (устройство ещё
 // не в БД — как в Connect); ошибка БД → Internal (fail-closed). Стоимость — один
 // индексируемый lookup по cert_fingerprint на RPC; агенты поллят редко.
 func NewBlockedInterceptors(db deviceStatusLookup, logger *slog.Logger) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
@@ -786,9 +873,9 @@ func NewBlockedInterceptors(db deviceStatusLookup, logger *slog.Logger) (grpc.Un
 		if err != nil {
 			return status.Errorf(codes.Internal, "status check: %v", err)
 		}
-		if st == "blocked" {
-			logger.Warn("rpc rejected: device blocked", "fingerprint", fingerprint)
-			return status.Errorf(codes.PermissionDenied, "device is blocked")
+		if isCutOff(st) {
+			logger.Warn("rpc rejected", "fingerprint", fingerprint, "status", st)
+			return status.Errorf(codes.PermissionDenied, "device is %s", st)
 		}
 		return nil
 	}

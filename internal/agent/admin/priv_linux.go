@@ -157,8 +157,13 @@ const minRegularUID = 1000
 
 // parseLoginctl выбирает пользователя локального сеанса из вывода
 // `loginctl list-sessions --no-legend`; колонки: SESSION UID USER SEAT [TTY].
-// Сеансы без места (seat пуст или "-") — это ssh/cron: физически за машиной
-// никого нет, и выдавать такому «консольному» пользователю права нельзя.
+// Консольным считаем только сеанс с РЕАЛЬНЫМ местом — имя seat по systemd
+// обязано начинаться с "seat" (seat0, seat1, ...). Сеанс без места (ssh/cron)
+// печатает колонку SEAT ПУСТОЙ (пробелы, не литерал "-"); strings.Fields такую
+// колонку схлопывает, и в f[3] попадает TTY (pts/0, tty2). Прежняя проверка
+// `seat != "-"` принимала этот TTY за место и выдавала удалённому ssh-юзеру
+// права/инвентарь консольного пользователя — теперь prefix "seat" их отсекает
+// (pts/0/tty2 префиксу не соответствуют).
 func parseLoginctl(out string) string {
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
@@ -172,7 +177,7 @@ func parseLoginctl(out string) string {
 		if uid < minRegularUID {
 			continue // root и системные учётки, включая greeter'ы
 		}
-		if seat := f[3]; seat != "-" {
+		if seat := f[3]; strings.HasPrefix(seat, "seat") {
 			return f[2]
 		}
 	}
@@ -213,18 +218,33 @@ func parseWho(out string) string {
 	return tty
 }
 
+// osConsoleUserFull — на Linux полной формы с доменом нет; отличается от
+// osConsoleUser только явным флагом успешности пробы (для инвентаря).
+func osConsoleUserFull() (string, bool) { return consoleUserProbe() }
+
 // osConsoleUser — пользователь активного графического/консольного сеанса.
 // "" если никого (или только root — его права временными не бывают).
 func osConsoleUser() string {
+	u, _ := consoleUserProbe()
+	return u
+}
+
+// consoleUserProbe возвращает пользователя и флаг успешности пробы. false —
+// только когда НИ loginctl, НИ who не отработали: тогда "" значит «не знаю»,
+// а не «никого», и в инвентарь его отдавать нельзя (см. ConsoleUser).
+func consoleUserProbe() (string, bool) {
+	probed := false
 	if out, err := exec.Command("loginctl", "list-sessions", "--no-legend").Output(); err == nil {
+		probed = true
 		if u := parseLoginctl(string(out)); u != "" {
-			return u
+			return u, true
 		}
 	}
 	if out, err := exec.Command("who").Output(); err == nil {
+		probed = true
 		if u := parseWho(string(out)); u != "" && regularUser(u) {
-			return u
+			return u, true
 		}
 	}
-	return ""
+	return "", probed
 }

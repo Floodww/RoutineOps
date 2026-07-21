@@ -58,6 +58,19 @@ func mustCreateDevice(t *testing.T, db *storage.DB, hostname, os string) *storag
 	return d
 }
 
+// mustCreateActiveDevice — устройство сразу в 'active'. Нужно тестам задач/фан-аута:
+// скрипт-задачи создаются ТОЛЬКО для active-устройств (CreateTask/FanOutScriptToGroup
+// гейтят по статусу — скрипт-канал не должен уезжать на pending/pending_approval).
+func mustCreateActiveDevice(t *testing.T, db *storage.DB, hostname, os string) *storage.Device {
+	t.Helper()
+	d := mustCreateDevice(t, db, hostname, os)
+	if err := db.UpdateDeviceStatus(context.Background(), d.ID, "active"); err != nil {
+		t.Fatalf("activate %q: %v", hostname, err)
+	}
+	d.Status = "active"
+	return d
+}
+
 func storageHeartbeatData(fingerprint, deviceID, certCN, ip string) storage.HeartbeatData {
 	return storage.HeartbeatData{
 		CertFingerprint: fingerprint,
