@@ -25,6 +25,22 @@ func (m *Mailer) Enabled() bool {
 	return m.host != ""
 }
 
+// PortTLSMismatch — порт и режим шифрования задаются двумя независимыми переменными
+// (SMTP_PORT, SMTP_TLS), а их рассинхрон проявляется только при ПЕРВОЙ отправке:
+// приглашение или сброс пароля тихо не уходит, ошибка видна лишь в логе сервера
+// часами позже. Дефолты согласованы (587 + STARTTLS), ломается это при смене порта
+// на 465 у провайдера, требующего implicit TLS. Проверяем на старте.
+// Нестандартные порты не судим — там режим знает только оператор.
+func PortTLSMismatch(port string, useTLS bool) bool {
+	switch port {
+	case "465": // implicit TLS
+		return !useTLS
+	case "587", "25": // STARTTLS
+		return useTLS
+	}
+	return false
+}
+
 func (m *Mailer) Send(to, subject, body string) error {
 	if !m.Enabled() {
 		return nil

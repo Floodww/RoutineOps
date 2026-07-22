@@ -174,6 +174,11 @@ func main() {
 	m := mailer.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPFrom, cfg.SMTPUseTLS)
 	if m.Enabled() {
 		logger.Info("mailer enabled", "host", cfg.SMTPHost, "port", cfg.SMTPPort, "tls", cfg.SMTPUseTLS)
+		if mailer.PortTLSMismatch(cfg.SMTPPort, cfg.SMTPUseTLS) {
+			logger.Warn("SMTP_PORT и SMTP_TLS не согласованы — письма, скорее всего, уходить не будут",
+				"port", cfg.SMTPPort, "tls", cfg.SMTPUseTLS,
+				"hint", "465 → SMTP_TLS=true (implicit TLS), 587/25 → SMTP_TLS=false (STARTTLS)")
+		}
 	} else {
 		logger.Warn("mailer disabled: SMTP_HOST not set")
 	}

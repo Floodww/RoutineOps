@@ -59,3 +59,25 @@ func TestMailer_SendPasswordReset_ConnectionError(t *testing.T) {
 		t.Error("expected connection error on SendPasswordReset, got nil")
 	}
 }
+
+func TestPortTLSMismatch(t *testing.T) {
+	cases := []struct {
+		port   string
+		useTLS bool
+		want   bool
+	}{
+		{"587", false, false}, // дефолт: STARTTLS
+		{"587", true, true},   // implicit TLS на STARTTLS-порту
+		{"465", true, false},  // implicit TLS
+		{"465", false, true},  // самый частый промах: сменили порт, забыли SMTP_TLS
+		{"25", false, false},
+		{"25", true, true},
+		{"2525", true, false}, // нестандартный порт не судим
+		{"2525", false, false},
+	}
+	for _, c := range cases {
+		if got := PortTLSMismatch(c.port, c.useTLS); got != c.want {
+			t.Errorf("PortTLSMismatch(%q, %v) = %v, want %v", c.port, c.useTLS, got, c.want)
+		}
+	}
+}

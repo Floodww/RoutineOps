@@ -146,7 +146,6 @@ jobs:
 
   test-windows:
     name: test (windows · cert store)
-    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +163,6 @@ jobs:
 
   windows-msi:
     name: windows · MSI build + install
-    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -240,9 +238,11 @@ jobs:
 
   proto-breaking:
     name: proto · buf breaking
-    # proto/ — общая зона, меняется только через PR; гейт совместимости и ставим
-    # на PR. Сравниваем контракт с main и валим сборку при ломающем изменении
+    # Сравниваем контракт с main и валим сборку при ломающем изменении
     # (ADR-4: поля только аддитивно, без удаления/смены номера/типа).
+    # Остаётся PR-only в отличие от остальных джоб: на push в main baseline — это
+    # сам же push, сравнение вырождается и всегда зелёное. Пушим мы прямо в main,
+    # так что этот гейт работает только когда правка проходит через PR.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:

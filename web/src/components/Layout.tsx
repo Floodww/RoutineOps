@@ -18,6 +18,7 @@ export default function Layout() {
   const { isAdmin, me } = useMe()
   const [pendingCount, setPendingCount] = useState(0)
   const [queueCount, setQueueCount] = useState(0)
+  const [alertCount, setAlertCount] = useState(0)
   const [tgOpen, setTgOpen] = useState(false)
   const [tgLinked, setTgLinked] = useState(false)
   const [tgToken, setTgToken] = useState<string | null>(null)
@@ -32,8 +33,9 @@ export default function Layout() {
   }, [])
 
   // Счётчики бейджей — отдельным эффектом, потому что у них другой жизненный цикл:
-  // (1) оба admin-only, а без гейта viewer тянул бы ВЕСЬ список устройств ради бейджа,
-  //     который ему даже не рисуется;
+  // (1) энроллмент и заявки на права admin-only, а без гейта viewer тянул бы ВЕСЬ
+  //     список устройств ради бейджа, который ему даже не рисуется; алерты видны и
+  //     viewer'у, поэтому считаются до гейта;
   // (2) isAdmin приезжает асинхронно из /me, поэтому он в зависимостях — иначе бейджи
   //     навсегда остались бы нулевыми при первом входе;
   // (3) ключ по pathname: считалось один раз за сессию, и после одобрения всей очереди
@@ -41,6 +43,9 @@ export default function Layout() {
   // Отдельной ручки-счётчика на сервере нет — считаем по общему списку.
   // ponytail: клиентский подсчёт, серверный счётчик — когда списки получат пагинацию
   useEffect(() => {
+    api.get<{ acknowledged_at: string | null }[]>("/alerts")
+      .then((r) => setAlertCount((r.data ?? []).filter((a) => !a.acknowledged_at).length))
+      .catch(() => { })
     if (!isAdmin) return
     api.get<{ id: string }[]>("/admin-access-requests?status=pending")
       .then((r) => setPendingCount(r.data?.length ?? 0))
@@ -88,7 +93,7 @@ export default function Layout() {
       title: null,
       items: [
         { to: "/", label: "Обзор", icon: LayoutDashboard, badge: 0, adminOnly: false },
-        { to: "/alerts", label: "Алерты", icon: Bell, badge: 0, adminOnly: false },
+        { to: "/alerts", label: "Алерты", icon: Bell, badge: alertCount, adminOnly: false },
         { to: "/audit-log", label: "Журнал", icon: History, badge: 0, adminOnly: false },
       ],
     },
