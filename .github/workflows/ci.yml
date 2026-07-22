@@ -56,7 +56,14 @@ jobs:
       # с маршрутами в коде (руками написанная спека тихо расходится именно так).
       - name: guards (публичные доки · спецификация API)
         run: |
-          bash scripts/check-public-docs.sh
+          # check-public-docs.sh и его whitelist вырезаются из Free-среза
+          # (export-free.sh, шаг 4) — это мейнтейнерский тулинг. В срезе гард
+          # и не нужен: он проверяет список, по которому срез и сделан.
+          if [ -f scripts/check-public-docs.sh ]; then
+            bash scripts/check-public-docs.sh
+          else
+            echo "check-public-docs.sh отсутствует (Free-срез) — пропуск"
+          fi
           bash scripts/check-openapi.sh
 
       - name: build

@@ -881,7 +881,7 @@ paths:
                   description: Не задано — правило глобальное
                 platforms:
                   type: array
-                  items: { $ref: '#/components/schemas/OS' }
+                  items: { $ref: '#/components/schemas/PolicyPlatform' }
                   description: Пусто — все платформы
       responses:
         '201':
@@ -1466,6 +1466,37 @@ components:
     OS:
       type: string
       enum: [windows, macos, linux]
+      description: |
+        Значение, которое принимают эндпоинты устройств и задач. Агент при этом
+        РАПОРТУЕТ операционную систему с заглавной (`Windows`, `macOS`), и именно в
+        таком виде она возвращается в карточке устройства.
+
+    ScriptPlatform:
+      type: string
+      enum: [macOS, Windows, linux]
+      description: |
+        ⚠️ Библиотека скриптов принимает ИМЕННО такое написание и отвергает
+        `macos`/`windows` с ответом 400. Обратите внимание на `linux` со строчной —
+        софт-политики в том же поле требуют `Linux` с заглавной (см. PolicyPlatform).
+
+    PolicyPlatform:
+      type: string
+      enum: [macOS, Windows, Linux]
+      description: |
+        ⚠️ Правила ПО принимают только такое написание, включая `Linux` с ЗАГЛАВНОЙ —
+        в отличие от библиотеки скриптов, где та же платформа пишется `linux`.
+
+        Сводка по регистру платформы, проверено на живом сервере:
+
+        | эндпоинт | что принимает |
+        |---|---|
+        | `POST /devices` | строчные (`windows`, `macos`) |
+        | `POST /devices/{id}/tasks` | НЕ проверяет, принимает любую строку |
+        | `POST`/`PUT /scripts` | `macOS`, `Windows`, `linux` |
+        | `POST /policies` | `macOS`, `Windows`, `Linux` |
+
+        Расхождение историческое. Приводить к одному виду — ломающее изменение для
+        существующих клиентов, поэтому пока задокументировано как есть.
 
     Priority:
       type: string
@@ -1487,10 +1518,12 @@ components:
 
     DeviceStatus:
       type: string
-      enum: [pending, pending_approval, active, blocked, rejected, decommissioned]
+      enum: [pending, pending_approval, enrolled, active, blocked, rejected, decommissioned]
       description: |
         `pending` — зарегистрировано, агент ещё не энроллился.
         `pending_approval` — энроллилось и ждёт решения оператора.
+        `enrolled` — энроллмент завершён, сертификат выдан, но первого heartbeat
+        ещё не было. Переходное состояние: обычный heartbeat поднимает в `active`.
         `active` — под управлением.
         `blocked` — доступ отозван на границе, соединения агента рвутся.
         `rejected` — отклонено при энроллменте.
@@ -1574,13 +1607,22 @@ components:
         priority: { $ref: '#/components/schemas/Priority' }
         status:
           type: string
-          enum: [pending, acked, success, failed]
+          enum: [pending, acked, completed, failed]
+          description: |
+            `pending` — создана, агенту ещё не доставлена. `acked` — агент подтвердил
+            приём. `completed` / `failed` — исполнена. Задача, застрявшая в `acked`,
+            закрывается по таймауту.
         output: { type: string, nullable: true }
         error_log: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
         task_type:
           type: string
           enum: [script, lock, decommission]
+          description: |
+            ⚠️ Список задач устройства эти поля НЕ заполняет — там всегда пусто.
+            То же относится к `lock_reason`, `lock_unlock` и `lock_mode`.
+            Хеш пароля снятия (`lock_hash`) не отдаётся вовсе: он не должен попадать
+            в выдачу, доступную роли `viewer`.
         lock_reason: { type: string }
         lock_unlock: { type: boolean }
         lock_mode: { $ref: '#/components/schemas/LockMode' }
@@ -1601,7 +1643,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
-        platform: { $ref: '#/components/schemas/OS' }
+        platform: { $ref: '#/components/schemas/ScriptPlatform' }
         content: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -1611,7 +1653,7 @@ components:
       required: [name, platform, content]
       properties:
         name: { type: string }
-        platform: { $ref: '#/components/schemas/OS' }
+        platform: { $ref: '#/components/schemas/ScriptPlatform' }
         content: { type: string }
 
     ScriptPolicy:
@@ -1660,7 +1702,7 @@ components:
         group_id: { type: string, format: uuid, nullable: true }
         platforms:
           type: array
-          items: { $ref: '#/components/schemas/OS' }
+          items: { $ref: '#/components/schemas/PolicyPlatform' }
           description: Пусто — все платформы.
         updated_at: { type: string, format: date-time }
 

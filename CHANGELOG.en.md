@@ -12,7 +12,7 @@ The version number is shared by the server, the web interface and the agent.
 
 ---
 
-## 2.4.6 — upcoming
+## 2.4.6 — 22 July 2026
 
 A large release: two rounds of adversarial review of the agent, bulk enrollment,
 device decommissioning and extended inventory.
@@ -95,7 +95,8 @@ device decommissioning and extended inventory.
 
 ### Web interface
 
-- Dark theme across all pages.
+- Interface redesigned: a dark liquid-glass theme across every page and every control —
+  panels, forms, tables, dialogs.
 - Navigation grouped: overview, alerts, audit log, then hosts, management, settings.
 - Compliance policies: pass/fail breakdown per device, and a truthful rule creation
   form.
