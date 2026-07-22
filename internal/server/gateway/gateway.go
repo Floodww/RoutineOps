@@ -715,8 +715,19 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		// Блокировку хешем сюда не тащим (его нет в отчёте) — hash/reason уже
 		// проставил эндпоинт lock; здесь лишь подтверждаем статус.
 		if err := g.db.UpdateDeviceLockStatus(ctx, deviceID, "locked"); err != nil {
-			g.logger.Error("update lock status", "device_id", deviceID, "err", err)
-			return nil, status.Errorf(codes.Unavailable, "update lock status: %v", err)
+			if !errors.Is(err, storage.ErrNoDesiredLock) {
+				g.logger.Error("update lock status", "device_id", deviceID, "err", err)
+				return nil, status.Errorf(codes.Unavailable, "update lock status: %v", err)
+			}
+			// Симметрично гарду ветки UNLOCKED ниже: устаревший/дубликатный LOCKED из
+			// durable-outbox, доехавший ПОСЛЕ снятия, воскресил бы desired 'locked' с уже
+			// вычищенным lock_hash. Агент такую команду выполнить не может
+			// (validateBcryptHash) — устройство навсегда числилось бы заблокированным в
+			// панели, оставаясь рабочим. desired НЕ трогаем; actual зеркалим ниже, чтобы
+			// расхождение desired=unlocked / actual=locked было видно, а реконсиляция
+			// сама доснимет лок на агенте.
+			g.logger.Warn("lock status LOCKED не применён к desired: устройство уже разблокировано (устаревший отчёт из outbox)",
+				"device_id", deviceID, "request_id", req.RequestId, "details", req.Details)
 		}
 	case pb.LockState_LOCK_STATE_UNLOCKED:
 		lockStatus = "unlocked"
@@ -726,7 +737,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		// durable-outbox (оффлайн-снятие overlay-лока) мог бы прийти ПОСЛЕ того, как IT
 		// поставил деструктивный filevault-лок, и стереть его desired → offboarding-лок
 		// самоотменился бы, revoke не запустился. Такой отчёт игнорируем.
-		curStatus, _, _, curMode, derr := g.db.GetDesiredLockState(ctx, deviceID)
+		curStatus, curHash, _, curMode, curReqID, derr := g.db.GetDesiredLockState(ctx, deviceID)
 		if derr != nil {
 			return nil, status.Errorf(codes.Unavailable, "check desired lock state: %v", derr)
 		}
@@ -735,11 +746,38 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 				"device_id", deviceID, "request_id", req.RequestId, "details", req.Details)
 			return &pb.ReportLockStatusResponse{Received: true}, nil
 		}
+		// Отчёт о снятии обязан относиться к ТОМУ ЖЕ локу, что сейчас желаем. Отчёты
+		// едут через durable-outbox агента: снятие, случившееся до отъезда ноутбука в
+		// офлайн, доезжает после того, как IT выдал НОВУЮ блокировку другим паролем —
+		// и без этой проверки стирало её desired, молча разоружая свежий kill-switch.
+		// Гард FileVault выше от этого не спасал: overlay-лок проваливался насквозь.
+		//
+		// Идентификатор лока приходит двумя способами, оба точные:
+		//   push  — id lock-задачи (сервер кладёт его в LockCommand.RequestId, worker);
+		//   pull  — сам lock_hash (агент применяет лок реконсиляцией и им же
+		//           представляется, см. reconcile).
+		// Пустой lock_request_id = лок выдан до миграции 032: отличить нельзя, пускаем
+		// как раньше — исключение самозакрывается на следующей блокировке.
+		//
+		// Направление отказа выбрано fail-closed сознательно: лишний расхождение
+		// desired/actual виден оператору и чинится одним unlock'ом, а тихо снятая
+		// блокировка не обнаруживается вообще. Сотрудника это не запирает — локально
+		// лок уже снят верным паролем, а durable-память агента не даёт пере-запереть.
+		if curStatus == "locked" && curReqID != "" &&
+			req.RequestId != curReqID && req.RequestId != curHash {
+			g.logger.Warn("lock status UNLOCKED проигнорирован: отчёт относится к ДРУГОМУ локу (устаревший из durable-outbox), текущая блокировка сохранена",
+				"device_id", deviceID, "report_request_id", req.RequestId,
+				"desired_request_id", curReqID, "details", req.Details)
+			if err := g.db.SetDeviceLockActualState(ctx, deviceID, "unlocked"); err != nil {
+				g.logger.Warn("mirror lock actual state (best-effort)", "device_id", deviceID, "err", err)
+			}
+			return &pb.ReportLockStatusResponse{Received: true}, nil
+		}
 		// Разблокировку (в т.ч. локальный ввод пароля) отражаем в ЖЕЛАЕМОМ: чистим
 		// hash/reason, режим сбрасываем в overlay (fail-safe), иначе реконсиляция
 		// пере-заблокировала бы устройство, которое сотрудник легитимно разблокировал
 		// (полевой re-lock-баг).
-		if err := g.db.SetDeviceLockState(ctx, deviceID, "unlocked", "", "", storage.LockModeOverlay); err != nil {
+		if err := g.db.SetDeviceLockState(ctx, deviceID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
 			g.logger.Error("update lock status", "device_id", deviceID, "err", err)
 			return nil, status.Errorf(codes.Unavailable, "update lock status: %v", err)
 		}
@@ -777,12 +815,23 @@ func (g *Gateway) FetchLockStatus(ctx context.Context, _ *pb.FetchLockStatusRequ
 		return nil, status.Errorf(codes.NotFound, "device not found")
 	}
 
-	lockStatus, lockHash, lockReason, lockMode, err := g.db.GetDesiredLockState(ctx, deviceID)
+	lockStatus, lockHash, lockReason, lockMode, _, err := g.db.GetDesiredLockState(ctx, deviceID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch desired lock state: %v", err)
 	}
 	if lockStatus != "locked" {
 		return &pb.FetchLockStatusResponse{}, nil
+	}
+	if lockHash == "" {
+		// Растяжка, а не защита: desired 'locked' с пустым хешем возникать не должен
+		// (см. storage.ErrNoDesiredLock), и если он всё же есть — значит его создал
+		// путь, которого мы не знаем (ручной SQL, будущий bulk-лок, миграция).
+		// Команду отдаём КАК ЕСТЬ: агент откажется её применять (validateBcryptHash,
+		// fail-safe) и отчитается о провале — расхождение станет видно в панели.
+		// Подавить её здесь означало бы снять с устройства лок, которого никто не
+		// снимал, поэтому — только громкий лог на сервере.
+		g.logger.Error("desired lock БЕЗ password_hash — агент не сможет применить блокировку, устройство числится locked, оставаясь рабочим",
+			"device_id", deviceID)
 	}
 	return &pb.FetchLockStatusResponse{
 		Locked:       true,

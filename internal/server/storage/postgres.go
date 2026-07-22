@@ -587,10 +587,36 @@ func (db *DB) CreateLockTask(ctx context.Context, deviceID, lockHash, lockReason
 	return &t, err
 }
 
+// ErrNoDesiredLock — подтверждение блокировки пришло на устройство, у которого
+// desired-лока нет (lock_hash пуст). Так выглядит устаревший/дубликатный LOCKED из
+// durable-outbox агента, доехавший ПОСЛЕ снятия: unlock чистит lock_hash
+// (SetDeviceLockState), а частичный апдейт статуса воскрешал бы 'locked' без хеша.
+var ErrNoDesiredLock = errors.New("desired lock absent (lock_hash empty)")
+
+// UpdateDeviceLockStatus подтверждает статус блокировки по отчёту агента, НЕ трогая
+// hash/reason/mode — их выставляет lock-эндпоинт.
+//
+// Перевод в 'locked' разрешён ТОЛЬКО при непустом lock_hash. Иначе получался бы
+// desired 'locked' при пустом lock_hash — команда, которую агент выполнить не может
+// (validateBcryptHash отвергает пустой хеш как fail-safe против офлайн-неснимаемого
+// лока), то есть устройство навсегда числится заблокированным в панели, оставаясь
+// полностью рабочим. Условие стоит в самом UPDATE, а не отдельным SELECT'ом: между
+// чтением и записью пролез бы конкурентный unlock.
+//
+// Ноль затронутых строк при lockStatus='locked' → ErrNoDesiredLock. Тот же ответ
+// придёт на несуществующее устройство — вызывающий (gateway) резолвит deviceID по
+// сертификату до вызова, так что различать эти случаи здесь незачем.
 func (db *DB) UpdateDeviceLockStatus(ctx context.Context, deviceID, lockStatus string) error {
-	_, err := db.pool.Exec(ctx,
-		`UPDATE devices SET lock_status = $2 WHERE id = $1`, deviceID, lockStatus)
-	return err
+	tag, err := db.pool.Exec(ctx,
+		`UPDATE devices SET lock_status = $2
+		 WHERE id = $1 AND ($2 <> 'locked' OR COALESCE(lock_hash, '') <> '')`, deviceID, lockStatus)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 && lockStatus == "locked" {
+		return ErrNoDesiredLock
+	}
+	return nil
 }
 
 // CreateDecommissionTask ставит задачу полного самоудаления агента (вывод устройства
@@ -649,13 +675,18 @@ func (db *DB) GetDeviceLockStatus(ctx context.Context, deviceID string) (string,
 // сводит к нему локальный lock.json (переживает потерю unlock-ack и ребут — push-канал
 // их терял). При unlock hash/reason очищаются, режим сбрасывается в overlay (fail-safe:
 // снятый лок НИКОГДА не остаётся в filevault-намерении).
-func (db *DB) SetDeviceLockState(ctx context.Context, deviceID, lockStatus, lockHash, lockReason, lockMode string) error {
+//
+// lockRequestID — идентификатор ЭТОГО лока (id lock-задачи; сервер кладёт его же в
+// LockCommand.RequestId). По нему ветка UNLOCKED отличает отчёт о снятии ТЕКУЩЕГО
+// лока от устаревшего, доехавшего из durable-outbox после выдачи нового (см.
+// миграцию 032). При снятии передаётся пустая строка вместе с hash/reason.
+func (db *DB) SetDeviceLockState(ctx context.Context, deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID string) error {
 	if lockMode == "" {
 		lockMode = LockModeOverlay
 	}
 	_, err := db.pool.Exec(ctx,
-		`UPDATE devices SET lock_status = $2, lock_hash = $3, lock_reason = $4, lock_mode = $5 WHERE id = $1`,
-		deviceID, lockStatus, lockHash, lockReason, lockMode)
+		`UPDATE devices SET lock_status = $2, lock_hash = $3, lock_reason = $4, lock_mode = $5, lock_request_id = $6 WHERE id = $1`,
+		deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID)
 	return err
 }
 
@@ -673,12 +704,13 @@ func (db *DB) SetDeviceLockActualState(ctx context.Context, deviceID, state stri
 
 // GetDesiredLockState возвращает желаемое состояние блокировки устройства для отдачи
 // агенту (FetchLockStatus). Пустой lock_status трактуется вызывающим как "unlocked".
-// lockMode пустой/NULL → overlay (fail-safe).
-func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockStatus, lockHash, lockReason, lockMode string, err error) {
+// lockMode пустой/NULL → overlay (fail-safe). lockRequestID пустой = лок выдан до
+// миграции 032, привязать отчёт о снятии к конкретному локу нельзя.
+func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockStatus, lockHash, lockReason, lockMode, lockRequestID string, err error) {
 	err = db.pool.QueryRow(ctx,
-		`SELECT COALESCE(lock_status,''), COALESCE(lock_hash,''), COALESCE(lock_reason,''), COALESCE(NULLIF(lock_mode,''),'overlay') FROM devices WHERE id = $1`,
-		deviceID).Scan(&lockStatus, &lockHash, &lockReason, &lockMode)
-	return lockStatus, lockHash, lockReason, lockMode, err
+		`SELECT COALESCE(lock_status,''), COALESCE(lock_hash,''), COALESCE(lock_reason,''), COALESCE(NULLIF(lock_mode,''),'overlay'), COALESCE(lock_request_id,'') FROM devices WHERE id = $1`,
+		deviceID).Scan(&lockStatus, &lockHash, &lockReason, &lockMode, &lockRequestID)
+	return lockStatus, lockHash, lockReason, lockMode, lockRequestID, err
 }
 
 // FileVault recovery-escrow (StoreRecoveryKeyEscrow + ErrEscrowConflict) вынесено

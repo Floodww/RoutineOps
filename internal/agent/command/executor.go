@@ -39,12 +39,14 @@ const maxRuntime = 5 * time.Minute
 const maxConcurrentTasks = 8
 
 // shutdownGrace — сколько ждать завершения текущих задач при остановке агента.
-// Равен потолку выполнения: запущенная задача гарантированно успевает закончиться
-// (она и так ограничена maxRuntime). Инвариант держится на том, что задачи,
-// ждущие слот семафора, при Shutdown НЕ стартуют, а выходят сразу (см. stopping):
-// иначе задача, взявшая слот посреди грейса, получила бы урезанное время и
-// ложный ERROR при cancel.
-const shutdownGrace = maxRuntime
+// Потолок выполнения ПЛЮС callTimeout: гейт по stopping стоит ДО connect/ack, но
+// задача, прошедшая его за миг до Shutdown, ещё тратит до callTimeout на ack
+// (connect — grpc.NewClient, неблокирующий; markIfNew — локальный I/O) и лишь
+// потом стартует скрипт. Её дедлайн — старт + maxRuntime, то есть до
+// Shutdown + callTimeout + maxRuntime. Грейс, равный только maxRuntime, резал
+// такой скрипт по cancel — ложный ERROR, причём ПОСТОЯННЫЙ: seen помечен до
+// запуска, передоставка выполнение уже не повторит.
+const shutdownGrace = maxRuntime + callTimeout
 
 // EnqueueFunc ставит отчёт в устойчивую очередь доставки (outbox.Queue.Enqueue).
 // Тот же контракт, что у одноимённого типа в internal/agent/scripts.
@@ -73,14 +75,17 @@ type Executor struct {
 	// 'pending' — минутный реконсайлер (cmd/server) передоставляет её снова и
 	// снова; без дедупа каждая копия спавнила бы горутину, висящую на семафоре
 	// с *pb.Task (телом скрипта) в памяти — линейный рост от времени ожидания.
+	// Дедуп НЕ молчаливый для стартовавших (seen) задач: их копии
+	// переподтверждаются ack'ом без выполнения — см. Submit.
 	inflight map[string]struct{}
 
 	// stopping закрывается в начале Shutdown: задачи, ещё не взявшие слот
 	// семафора, выходят немедленно (seen не помечен — передоставятся), вместо
 	// того чтобы стартовать посреди грейса и получить урезанное время (<
-	// maxRuntime) — ложный ERROR при cancel. Это и держит инвариант
-	// shutdownGrace == maxRuntime: к началу ожидания остаются только УЖЕ
-	// запущенные скрипты, каждый ограничен maxRuntime.
+	// maxRuntime) — ложный ERROR при cancel. Гейт НЕ герметичен: между ним и
+	// стартом скрипта стоят connect (неблокирующий) и ack (до callTimeout), так
+	// что скрипт может стартовать до callTimeout ПОСЛЕ начала Shutdown — это
+	// окно закрывает запас в shutdownGrace (maxRuntime + callTimeout), а не гейт.
 	stopping chan struct{}
 
 	// fallbacks — сколько раз результат ушёл МИМО durable-очереди прямым unary
@@ -184,10 +189,43 @@ func (e *Executor) Submit(task *pb.Task) {
 		return
 	}
 	if _, dup := e.inflight[id]; dup {
+		// wg.Add строго под e.mu (симметрично основной ветке): Add после Unlock
+		// гнался бы с wg.Wait в Shutdown (misuse WaitGroup при нулевом счётчике).
+		seenDup := e.seen.has(id)
+		if seenDup {
+			e.wg.Add(1)
+		}
 		e.mu.Unlock()
-		// Ожидаемый шум: пока задача ждёт слот, сервер передоставляет её каждую
-		// минуту (она всё ещё 'pending'). Debug, не Warn — иначе лог зафлудит.
-		e.log.Debug("задача уже в обработке — повторная доставка отброшена", slog.String("task_id", id))
+		// Уровень Info, не Debug: прод-логгер стоит на Info, и дроп передоставки
+		// на Debug в поле был невидим вообще.
+		if seenDup {
+			// Задача уже СТАРТОВАЛА (seen), но всё ещё в полёте — например,
+			// control-plane handle без потолка (FileVault RevokeAndShutdown
+			// держит durable-retry до конца жизни агента). Если её первый ack
+			// потерялся, сервер видит вечный 'pending' и передоставляет — молча
+			// глотать копию значит никогда не восстановить ack (прежний контракт
+			// «повторную доставку подтверждаем, но не выполняем» до inflight-
+			// дедупа это гарантировал). Переподтверждаем в короткой горутине,
+			// НЕ выполняя: connect дёшев (grpc.NewClient), ack ≤ callTimeout.
+			e.log.Info("повторная доставка задачи в обработке — переподтверждаю (ack мог потеряться)",
+				slog.String("task_id", id))
+			go func() {
+				defer e.wg.Done()
+				client, closeConn, err := e.connect()
+				if err != nil {
+					e.log.Error("task: соединение для переподтверждения", slog.String("task_id", id), slog.Any("error", err))
+					return
+				}
+				defer closeConn()
+				e.ack(client, id)
+			}()
+			return
+		}
+		// Копия задачи, ещё ЖДУЩЕЙ слот семафора (seen не помечен): ack'ать нельзя —
+		// на сервере она обязана оставаться 'pending', чтобы при рестарте агента до
+		// старта скрипта передоставка её не потеряла (sweep зачистил бы 'acked' в
+		// failed). Ожидаемая частота — раз в минуту на задачу до освобождения слота.
+		e.log.Info("задача уже ждёт слот — повторная доставка отброшена", slog.String("task_id", id))
 		return
 	}
 	e.inflight[id] = struct{}{}
@@ -421,7 +459,19 @@ func (e *Executor) handleLock(client pb.AgentServiceClient, taskID string, lc *p
 			e.log.Error("lock: команда блокировки получена, но locker не сконфигурирован", slog.String("task_id", taskID))
 			return
 		}
-		err = e.locker.Lock(reqID, lc.GetPasswordHash(), lc.GetReason())
+		if err = e.locker.Lock(reqID, lc.GetPasswordHash(), lc.GetReason()); err != nil {
+			// Лок НЕ поднят (пустой/битый password_hash #13, транзиентный отказ
+			// persist). НЕ репортим никакого состояния: LOCKED был бы ложью (#1.2 —
+			// панель показывает «заблокировано» при рабочей машине), а UNLOCKED
+			// стёр бы desired=locked на сервере (overlay-UNLOCKED → SetDeviceLockState
+			// '', adversarial-ревью: critical — транзиентный сбой навсегда разоружает
+			// kill-switch). Громко логируем; desired на сервере цел, pull-реконсилятор
+			// (FetchLockStatus каждые 30с) доведёт — Manager.Lock атомарен (откат при
+			// отказе), поэтому ретрай честно повторяет попытку.
+			e.log.Error("lock: применить блокировку не удалось — НЕ репортю состояние (desired цел, реконсилятор доведёт)",
+				slog.String("request_id", reqID), slog.Any("error", err))
+			return
+		}
 		state = pb.LockState_LOCK_STATE_LOCKED
 	}
 
@@ -486,11 +536,26 @@ func (e *Executor) ack(client pb.AgentServiceClient, id string) {
 	}
 }
 
+// report — прямой unary-фолбэк доставки результата (durable-очередь недоступна
+// или вытеснила эту запись). Это ПОСЛЕДНЯЯ копия результата, поэтому received —
+// часть контракта, а не только err: сервер возвращает Received:false без gRPC-
+// ошибки, когда CompleteTask не прошёл (ошибка БД и т.п., кроме ErrTaskNotOwned —
+// см. dispatchReport). На durable-пути это возвращает запись в очередь; здесь
+// другой копии нет — молча считать доставленным нельзя (#1.5), громко логируем.
 func (e *Executor) report(client pb.AgentServiceClient, result *pb.TaskResult) {
 	ctx, cancel := context.WithTimeout(e.execCtx, callTimeout)
 	defer cancel()
-	if _, err := client.ReportTaskResult(ctx, result); err != nil {
-		e.log.Error("task: ReportTaskResult", slog.String("task_id", result.GetTaskId()), slog.Any("error", err))
+	ack, err := client.ReportTaskResult(ctx, result)
+	if err != nil {
+		e.log.Error("task: ReportTaskResult (фолбэк) — результат НЕ доставлен, durable-очереди нет",
+			slog.String("task_id", result.GetTaskId()),
+			slog.Uint64("fallback_total", e.fallbacks.Load()), slog.Any("error", err))
+		return
+	}
+	if !ack.GetReceived() {
+		e.log.Error("task: сервер не подтвердил результат (received=false) на фолбэк-пути — durable-очереди нет, результат потерян",
+			slog.String("task_id", result.GetTaskId()),
+			slog.Uint64("fallback_total", e.fallbacks.Load()))
 	}
 }
 

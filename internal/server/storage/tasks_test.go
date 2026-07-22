@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -226,11 +227,21 @@ func TestCreateLockTask_PlatformFromDeviceOS(t *testing.T) {
 	}
 }
 
+// bcrypt-хеш для тестов desired-лока. Хранилище его не валидирует (это делает агент),
+// важна только непустота — по ней UpdateDeviceLockStatus отличает живой desired-лок.
+const testLockHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
 func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 	d := mustCreateActiveDevice(t, db, "host-updatelock-"+uniq(t), "windows")
 
+	// Подтверждение статуса приходит ПОСЛЕ того, как lock-эндпоинт выставил desired
+	// вместе с хешем — воспроизводим боевой порядок. Без него UpdateDeviceLockStatus
+	// справедливо откажет (ErrNoDesiredLock), см. тест ниже.
+	if err := db.SetDeviceLockState(ctx, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+		t.Fatalf("SetDeviceLockState(locked): %v", err)
+	}
 	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "locked"); err != nil {
 		t.Fatalf("UpdateDeviceLockStatus(locked): %v", err)
 	}
@@ -251,6 +262,42 @@ func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 	}
 	if d2.LockStatus != "unlocked" {
 		t.Errorf("LockStatus = %q, want unlocked", d2.LockStatus)
+	}
+}
+
+// Устаревший LOCKED из durable-outbox агента, доехавший ПОСЛЕ снятия, не должен
+// воскрешать desired: unlock уже вычистил lock_hash, и 'locked' без хеша — команда,
+// которую агент выполнить не может (fail-safe против офлайн-неснимаемого лока).
+// Устройство тогда навсегда числилось бы заблокированным в панели, оставаясь рабочим,
+// и обнаружить это можно было бы только в журнале службы на конкретной машине.
+func TestUpdateDeviceLockStatus_StaleLockedAfterUnlock_Refused(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	d := mustCreateActiveDevice(t, db, "host-stalelock-"+uniq(t), "windows")
+
+	// Полный боевой цикл: заперли (hash есть) → сняли (hash вычищен).
+	if err := db.SetDeviceLockState(ctx, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+		t.Fatalf("SetDeviceLockState(locked): %v", err)
+	}
+	if err := db.SetDeviceLockState(ctx, d.ID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
+		t.Fatalf("SetDeviceLockState(unlocked): %v", err)
+	}
+
+	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "locked"); !errors.Is(err, storage.ErrNoDesiredLock) {
+		t.Fatalf("UpdateDeviceLockStatus(locked) без lock_hash = %v, want ErrNoDesiredLock", err)
+	}
+	got, _, err := db.GetDevice(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if got.LockStatus != "unlocked" {
+		t.Errorf("LockStatus = %q, want unlocked — устаревший LOCKED воскресил desired", got.LockStatus)
+	}
+
+	// Гард односторонний: 'unlocked' проходит всегда, иначе агент не смог бы
+	// отчитаться о локальном снятии.
+	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "unlocked"); err != nil {
+		t.Fatalf("UpdateDeviceLockStatus(unlocked): %v", err)
 	}
 }
 

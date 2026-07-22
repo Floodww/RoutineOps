@@ -1079,7 +1079,7 @@ func (h *Handler) lockDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	// Желаемое состояние = locked: источник правды для реконсиляции (FetchLockStatus).
 	// Таск ниже — быстрый push; поллинг агента подхватит то же состояние после ребута.
-	if err := h.db.SetDeviceLockState(r.Context(), id, "locked", string(hashBytes), req.Reason, lockMode); err != nil {
+	if err := h.db.SetDeviceLockState(r.Context(), id, "locked", string(hashBytes), req.Reason, lockMode, task.ID); err != nil {
 		http.Error(w, "failed to persist lock state", http.StatusInternalServerError)
 		return
 	}
@@ -1104,7 +1104,7 @@ func (h *Handler) unlockDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	// Желаемое состояние = unlocked, хеш/причина очищаются, режим сброшен в overlay:
 	// реконсиляция уведёт агента из lock даже если push-таск не дойдёт.
-	if err := h.db.SetDeviceLockState(r.Context(), id, "unlocked", "", "", storage.LockModeOverlay); err != nil {
+	if err := h.db.SetDeviceLockState(r.Context(), id, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
 		http.Error(w, "failed to persist unlock state", http.StatusInternalServerError)
 		return
 	}

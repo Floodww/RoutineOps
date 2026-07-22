@@ -1,0 +1,1746 @@
+openapi: 3.0.3
+
+info:
+  title: RoutineOps Server API
+  version: 2.4.6
+  description: |
+    HTTP API сервера RoutineOps — точка интеграции для автоматизации и сторонних
+    интерфейсов. Веб-интерфейс из поставки использует этот же API, отдельного
+    приватного канала у него нет.
+
+    ## Аутентификация
+
+    Два равноправных способа, оба проверяются одним middleware:
+
+    * **Cookie `token`** — httpOnly-кука, выставляется `POST /api/v1/auth/login`.
+      Так работает веб-интерфейс.
+    * **`Authorization: Bearer <token>`** — сервисный API-токен для автоматизации.
+      Выпускается через `POST /api/v1/api-tokens`, показывается ОДИН раз в ответе.
+
+    ## Роли
+
+    * `viewer` — чтение.
+    * `it_admin` — чтение и изменение.
+
+    ## Операции «только человеком»
+
+    Часть операций помечена `x-requires-human: true`. Они доступны только под
+    учётной записью человека и отвечают `403` на сервисный токен, даже если у
+    токена роль `it_admin`. Правило распространяется на всё, что выпускает или
+    повышает права: приглашение пользователя, выпуск API-токена и токена
+    энроллмента, одобрение устройства и запроса локальных админ-прав, вывод
+    устройства из эксплуатации.
+
+    Смысл в том, что иначе модель отзыва была бы фикцией: утёкший токен выписал
+    бы себе новый, который пережил бы удаление исходного.
+
+    ## Ошибки
+
+    Тело ошибки — `text/plain` с короткой строкой, не JSON. Значим код ответа.
+
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: https://mdm.example.com
+    description: Ваш сервер RoutineOps
+
+tags:
+  - name: Аутентификация
+  - name: Устройства
+  - name: Энроллмент
+  - name: Задачи
+  - name: Блокировка
+  - name: Скрипты
+  - name: Скрипт-политики
+  - name: Софт-политики
+  - name: Группы устройств
+  - name: Алерты
+  - name: Локальные админ-права
+  - name: Пользователи
+  - name: API-токены
+  - name: Аудит
+  - name: Служебное
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  # ─────────────────────────── Аутентификация ───────────────────────────
+  /api/v1/auth/login:
+    post:
+      tags: [Аутентификация]
+      summary: Вход по email и паролю
+      description: |
+        Выставляет httpOnly-куку `token`. Ограничение: 10 запросов в минуту с одного IP.
+        Дополнительно действует счётчик неудачных попыток на учётную запись.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Вход выполнен, кука выставлена
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: '`token=<jwt>; HttpOnly; Secure; SameSite=Strict`'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Неверные учётные данные
+          content: { text/plain: { schema: { type: string } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Аутентификация]
+      summary: Выход
+      description: Гасит куку `token`.
+      security: []
+      responses:
+        '200': { description: Кука погашена }
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Аутентификация]
+      summary: Запрос ссылки на сброс пароля
+      description: |
+        Всегда отвечает `200` независимо от существования адреса — чтобы по ответу
+        нельзя было перебирать учётные записи. Ограничение: 5 запросов в минуту с IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200': { description: Запрос принят }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/v1/auth/reset-password:
+    post:
+      tags: [Аутентификация]
+      summary: Установка нового пароля по токену из письма
+      description: 'Ограничение: 10 запросов в минуту с IP.'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Пароль изменён }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/v1/auth/invite:
+    get:
+      tags: [Аутентификация]
+      summary: Проверка токена приглашения
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Приглашение действительно
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: string, format: email }
+                  role: { $ref: '#/components/schemas/Role' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/auth/accept-invite:
+    post:
+      tags: [Аутентификация]
+      summary: Создание учётной записи по приглашению
+      description: 'Ограничение: 10 запросов в минуту с IP.'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, name, password]
+              properties:
+                token: { type: string }
+                name: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Учётная запись создана }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/v1/me:
+    get:
+      tags: [Аутентификация]
+      summary: Текущая личность и роль
+      description: |
+        Источник роли для гейтинга интерфейса. Под сервисным токеном отдаёт личность
+        и роль САМОГО токена, а не создавшего его администратора.
+      responses:
+        '200':
+          description: Личность
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Identity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/me/password:
+    post:
+      tags: [Аутентификация]
+      summary: Смена собственного пароля
+      description: Гасит все живые сессии владельца.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password }
+      responses:
+        '200': { description: Пароль изменён }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/profile/telegram:
+    get:
+      tags: [Аутентификация]
+      summary: Состояние привязки Telegram
+      description: |
+        Отдаёт непогашенный токен привязки ВЛАДЕЛЬЦА учётной записи, поэтому закрыт
+        для сервисных токенов: иначе держатель токена скормил бы его боту и начал
+        получать чужие алерты.
+      x-requires-human: true
+      responses:
+        '200':
+          description: Состояние привязки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linked: { type: boolean }
+                  link_token: { type: string }
+                  bot_username: { type: string }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/profile/telegram-link:
+    post:
+      tags: [Аутентификация]
+      summary: Выпуск токена привязки Telegram
+      description: 'Роль: `it_admin`. Привязка — личное действие человека.'
+      x-requires-human: true
+      responses:
+        '200':
+          description: Токен привязки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  # ─────────────────────────── Устройства ───────────────────────────
+  /api/v1/devices:
+    get:
+      tags: [Устройства]
+      summary: Список устройств
+      description: |
+        Поля расширенного инвентаря (`arch`, `console_user`, `disk_encryption`,
+        `os_patch_date`, `boot_time`, `disk_free`, `domain_joined`, `tpm`,
+        `secure_boot`) в списке НЕ заполняются — они приходят в карточке устройства.
+      responses:
+        '200':
+          description: Устройства
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Устройства]
+      summary: Регистрация устройства и выпуск одноразового токена энроллмента
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hostname]
+              properties:
+                hostname: { type: string }
+                os: { $ref: '#/components/schemas/OS' }
+      responses:
+        '201':
+          description: Устройство создано в статусе `pending`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  enrollment_token: { type: string }
+                  ca_sha256:
+                    type: string
+                    description: Отпечаток CA для пиннинга при энроллменте агента
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/devices/{id}:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    get:
+      tags: [Устройства]
+      summary: Карточка устройства
+      responses:
+        '200':
+          description: Устройство
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Устройства]
+      summary: Удаление устройства из базы
+      description: |
+        Роль: `it_admin`. Удаляет запись и всё связанное каскадом. Агента на машине
+        НЕ трогает — для этого есть вывод из эксплуатации.
+      responses:
+        '204': { description: Удалено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/devices/{id}/status:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    put:
+      tags: [Устройства]
+      summary: Смена статуса устройства
+      description: |
+        Роль: `it_admin`. Перевод в управляемый статус из очереди одобрения этой
+        ручкой невозможен — для этого есть одобрение.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/DeviceStatus' }
+      responses:
+        '200': { description: Статус изменён }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/devices/{id}/decommission:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Устройства]
+      summary: Вывод устройства из эксплуатации
+      description: |
+        Роль: `it_admin`. Необратимо. Агент снимает службу, разоружает защиту от
+        вмешательства, удаляет состояние, сертификат и собственный бинарь.
+        Статус переходит в терминальный `decommissioned` только после подтверждения
+        от агента, то есть операция требует его сотрудничества. Для враждебного или
+        украденного устройства используйте блокировку — она применяется на сервере
+        мгновенно.
+      x-requires-human: true
+      responses:
+        '202': { description: Команда поставлена в очередь агенту }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ─────────────────────────── Энроллмент ───────────────────────────
+  /api/v1/enroll:
+    post:
+      tags: [Энроллмент]
+      summary: Энроллмент агента (вызывает агент, не оператор)
+      description: |
+        Агент присылает CSR и одноразовый либо массовый токен, получает подписанный
+        сертификат. Аутентификация — самим токеном, поэтому эндпоинт публичный.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enrollment_token, csr_pem]
+              properties:
+                enrollment_token: { type: string }
+                csr_pem: { type: string }
+                hostname: { type: string }
+                os: { $ref: '#/components/schemas/OS' }
+                arch: { type: string, example: amd64 }
+      responses:
+        '200':
+          description: Сертификат выдан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  certificate_pem: { type: string }
+                  ca_pem: { type: string }
+                  device_id: { type: string, format: uuid }
+                  release_pubkey:
+                    type: string
+                    description: Публичный ключ проверки самообновления агента
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Токен недействителен или уже использован
+          content: { text/plain: { schema: { type: string } } }
+
+  /api/v1/devices/{id}/enrollment-token:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    get:
+      tags: [Энроллмент]
+      summary: Действующий одноразовый токен устройства
+      description: 'Роль: `it_admin`.'
+      responses:
+        '200':
+          description: Токен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrollment_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/devices/{id}/reenroll:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Энроллмент]
+      summary: Повторный энроллмент — выпуск нового токена
+      description: |
+        Роль: `it_admin`. Отклонённое или заблокированное устройство повторным
+        энроллментом в управляемый статус не возвращается — требуется одобрение.
+      responses:
+        '200':
+          description: Новый токен выпущен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrollment_token: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Статус устройства запрещает повторный энроллмент
+          content: { text/plain: { schema: { type: string } } }
+
+  /api/v1/enrollment-tokens/bulk:
+    post:
+      tags: [Энроллмент]
+      summary: Выпуск массового токена энроллмента
+      description: |
+        Роль: `it_admin`. Один токен на партию машин — для развёртывания образом или
+        через систему раздачи ПО.
+      x-requires-human: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                group_id:
+                  type: string
+                  format: uuid
+                  description: Пусто — без группы
+                max_uses:
+                  type: integer
+                  nullable: true
+                  description: Не задано — без ограничения до истечения срока
+                require_approval:
+                  type: boolean
+                  nullable: true
+                  default: true
+                  description: Ставить ли энроллящиеся устройства в очередь одобрения
+                ttl_hours:
+                  type: integer
+                  description: 0 — значение по умолчанию
+      responses:
+        '201':
+          description: Токен выпущен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/devices/{id}/approve:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Энроллмент]
+      summary: Одобрение устройства из очереди
+      description: 'Роль: `it_admin`. Переводит `pending_approval` в управляемый статус.'
+      x-requires-human: true
+      responses:
+        '200': { description: Одобрено }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/devices/{id}/reject:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Энроллмент]
+      summary: Отклонение устройства из очереди
+      description: |
+        Роль: `it_admin`. Защитное действие, поэтому сервисному токену разрешено.
+      responses:
+        '200': { description: Отклонено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/enrollment-queue/approve:
+    post:
+      tags: [Энроллмент]
+      summary: Пакетное одобрение очереди
+      description: 'Роль: `it_admin`.'
+      x-requires-human: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                group_id:
+                  type: string
+                  description: Пусто — все устройства в статусе `pending_approval`
+      responses:
+        '200':
+          description: Результат пакета
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approved: { type: integer }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/enrollment-queue/reject:
+    post:
+      tags: [Энроллмент]
+      summary: Пакетное отклонение очереди
+      description: 'Роль: `it_admin`. Защитное действие, сервисному токену разрешено.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                group_id: { type: string }
+      responses:
+        '200':
+          description: Результат пакета
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rejected: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Задачи ───────────────────────────
+  /api/v1/devices/{id}/tasks:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    get:
+      tags: [Задачи]
+      summary: Задачи устройства
+      responses:
+        '200':
+          description: Задачи
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Задачи]
+      summary: Разовый запуск скрипта на устройстве
+      description: |
+        Роль: `it_admin`. Содержимое исполняется на устройстве с правами службы
+        агента (root или SYSTEM). Это самый мощный канал в системе — доступ к нему
+        равносилен удалённому исполнению кода на всём парке.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_content, platform]
+              properties:
+                script_content: { type: string }
+                platform: { $ref: '#/components/schemas/OS' }
+                priority: { $ref: '#/components/schemas/Priority' }
+      responses:
+        '201':
+          description: Задача создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Блокировка ───────────────────────────
+  /api/v1/devices/{id}/lock:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Блокировка]
+      summary: Блокировка устройства
+      description: |
+        Роль: `it_admin`. Сервер генерирует одноразовый пароль снятия, отдаёт его
+        оператору в открытом виде и передаёт агенту только хеш. Пароль показывается
+        один раз, восстановить его нельзя.
+
+        Режим `filevault` — возможность редакции Enterprise и требует настроенного
+        эскроу ключей восстановления; в свободной редакции запрос вернёт `409`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Текст, который увидит сотрудник на экране блокировки
+                mode: { $ref: '#/components/schemas/LockMode' }
+      responses:
+        '200':
+          description: Команда поставлена агенту
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string, format: uuid }
+                  password:
+                    type: string
+                    description: Пароль снятия. Показывается ОДИН раз.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Режим блокировки недоступен (возможность Enterprise либо эскроу выключен)
+          content: { text/plain: { schema: { type: string } } }
+
+  /api/v1/devices/{id}/unlock:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Блокировка]
+      summary: Снятие блокировки
+      description: 'Роль: `it_admin`.'
+      responses:
+        '200':
+          description: Команда поставлена агенту
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string, format: uuid }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Скрипты ───────────────────────────
+  /api/v1/scripts:
+    get:
+      tags: [Скрипты]
+      summary: Библиотека скриптов
+      responses:
+        '200':
+          description: Скрипты
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Script' }
+    post:
+      tags: [Скрипты]
+      summary: Создание скрипта
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScriptInput' }
+      responses:
+        '201':
+          description: Создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Script' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/scripts/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Скрипты]
+      summary: Скрипт
+      responses:
+        '200':
+          description: Скрипт
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Script' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Скрипты]
+      summary: Изменение скрипта
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScriptInput' }
+      responses:
+        '200': { description: Изменён }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [Скрипты]
+      summary: Удаление скрипта
+      description: 'Роль: `it_admin`. Скрипт, на который ссылается скрипт-политика, не удаляется.'
+      responses:
+        '204': { description: Удалён }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Скрипт используется скрипт-политикой
+          content: { text/plain: { schema: { type: string } } }
+
+  # ─────────────────────────── Скрипт-политики ───────────────────────────
+  /api/v1/script-policies:
+    get:
+      tags: [Скрипт-политики]
+      summary: Скрипт-политики
+      description: |
+        Политика с пустым `group_names` не таргетит ни одно устройство и молча не
+        выполняется — при разборе «политика не отработала» смотрите сюда первым делом.
+      responses:
+        '200':
+          description: Политики
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScriptPolicy' }
+    post:
+      tags: [Скрипт-политики]
+      summary: Создание скрипт-политики
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, script_id, trigger_type]
+              properties:
+                name: { type: string }
+                script_id: { type: string, format: uuid }
+                trigger_type: { $ref: '#/components/schemas/TriggerType' }
+                schedule_config:
+                  type: object
+                  description: Для `schedule` — расписание запуска
+                event_trigger_config:
+                  type: object
+                  description: Для `event` — на какие события реагировать
+      responses:
+        '201':
+          description: Создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScriptPolicy' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/script-policies/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    delete:
+      tags: [Скрипт-политики]
+      summary: Удаление скрипт-политики
+      description: 'Роль: `it_admin`.'
+      responses:
+        '204': { description: Удалена }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/script-policies/{id}/toggle:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      tags: [Скрипт-политики]
+      summary: Включение и выключение политики
+      description: 'Роль: `it_admin`.'
+      responses:
+        '200':
+          description: Новое состояние
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_active: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/script-policies/compliance:
+    get:
+      tags: [Скрипт-политики]
+      summary: Сводка выполнения по всем скрипт-политикам
+      responses:
+        '200':
+          description: Сводка
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScriptPolicyCompliance' }
+
+  /api/v1/script-policies/{id}/results:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Скрипт-политики]
+      summary: Результаты запусков политики по устройствам
+      responses:
+        '200':
+          description: Результаты
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScriptResult' }
+
+  # ─────────────────────────── Софт-политики ───────────────────────────
+  /api/v1/policies:
+    get:
+      tags: [Софт-политики]
+      summary: Правила разрешённого и запрещённого ПО
+      responses:
+        '200':
+          description: Правила
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PolicyRule' }
+    post:
+      tags: [Софт-политики]
+      summary: Создание правила
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [software_name, rule_type]
+              properties:
+                software_name: { type: string }
+                rule_type: { $ref: '#/components/schemas/RuleType' }
+                device_id:
+                  type: string
+                  nullable: true
+                  description: Не задано — правило глобальное
+                platforms:
+                  type: array
+                  items: { $ref: '#/components/schemas/OS' }
+                  description: Пусто — все платформы
+      responses:
+        '201':
+          description: Создано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyRule' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/policies/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    delete:
+      tags: [Софт-политики]
+      summary: Удаление правила
+      description: 'Роль: `it_admin`.'
+      responses:
+        '204': { description: Удалено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/policies/compliance:
+    get:
+      tags: [Софт-политики]
+      summary: Сводка соответствия по всем правилам
+      responses:
+        '200':
+          description: Сводка
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SoftwarePolicyCompliance' }
+
+  /api/v1/policies/{id}/compliance:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Софт-политики]
+      summary: Разрез соответствия по устройствам
+      description: Несуществующий идентификатор даёт пустой список, а не ошибку.
+      responses:
+        '200':
+          description: Устройства в области действия правила
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SoftwarePolicyDeviceCompliance' }
+
+  # ─────────────────────────── Группы устройств ───────────────────────────
+  /api/v1/device-groups:
+    get:
+      tags: [Группы устройств]
+      summary: Группы устройств
+      responses:
+        '200':
+          description: Группы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DeviceGroup' }
+    post:
+      tags: [Группы устройств]
+      summary: Создание группы
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                color: { $ref: '#/components/schemas/Color' }
+      responses:
+        '201':
+          description: Создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceGroup' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Группа с таким именем уже существует
+          content: { text/plain: { schema: { type: string } } }
+
+  /api/v1/device-groups/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      tags: [Группы устройств]
+      summary: Переименование группы и смена цвета
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                color: { $ref: '#/components/schemas/Color' }
+      responses:
+        '200': { description: Изменена }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [Группы устройств]
+      summary: Удаление группы
+      description: 'Роль: `it_admin`. Устройства не удаляются, только теряют членство.'
+      responses:
+        '204': { description: Удалена }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/members:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Группы устройств]
+      summary: Добавление устройства в группу
+      description: 'Роль: `it_admin`. Устройство может состоять в нескольких группах.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id]
+              properties:
+                device_id: { type: string, format: uuid }
+      responses:
+        '204': { description: Добавлено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/members/{deviceId}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - name: deviceId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Группы устройств]
+      summary: Исключение устройства из группы
+      description: 'Роль: `it_admin`.'
+      responses:
+        '204': { description: Исключено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/policies:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Группы устройств]
+      summary: Назначение скрипт-политики группе
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy_id]
+              properties:
+                policy_id: { type: string, format: uuid }
+      responses:
+        '204': { description: Назначена }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/policies/{policyId}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - name: policyId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Группы устройств]
+      summary: Снятие скрипт-политики с группы
+      description: 'Роль: `it_admin`.'
+      responses:
+        '204': { description: Снята }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/software-policies:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Группы устройств]
+      summary: Назначение правила ПО группе
+      description: 'Роль: `it_admin`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule_id]
+              properties:
+                rule_id: { type: string, format: uuid }
+      responses:
+        '204': { description: Назначено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/software-policies/{ruleId}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - name: ruleId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Группы устройств]
+      summary: Снятие правила ПО с группы
+      description: 'Роль: `it_admin`.'
+      responses:
+        '204': { description: Снято }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/device-groups/{id}/run-script:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Группы устройств]
+      summary: Запуск скрипта на всей группе
+      description: |
+        Роль: `it_admin`. Задача создаётся каждому устройству группы в статусе
+        `active`; устройства в очереди одобрения и заблокированные пропускаются.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_id]
+              properties:
+                script_id: { type: string, format: uuid }
+                priority: { $ref: '#/components/schemas/Priority' }
+      responses:
+        '202':
+          description: Задачи поставлены
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Алерты ───────────────────────────
+  /api/v1/alerts:
+    get:
+      tags: [Алерты]
+      summary: Алерты безопасности
+      responses:
+        '200':
+          description: Алерты
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Alert' }
+
+  /api/v1/alerts/{id}/acknowledge:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Алерты]
+      summary: Подтверждение алерта
+      description: 'Роль: `it_admin`.'
+      responses:
+        '200': { description: Подтверждён }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Локальные админ-права ───────────────────────────
+  /api/v1/admin-access-requests:
+    get:
+      tags: [Локальные админ-права]
+      summary: Запросы локальных админ-прав от сотрудников
+      responses:
+        '200':
+          description: Запросы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminAccessRequest' }
+
+  /api/v1/admin-access-requests/{id}/respond:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Локальные админ-права]
+      summary: Решение по запросу
+      description: |
+        Роль: `it_admin`. Одобрение выдаёт сотруднику права локального администратора
+        на его машине на ограниченный срок. Решение записывается в аудит вместе с тем,
+        кто его принял.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, deny]
+                duration_seconds:
+                  type: integer
+                  description: Срок действия прав при одобрении
+      responses:
+        '200': { description: Решение записано }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/admin-access-requests/{id}/revoke:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Локальные админ-права]
+      summary: Отзыв выданных прав
+      description: |
+        Роль: `it_admin`. Защитное действие, поэтому сервисному токену разрешено.
+      responses:
+        '200': { description: Отозвано }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ─────────────────────────── Пользователи ───────────────────────────
+  /api/v1/users:
+    get:
+      tags: [Пользователи]
+      summary: Пользователи
+      responses:
+        '200':
+          description: Пользователи
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+
+  /api/v1/users/invite:
+    post:
+      tags: [Пользователи]
+      summary: Приглашение пользователя
+      description: |
+        Роль: `it_admin`. Выпускает учётные данные человека с любой ролью, включая
+        `it_admin`, а принятие приглашения авторизации не требует.
+
+        Если почта на сервере не настроена, ссылка приглашения возвращается прямо в
+        теле ответа — обращайтесь с ней как с паролем.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '201':
+          description: Приглашение выпущено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email_sent: { type: boolean }
+                  invite_url:
+                    type: string
+                    description: Только если письмо отправить не удалось
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  # ─────────────────────────── API-токены ───────────────────────────
+  /api/v1/api-tokens:
+    get:
+      tags: [API-токены]
+      summary: Список сервисных токенов
+      description: 'Роль: `it_admin`. Сам секрет не хранится и не возвращается.'
+      x-requires-human: true
+      responses:
+        '200':
+          description: Токены
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/APIToken' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+    post:
+      tags: [API-токены]
+      summary: Выпуск сервисного токена
+      description: |
+        Роль: `it_admin`. Секрет возвращается ОДИН раз и больше не восстанавливается.
+
+        Токен — это учётные данные с ролью, поэтому его выпуск приравнен к заведению
+        пользователя и запрещён другим токенам: иначе утёкший токен выписал бы себе
+        новый, который пережил бы удаление исходного.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              properties:
+                name: { type: string }
+                role: { $ref: '#/components/schemas/Role' }
+                expires_in_days:
+                  type: integer
+                  description: 0 — без срока
+      responses:
+        '201':
+          description: Токен выпущен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Секрет. Показывается ОДИН раз.
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/api-tokens/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    delete:
+      tags: [API-токены]
+      summary: Отзыв сервисного токена
+      description: 'Роль: `it_admin`. Отзыв мгновенный.'
+      x-requires-human: true
+      responses:
+        '204': { description: Отозван }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  # ─────────────────────────── Аудит ───────────────────────────
+  /api/v1/audit-log:
+    get:
+      tags: [Аудит]
+      summary: Журнал аудита
+      responses:
+        '200':
+          description: Записи
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+
+  # ─────────────────────────── Служебное ───────────────────────────
+  /healthz:
+    get:
+      tags: [Служебное]
+      summary: Проверка живости
+      security: []
+      responses:
+        '200': { description: Сервер жив }
+
+  /ca.crt:
+    get:
+      tags: [Служебное]
+      summary: Корневой сертификат CA
+      description: |
+        Отдаётся публично, потому что нужен агенту ДО того, как у него появится
+        идентичность. Целостность обеспечивается не транспортом, а пиннингом:
+        агент сверяет отпечаток с переданным ему при установке `ca_sha256`.
+      security: []
+      responses:
+        '200':
+          description: PEM
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+
+  /api/v1/agent/version:
+    get:
+      tags: [Служебное]
+      summary: Манифест самообновления агента
+      description: |
+        Отдаёт последний опубликованный выпуск для указанной платформы. Постепенной
+        раскатки нет: единственный тормоз — не публиковать выпуск.
+      security: []
+      parameters:
+        - name: os
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/OS' }
+        - name: arch
+          in: query
+          required: true
+          schema: { type: string, example: amd64 }
+      responses:
+        '200':
+          description: Манифест
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string, example: 2.4.6 }
+                  url: { type: string, format: uri }
+                  sha256: { type: string }
+                  signature:
+                    type: string
+                    description: Подпись над sha256 бинаря
+                  manifest_signature:
+                    type: string
+                    description: Подпись над version\nos\narch\nsha256 — защита от отката
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/installer:
+    get:
+      tags: [Служебное]
+      summary: Скрипт установки агента
+      security: []
+      parameters:
+        - name: os
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/OS' }
+      responses:
+        '200':
+          description: Текст скрипта
+          content:
+            text/plain:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+      description: httpOnly-кука, выставляется входом. Так работает веб-интерфейс.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Сервисный API-токен для автоматизации.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      description: Идентификатор устройства
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content: { text/plain: { schema: { type: string } } }
+    Unauthorized:
+      description: Не аутентифицирован либо срок действия токена истёк
+      content: { text/plain: { schema: { type: string } } }
+    Forbidden:
+      description: Недостаточно прав (требуется роль `it_admin`)
+      content: { text/plain: { schema: { type: string } } }
+    ForbiddenHuman:
+      description: |
+        Недостаточно прав. Операция доступна только человеку: сервисный токен
+        получает этот ответ даже с ролью `it_admin`.
+      content: { text/plain: { schema: { type: string } } }
+    NotFound:
+      description: Не найдено
+      content: { text/plain: { schema: { type: string } } }
+    TooManyRequests:
+      description: Превышено ограничение частоты запросов
+      content: { text/plain: { schema: { type: string } } }
+
+  schemas:
+    Role:
+      type: string
+      enum: [viewer, it_admin]
+
+    OS:
+      type: string
+      enum: [windows, macos, linux]
+
+    Priority:
+      type: string
+      enum: [low, normal, high]
+      default: normal
+
+    Color:
+      type: string
+      pattern: '^#[0-9a-fA-F]{6}$'
+      example: '#3b82f6'
+
+    LockMode:
+      type: string
+      enum: [overlay, filevault]
+      default: overlay
+      description: |
+        `overlay` — полноэкранный замок с полем пароля. `filevault` — деструктивный
+        режим редакции Enterprise (снятие Secure Token на macOS).
+
+    DeviceStatus:
+      type: string
+      enum: [pending, pending_approval, active, blocked, rejected, decommissioned]
+      description: |
+        `pending` — зарегистрировано, агент ещё не энроллился.
+        `pending_approval` — энроллилось и ждёт решения оператора.
+        `active` — под управлением.
+        `blocked` — доступ отозван на границе, соединения агента рвутся.
+        `rejected` — отклонено при энроллменте.
+        `decommissioned` — терминальный статус после вывода из эксплуатации.
+
+    RuleType:
+      type: string
+      enum: [allowed, forbidden]
+
+    TriggerType:
+      type: string
+      enum: [schedule, event]
+
+    Identity:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+
+    DeviceGroupRef:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color: { $ref: '#/components/schemas/Color' }
+
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        hostname: { type: string }
+        os: { $ref: '#/components/schemas/OS' }
+        os_version: { type: string }
+        ip_address: { type: string }
+        public_ip: { type: string }
+        status: { $ref: '#/components/schemas/DeviceStatus' }
+        lock_status:
+          type: string
+          enum: [locked, unlocked]
+        last_seen_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        enrolled_at: { type: string, format: date-time, nullable: true }
+        cert_cn: { type: string }
+        agent_version: { type: string }
+        cpu: { type: string }
+        ram_mb: { type: integer, format: int64 }
+        disk: { type: string }
+        disk_free: { type: string }
+        mac_address: { type: string }
+        serial_number: { type: string }
+        arch: { type: string }
+        console_user:
+          type: string
+          description: 'На Windows в виде `DOMAIN\user`. Пусто — за консолью никого.'
+        disk_encryption:
+          type: string
+          enum: ['enabled', 'disabled', '']
+        os_patch_date:
+          type: string
+          description: 'Дата вида `2006-01-02`. Пусто — неизвестно.'
+        boot_time:
+          type: integer
+          format: int64
+          description: Время загрузки в формате unix. 0 — неизвестно.
+        domain_joined: { type: string, enum: ['true', 'false', ''] }
+        tpm: { type: string, enum: ['true', 'false', ''] }
+        secure_boot: { type: string, enum: ['true', 'false', ''] }
+        groups:
+          type: array
+          items: { $ref: '#/components/schemas/DeviceGroupRef' }
+
+    Task:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        script_content: { type: string }
+        platform: { $ref: '#/components/schemas/OS' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        status:
+          type: string
+          enum: [pending, acked, success, failed]
+        output: { type: string, nullable: true }
+        error_log: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        task_type:
+          type: string
+          enum: [script, lock, decommission]
+        lock_reason: { type: string }
+        lock_unlock: { type: boolean }
+        lock_mode: { $ref: '#/components/schemas/LockMode' }
+
+    Alert:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        device_hostname: { type: string }
+        alert_type: { type: string }
+        details: { type: string }
+        created_at: { type: string, format: date-time }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
+
+    Script:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        platform: { $ref: '#/components/schemas/OS' }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ScriptInput:
+      type: object
+      required: [name, platform, content]
+      properties:
+        name: { type: string }
+        platform: { $ref: '#/components/schemas/OS' }
+        content: { type: string }
+
+    ScriptPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        script_id: { type: string, format: uuid }
+        script_name: { type: string }
+        trigger_type: { $ref: '#/components/schemas/TriggerType' }
+        schedule_config: { type: object }
+        event_trigger_config: { type: object }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        group_names:
+          type: array
+          items: { type: string }
+          description: Пусто — политика не таргетит ни одно устройство.
+
+    ScriptPolicyCompliance:
+      type: object
+      properties:
+        policy_id: { type: string, format: uuid }
+        in_scope: { type: integer }
+        pass: { type: integer }
+        fail: { type: integer }
+        unknown: { type: integer }
+
+    ScriptResult:
+      type: object
+      properties:
+        device_id: { type: string, format: uuid }
+        hostname: { type: string }
+        exit_code: { type: integer }
+        stdout: { type: string }
+        stderr: { type: string }
+        finished_at: { type: string, format: date-time }
+
+    PolicyRule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        software_name: { type: string }
+        rule_type: { $ref: '#/components/schemas/RuleType' }
+        device_id: { type: string, format: uuid, nullable: true }
+        group_id: { type: string, format: uuid, nullable: true }
+        platforms:
+          type: array
+          items: { $ref: '#/components/schemas/OS' }
+          description: Пусто — все платформы.
+        updated_at: { type: string, format: date-time }
+
+    SoftwarePolicyCompliance:
+      type: object
+      properties:
+        rule_id: { type: string, format: uuid }
+        in_scope:
+          type: integer
+          description: Число устройств, на которые распространяется правило
+        pass: { type: integer }
+        fail: { type: integer }
+        checked:
+          type: boolean
+          description: Была ли вообще проверка
+
+    SoftwarePolicyDeviceCompliance:
+      type: object
+      properties:
+        device_id: { type: string, format: uuid }
+        hostname: { type: string }
+        os: { $ref: '#/components/schemas/OS' }
+        status: { type: string }
+        installed: { type: boolean }
+        matched_software: { type: string }
+        matched_version: { type: string }
+
+    DeviceGroup:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color: { $ref: '#/components/schemas/Color' }
+        created_at: { type: string, format: date-time }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+        created_at: { type: string, format: date-time }
+
+    APIToken:
+      type: object
+      description: Секрет не хранится и в списке не возвращается.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+
+    AdminAccessRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        requested_by: { type: string }
+        status: { type: string }
+        reason: { type: string }
+        requested_at: { type: string, format: date-time }
+        pending_expires_at: { type: string, format: date-time }
+        decided_by: { type: string, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        granted_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid, nullable: true }
+        user_email: { type: string }
+        action: { type: string }
+        target_type: { type: string }
+        target_id: { type: string }
+        details: { type: object }
+        created_at: { type: string, format: date-time }

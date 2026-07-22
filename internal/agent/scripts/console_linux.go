@@ -19,8 +19,9 @@ const minRegularUID = 1000
 
 // parseLoginctl выбирает пользователя локального сеанса из вывода
 // `loginctl list-sessions --no-legend`; колонки: SESSION UID USER SEAT [TTY].
-// Сеансы без места (seat пуст или "-") — это ssh/cron: за машиной физически
-// никого нет, и LOGIN/LOGOUT-триггеры на них срабатывать не должны.
+// Физический вход — только сеанс с реальным местом (SEAT = seat0/seat1…); ssh/cron
+// несут в этой колонке tty/pts или "-", за машиной физически никого нет, и
+// LOGIN/LOGOUT-триггеры на них срабатывать не должны.
 func parseLoginctl(out string) string {
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
@@ -34,7 +35,12 @@ func parseLoginctl(out string) string {
 		if uid < minRegularUID {
 			continue // root и системные учётки, включая greeter'ы
 		}
-		if seat := f[3]; seat != "-" {
+		// prefix "seat" (seat0/seat1…), а НЕ просто "!= -": ssh/cron-сессии несут в
+		// колонке SEAT место tty/pts (или "-"), и seat != "-" ошибочно принимал их
+		// за физический вход → ложная пара LOGIN/LOGOUT-триггеров на каждый ssh-
+		// коннект (немодемпотентная политика отрабатывала лишний раз от root).
+		// Вторая копия той же функции — admin/priv_linux.go: держать в синхроне.
+		if seat := f[3]; strings.HasPrefix(seat, "seat") {
 			return f[2]
 		}
 	}

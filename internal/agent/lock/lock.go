@@ -313,6 +313,13 @@ func (m *Manager) Lock(requestID, hash, reason string) error {
 	if m.state.Locked && m.state.RequestID == requestID {
 		return nil // уже заблокированы этой же заявкой
 	}
+	// Атомарно: при отказе persist ОТКАТЫВАЕМ состояние. Иначе m.state.Locked
+	// оставался true в памяти при не записанном на диск и НЕ поднятом оверлее —
+	// устройство фактически НЕ заблокировано, но реконсиляция по mgr.Locked()
+	// считала лок применённым и не повторяла попытку (транзиентный сбой persist
+	// маскировал провал бессрочно). С откатом mgr.Locked()==false отражает правду,
+	// и следующий тик реконсиляции честно ретраит (desired на сервере цел).
+	prev := m.state
 	m.state = State{
 		Locked:    true,
 		Hash:      hash,
@@ -321,6 +328,7 @@ func (m *Manager) Lock(requestID, hash, reason string) error {
 		LockedAt:  time.Now().Unix(),
 	}
 	if err := m.persist(); err != nil {
+		m.state = prev
 		return err
 	}
 	m.log.Warn("lock: устройство заблокировано", slog.String("request_id", requestID))

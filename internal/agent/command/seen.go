@@ -41,6 +41,14 @@ func loadSeenSet(path string) *seenSet {
 	return s
 }
 
+// has сообщает, помечен ли id виденным (задача уже стартовала), не меняя набор.
+func (s *seenSet) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.m[id]
+	return ok
+}
+
 // markIfNew атомарно помечает id виденным. Возвращает true, если id новый (можно
 // выполнять задачу), и false для повторной доставки (выполнять не нужно).
 func (s *seenSet) markIfNew(id string) bool {

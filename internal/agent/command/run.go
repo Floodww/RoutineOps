@@ -44,14 +44,24 @@ func runScript(ctx context.Context, platform, script string) (stdout, stderr str
 	// Без WaitDelay скрипт с фоновым потомком (`daemon &`), унаследовавшим stdout,
 	// подвешивал Run() навсегда — и слот семафора executor'а вместе с ним
 	// (см. scriptenc.PipeWaitDelay). ErrWaitDelay подменяет ТОЛЬКО nil, то есть
-	// сам скрипт вышел успешно — это успех, просто вывод потомков не захвачен.
+	// сам скрипт вышел успешно — это успех, но пайпы закрыты принудительно и
+	// пишущие потомки будут прерваны (EPIPE). Пометка об этом идёт в STDOUT, а
+	// не в stderr: на успехе executor кладёт в TaskResult только Output, stderr
+	// выбрасывает — пометка в stderr до оператора не дошла бы. AppendNote
+	// гарантирует, что пометку не съест обрезка (она режет именно хвост).
 	cmd.WaitDelay = scriptenc.PipeWaitDelay
 	err = cmd.Run()
+
+	// Порядок Sanitize → TruncateTotal → AppendNote: кадр >4 МБ сервер отвергает
+	// ResourceExhausted'ом, и отчёт навсегда застревает в голове outbox-очереди
+	// (scriptenc.MaxOutputBytes). TruncateTotal берёт реальный объём из
+	// CaptureBuffer.Total — честное «из M», а не константа из уже-урезанной строки
+	// (#1.6). WaitDelay-пометка дописывается ПОСЛЕ обрезки, по её ≤ Max выходу.
+	stdout = scriptenc.TruncateTotal(scriptenc.SanitizeUTF8(out.String()), out.Total())
+	stderr = scriptenc.TruncateTotal(scriptenc.SanitizeUTF8(errBuf.String()), errBuf.Total())
 	if errors.Is(err, exec.ErrWaitDelay) {
 		err = nil
+		stdout = scriptenc.AppendNote(stdout, scriptenc.WaitDelayNote)
 	}
-	// Обрезаем до отправки: кадр >4 МБ сервер отвергает ResourceExhausted'ом, и отчёт
-	// навсегда застревает в голове outbox-очереди (см. scriptenc.MaxOutputBytes).
-	return scriptenc.TruncateOutput(scriptenc.SanitizeUTF8(out.String())),
-		scriptenc.TruncateOutput(scriptenc.SanitizeUTF8(errBuf.String())), err
+	return stdout, stderr, err
 }

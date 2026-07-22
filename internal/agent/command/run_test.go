@@ -77,6 +77,11 @@ func TestRunScriptBackgroundChildDoesNotHang(t *testing.T) {
 	if !strings.Contains(stdout, "started") {
 		t.Errorf("stdout=%q, ожидали вывод до фонового потомка", stdout)
 	}
+	// №4.2: пометка обязана быть в STDOUT — на успехе executor кладёт в TaskResult
+	// только Output, stderr выбрасывает, и пометка в stderr до оператора не дошла бы.
+	if !strings.Contains(stdout, "будут прерваны") {
+		t.Errorf("stdout=%q, ожидали пометку WaitDelayNote в stdout (stderr на успехе не доходит до оператора)", stdout)
+	}
 	if elapsed >= 20*time.Second {
 		t.Fatalf("runScript висел %v — WaitDelay не сработал", elapsed)
 	}

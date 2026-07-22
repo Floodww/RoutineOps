@@ -44,6 +44,15 @@ type Reconciler struct {
 	// outbox, а слать дубликат каждые 30с при офлайне значит забивать очередь.
 	durableReported string
 
+	// applyFailReported/applyFailSet — дедуп ЛОГА о провале применения
+	// desired=locked (пустой/битый hash от сервера #1.1, транзиентный отказ
+	// persist). Тик крутит ретрай каждые 30с; без дедупа лог провала флудил бы
+	// LevelError на каждом тике. Сбрасывается, когда лок применён или desired стал
+	// unlocked. Серверу о провале НЕ отчитываемся: UNLOCKED стёр бы desired
+	// (разоружил kill-switch), а actual-only канал требует нового proto-состояния.
+	applyFailReported string
+	applyFailSet      bool
+
 	// fvInFlight/fvWG — одиночный фоновый воркер FileVault-revoke:
 	// RevokeAndShutdown держит блокирующий durable ReportState
 	// (backoff 1с→2мин до успеха или agent-lifetime ctx) — инлайн-вызов из tick
@@ -237,9 +246,35 @@ func (r *Reconciler) reconcileLocked(ctx context.Context, resp *pb.FetchLockStat
 	}
 
 	if err := r.mgr.Lock(hash, hash, resp.GetReason()); err != nil {
-		r.log.Error("lock: reconcile Lock", slog.Any("error", err))
+		// Лок ФИЗИЧЕСКИ не поднят: пустой/битый password_hash от сервера (#1.1,
+		// validateBcryptHash #13) или транзиентный отказ persist (ENOSPC/EIO/AV/
+		// sharing-violation). Громко логируем (LevelError виден в проде) — прежний
+		// молчок обнаруживался только чтением журнала конкретной машины.
+		//
+		// НЕ шлём серверу UNLOCKED: overlay-UNLOCKED на сервере идёт в
+		// SetDeviceLockState('unlocked', '') и СТИРАЕТ desired=locked (gateway.go),
+		// то есть транзиентный сбой навсегда разоружил бы kill-switch (adversarial-
+		// ревью: critical). Держим desired нетронутым — Manager.Lock теперь
+		// откатывает состояние при отказе, поэтому mgr.Locked()==false, и следующий
+		// тик честно ретраит: транзиентный сбой самозаживает, как только диск
+		// восстановится. Пустой хеш от сервера чинится на источнике (серверная
+		// ветка FetchLockStatus); до тех пор тик крутит ретрай (дедуп лога — ниже).
+		// Видимость в панели через actual-only канал (LOCK_STATE_LOCK_FAILED) —
+		// отдельная задача: требует нового proto-состояния и серверного роутинга.
+		r.mu.Lock()
+		already := r.applyFailSet && r.applyFailReported == hash
+		r.applyFailReported = hash
+		r.applyFailSet = true
+		r.mu.Unlock()
+		if !already {
+			r.log.Error("lock: reconcile Lock ОТКАЗАЛ — desired=locked не применён (ретраю, desired на сервере не трогаю)",
+				slog.String("request_id", hash), slog.Any("error", err))
+		}
 		return
 	}
+	r.mu.Lock()
+	r.applyFailSet = false // лок применён — дедуп лога провала сброшен
+	r.mu.Unlock()
 	r.log.Warn("lock: реконсиляция применила desired-состояние locked после рестарта/расхождения")
 	if err := r.report(ctx, &pb.ReportLockStatusRequest{
 		RequestId:  hash,
@@ -263,6 +298,7 @@ func (r *Reconciler) reconcileUnlocked(ctx context.Context) {
 	r.mu.Lock()
 	r.lastUnlockedHash = ""
 	r.durableReported = ""
+	r.applyFailSet = false // desired=unlocked — дедуп провала применения тоже сброшен
 	r.mu.Unlock()
 	r.mgr.ClearLastUnlocked()
 

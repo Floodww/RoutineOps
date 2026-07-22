@@ -25,7 +25,9 @@ const defaultTimeout = 5 * time.Minute
 // EnqueueFunc ставит отчёт в устойчивую очередь доставки (outbox).
 type EnqueueFunc func(kind string, data []byte) error
 
-// execResult — результат одного запуска интерпретатора.
+// execResult — результат одного запуска интерпретатора. stdout/stderr уже
+// санитайзены и обрезаны до MaxOutputBytes с честной пометкой объёма (defaultExec
+// знает реальный объём из CaptureBuffer.Total) — Run повторно не режет.
 type execResult struct {
 	exitCode int32
 	stdout   string
@@ -64,14 +66,15 @@ func (r *Runner) Run(ctx context.Context, p *pb.ScriptPolicy, trigger pb.ScriptT
 	res := r.exec(runCtx, p.GetInterpreter(), p.GetScriptContent())
 	finished := time.Now()
 
-	// Обрезка до отправки: гигантский вывод даёт кадр >4 МБ, сервер отвергает его
-	// ResourceExhausted'ом, и запись насмерть встаёт в голове FIFO-очереди outbox.
+	// Обрезка (до MaxOutputBytes) уже сделана в defaultExec с реальным объёмом:
+	// гигантский вывод дал бы кадр >4 МБ, сервер отверг бы его ResourceExhausted'ом,
+	// и запись насмерть встала бы в голове FIFO-очереди outbox.
 	result := &pb.ScriptResult{
 		PolicyId:   p.GetPolicyId(),
 		RunId:      randID(),
 		ExitCode:   res.exitCode,
-		Stdout:     scriptenc.TruncateOutput(res.stdout),
-		Stderr:     scriptenc.TruncateOutput(res.stderr),
+		Stdout:     res.stdout,
+		Stderr:     res.stderr,
 		StartedAt:  started.Unix(),
 		FinishedAt: finished.Unix(),
 		Trigger:    trigger,
@@ -109,32 +112,38 @@ func defaultExec(ctx context.Context, interpreter, content string) execResult {
 	err := cmd.Run()
 
 	res := execResult{stdout: stdout.String(), stderr: stderr.String()}
+	// Порядок: Sanitize → TruncateTotal → AppendNote. Санитайз ПЕРВЫМ, а не после:
+	// SanitizeUTF8 может РАСШИРИТЬ вывод (одиночный невалидный байт → 3-байтовый
+	// U+FFFD); если резать/дописывать до него, расширение уводит хвост за
+	// MaxOutputBytes и срезает пометку. TruncateTotal берёт РЕАЛЬНЫЙ объём из
+	// CaptureBuffer.Total (не len уже-урезанной строки) — честное «из M» (#1.6).
+	// AppendNote идёт последним, уже по обрезанному ≤ Max: его пометка переживает
+	// потолок. Сами пометки — валидный UTF-8 (константы + err.Error()).
+	res.stdout = scriptenc.TruncateTotal(scriptenc.SanitizeUTF8(res.stdout), stdout.Total())
+	res.stderr = scriptenc.TruncateTotal(scriptenc.SanitizeUTF8(res.stderr), stderr.Total())
 	switch {
 	case err == nil:
 		res.exitCode = 0
 	case errors.Is(err, exec.ErrWaitDelay):
 		// Подменяет ТОЛЬКО nil: сам скрипт вышел с кодом 0, но фоновый потомок
 		// держал stdout — пайпы закрыты принудительно. Это успех, не ошибка.
+		// Пометка честная (пишущие потомки будут прерваны — EPIPE, см.
+		// scriptenc.WaitDelayNote) и через AppendNote: дописанная в хвост plain-
+		// конкатенацией она терялась бы под TruncateOutput на выводе ≥ 256 КиБ.
 		res.exitCode = 0
-		res.stderr += "\n[фоновые потомки скрипта продолжают работать — их дальнейший вывод не захвачен]"
+		res.stderr = scriptenc.AppendNote(res.stderr, scriptenc.WaitDelayNote)
 	case ctx.Err() == context.DeadlineExceeded:
 		res.exitCode = -1
-		res.stderr += "\n[прервано по таймауту]"
+		res.stderr = scriptenc.AppendNote(res.stderr, "[прервано по таймауту]")
 	default:
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			res.exitCode = int32(ee.ExitCode())
 		} else {
 			res.exitCode = -1
-			res.stderr += "\n[ошибка запуска: " + err.Error() + "]"
+			res.stderr = scriptenc.AppendNote(res.stderr, "[ошибка запуска: "+err.Error()+"]")
 		}
 	}
-	// Backstop: гарантируем валидный UTF-8, иначе proto.Marshal(ScriptResult)
-	// упадёт и результат политики молча потеряется (в script_results ничего,
-	// даже acked-следа нет). Санитайз ПОСЛЕ switch — накрывает и дописанные
-	// выше пометки. См. internal/agent/scriptenc.
-	res.stdout = scriptenc.SanitizeUTF8(res.stdout)
-	res.stderr = scriptenc.SanitizeUTF8(res.stderr)
 	return res
 }
 

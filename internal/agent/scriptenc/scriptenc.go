@@ -45,15 +45,71 @@ const MaxOutputBytes = 256 * 1024
 
 // TruncateOutput обрезает вывод до MaxOutputBytes по границе руны и дописывает
 // пометку, чтобы обрезание было видно человеку, а не выглядело как конец скрипта.
+// Общий объём для пометки берёт из len(s) — вызывающий не сообщил реальный (см.
+// TruncateTotal для источников из CaptureBuffer, знающих истинный объём).
 func TruncateOutput(s string) string {
-	if len(s) <= MaxOutputBytes {
+	return TruncateTotal(s, len(s))
+}
+
+// TruncateTotal — как TruncateOutput, но total задаёт РЕАЛЬНЫЙ объём вывода,
+// произведённого скриптом. CaptureBuffer отбрасывает всё сверх captureCap ещё во
+// время выполнения, поэтому len(s) — уже усечённая величина: пометка «отброшено N
+// из M», построенная на ней, всегда показывала ~4 КиБ из ~260 КиБ, хоть 300 КиБ
+// реального вывода, хоть 5 ГБ (#1.6). Передав CaptureBuffer.Total(), получаем
+// честное M. total<=len(s) и len(s)<=Max → обрезки не было, возвращаем как есть.
+func TruncateTotal(s string, total int) string {
+	if len(s) <= MaxOutputBytes && total <= len(s) {
 		return s
 	}
-	cut := MaxOutputBytes
+	return truncateTo(s, MaxOutputBytes, total)
+}
+
+// truncateTo режет s до max байт по границе руны и дописывает пометку об обрезке.
+// total — реальный объём произведённого вывода (для честного «из M»); при total<=0
+// или total<cut берётся фактически показанный объём. Итог может превышать max на
+// длину пометки (~80 байт) — вызывающие закладывают запас (см. noteReserve).
+func truncateTo(s string, max, total int) string {
+	cut := max
+	if cut > len(s) {
+		cut = len(s)
+	}
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + fmt.Sprintf("\n\n[вывод обрезан: отброшено %d байт из %d]", len(s)-cut, len(s))
+	if total < cut {
+		total = cut // санитайз мог расширить строку выше реального объёма (U+FFFD)
+	}
+	return s[:cut] + fmt.Sprintf("\n\n[вывод обрезан: показано %d, отброшено ~%d из ~%d байт]", cut, total-cut, total)
+}
+
+// WaitDelayNote — пометка обоих путей исполнения при exec.ErrWaitDelay. Текст
+// обязан быть ЧЕСТНЫМ: по контракту os/exec WaitDelay закрывает пайпы, и фоновый
+// потомок, пишущий в унаследованный stdout/stderr, на следующей записи получает
+// EPIPE (unix: SIGPIPE, по умолчанию — смерть процесса; Windows: ошибка записи).
+// Выживает только потомок, который держит пайп, но не пишет. Прежняя формулировка
+// («потомки продолжают работать») обещала обратное.
+const WaitDelayNote = "[пайпы вывода закрыты принудительно (WaitDelay): фоновые потомки, " +
+	"пишущие в унаследованный stdout/stderr, будут прерваны на следующей записи; их вывод не захвачен]"
+
+// noteReserve — запас под пометку truncateTo при подрезке в AppendNote: длина
+// «[вывод обрезан: отброшено N байт из M]» с двумя int64-числами.
+const noteReserve = 128
+
+// AppendNote дописывает note в хвост s так, чтобы пометка ГАРАНТИРОВАННО пережила
+// потолок MaxOutputBytes: при переполнении режется сам вывод, а не пометка.
+// Прямое `s += note` с последующим TruncateOutput теряло пометку на выводе
+// ≥ MaxOutputBytes — обрезка режет именно хвост. Результат не превышает
+// MaxOutputBytes, поэтому повторный TruncateOutput поверх — no-op.
+func AppendNote(s, note string) string {
+	suffix := "\n" + note
+	if len(s)+len(suffix) <= MaxOutputBytes {
+		return s + suffix
+	}
+	keep := MaxOutputBytes - len(suffix) - noteReserve
+	if keep < 0 {
+		keep = 0
+	}
+	return truncateTo(s, keep, len(s)) + suffix
 }
 
 // PipeWaitDelay — потолок ожидания EOF на stdout/stderr-пайпах ПОСЛЕ выхода
@@ -67,6 +123,11 @@ func TruncateOutput(s string) string {
 // до рестарта службы. WaitDelay по истечении потолка принудительно закрывает
 // пайпы, и Wait возвращает exec.ErrWaitDelay (ТОЛЬКО вместо nil — т.е. сам
 // скрипт вышел успешно); оба пути исполнения обязаны трактовать его как успех.
+// Цена закрытия пайпов: потомок, пишущий в унаследованный stdout/stderr, на
+// следующей записи получает EPIPE (unix — SIGPIPE, по умолчанию смерть) — для
+// MDM-агента ограниченное ожидание слота важнее выживания чужого демона. Оба
+// пути обязаны честно дописывать WaitDelayNote (через AppendNote) туда, где её
+// увидит оператор.
 //
 // Константа общая по той же причине, что и весь пакет: третий путь исполнения
 // не должен появиться без WaitDelay и разойтись с этими двумя.
@@ -85,12 +146,15 @@ const captureCap = MaxOutputBytes + 4*1024
 // блокирует и не роняет процесс сообщением об ошибке записи в пайп), но в память
 // кладёт не больше captureCap, остальное молча отбрасывает.
 type CaptureBuffer struct {
-	buf bytes.Buffer
+	buf   bytes.Buffer
+	total int // всего байт, пришедших в Write (включая отброшенные сверх captureCap)
 }
 
 // Write реализует io.Writer: сообщает len(p) как записанное (иначе exec посчитал
-// бы это ошибкой пайпа), но реально буферизует лишь до captureCap.
+// бы это ошибкой пайпа), но реально буферизует лишь до captureCap. total считает
+// ВЕСЬ поток — по нему TruncateTotal строит честную пометку об обрезке (#1.6).
 func (c *CaptureBuffer) Write(p []byte) (int, error) {
+	c.total += len(p)
 	if room := captureCap - c.buf.Len(); room > 0 {
 		if len(p) > room {
 			c.buf.Write(p[:room])
@@ -102,5 +166,9 @@ func (c *CaptureBuffer) Write(p []byte) (int, error) {
 }
 
 // String возвращает накопленное (в пределах потолка); дальше обычно идёт
-// SanitizeUTF8 + TruncateOutput.
+// SanitizeUTF8 + TruncateTotal(…, Total()).
 func (c *CaptureBuffer) String() string { return c.buf.String() }
+
+// Total — сколько байт всего произвёл скрипт (включая отброшенные при захвате).
+// Передаётся в TruncateTotal, чтобы пометка об обрезке показывала реальный объём.
+func (c *CaptureBuffer) Total() int { return c.total }

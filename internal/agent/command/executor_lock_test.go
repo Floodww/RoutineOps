@@ -131,18 +131,23 @@ func TestHandle_LockTask_RequestIDFallback(t *testing.T) {
 	}
 }
 
-// Ошибка применения блокировки всё равно отчитывается серверу (details с ошибкой).
-func TestHandle_LockTask_ErrorReported(t *testing.T) {
+// #1.2: Lock() отказал → handleLock НЕ репортит никакого состояния. LOCKED был бы
+// ложью (панель показывает «заблокировано» при рабочей машине), а UNLOCKED стёр бы
+// desired=locked на сервере (overlay-UNLOCKED → SetDeviceLockState ”) — транзиентный
+// сбой навсегда разоружил бы kill-switch. desired держим целым; pull-реконсилятор
+// доводит ретраем (Manager.Lock атомарен).
+func TestHandle_LockTask_NoReportOnFailure(t *testing.T) {
 	fc := &fakeClient{}
-	fl := &fakeLocker{err: errors.New("disk full")}
+	fl := &fakeLocker{err: errors.New("невалидный password_hash")}
 	e, _ := newTestExecutor(t, fc)
 	e.SetLocker(fl)
 
-	e.Submit(&pb.Task{TaskId: "t-lock", Lock: &pb.LockCommand{RequestId: "req-1"}})
+	e.Submit(&pb.Task{TaskId: "t-lockfail", Lock: &pb.LockCommand{
+		RequestId: "req-fail", PasswordHash: "",
+	}})
 	e.Shutdown()
 
-	rep := fc.lockReportsCopy()
-	if len(rep) != 1 || rep[0].GetDetails() == "ok" || rep[0].GetDetails() == "" {
-		t.Fatalf("при ошибке applies в details должна быть ошибка, got %v", rep)
+	if reports := fc.lockReportsCopy(); len(reports) != 0 {
+		t.Fatalf("при отказе Lock отправлено %d отчёт(ов) (State=%v) — desired на сервере мог быть стёрт (kill-switch)", len(reports), reports[0].GetState())
 	}
 }

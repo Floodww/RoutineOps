@@ -514,3 +514,61 @@ func TestHandle_ConnectError_NoAckNoSeen(t *testing.T) {
 		t.Errorf("после восстановления связи задача должна выполниться один раз, результатов %d", len(res))
 	}
 }
+
+// gatedLocker — Lock блокируется до close(release): имитация control-plane
+// handle без потолка времени (FileVault RevokeAndShutdown с durable-retry).
+type gatedLocker struct {
+	release chan struct{}
+	mu      sync.Mutex
+	locks   int
+}
+
+func (g *gatedLocker) Lock(requestID, hash, reason string) error {
+	g.mu.Lock()
+	g.locks++
+	g.mu.Unlock()
+	<-g.release
+	return nil
+}
+
+func (g *gatedLocker) Unlock() error { return nil }
+
+func (g *gatedLocker) lockCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.locks
+}
+
+// №4.5: повторная доставка задачи, которая уже СТАРТОВАЛА (seen помечен), но
+// всё ещё в полёте, обязана ПЕРЕПОДТВЕРЖДАТЬСЯ (ack) без выполнения — а не
+// глотаться inflight-дедупом молча. Иначе при потерянном первом ack задача с
+// висящим control-plane handle (lock/decommission семафором не гейтятся, их
+// handle не ограничен) оставалась бы на сервере вечно 'pending', а все
+// передоставки — механизм восстановления ack — отбрасывались бы.
+func TestSubmit_DuplicateInflightSeen_Reacks(t *testing.T) {
+	fc := &fakeClient{}
+	e, _ := newTestExecutor(t, fc)
+	release := make(chan struct{})
+	gl := &gatedLocker{release: release}
+	e.SetLocker(gl)
+
+	task := &pb.Task{TaskId: "t-hung", Lock: &pb.LockCommand{
+		RequestId: "req-hung", PasswordHash: "$2a$hash",
+	}}
+	e.Submit(task)
+	// Первая копия: ack отправлен (после markIfNew), handleLock повис в Lock.
+	waitFor(t, "ack первой доставки", func() bool { return len(fc.ackedIDs()) == 1 })
+	waitFor(t, "handle повис в Lock", func() bool { return gl.lockCount() == 1 })
+
+	e.Submit(task) // передоставка при живом inflight и помеченном seen
+	waitFor(t, "переподтверждение ack", func() bool { return len(fc.ackedIDs()) == 2 })
+
+	if got := gl.lockCount(); got != 1 {
+		t.Errorf("копия не должна выполняться: Lock вызван %d раз", got)
+	}
+	close(release)
+	e.Shutdown()
+	if got := gl.lockCount(); got != 1 {
+		t.Errorf("после завершения Lock вызван %d раз, ожидали 1", got)
+	}
+}

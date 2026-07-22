@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -342,11 +343,21 @@ func TestRequestAdminAccess_NoBotConfigured(t *testing.T) {
 	}
 }
 
+// gwLockHash — непустой bcrypt-хеш desired-лока. Агентский отчёт LOCKED лишь
+// ПОДТВЕРЖДАЕТ намерение IT, выставленное lock-эндпоинтом, и без него не применяется
+// (storage.ErrNoDesiredLock) — тесты обязаны воспроизводить этот порядок.
+const gwLockHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
 func TestReportLockStatus_Locked(t *testing.T) {
 	db := newDB(t)
 	certCtx, fingerprint := makeCertCtx(t, "lock-agent")
 	registerDevice(t, db, "lock-agent", fingerprint)
 	gw := newGW(t, db)
+
+	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", gwLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+		t.Fatalf("seed desired lock: %v", err)
+	}
 
 	resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
 		State:      pb.LockState_LOCK_STATE_LOCKED,
@@ -359,10 +370,119 @@ func TestReportLockStatus_Locked(t *testing.T) {
 		t.Error("expected Received=true")
 	}
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
 	dev, _, _ := db.GetDevice(context.Background(), devID)
 	if dev.LockStatus != "locked" {
 		t.Errorf("LockStatus = %q, want locked", dev.LockStatus)
+	}
+}
+
+// Устаревший LOCKED из durable-outbox агента, доехавший ПОСЛЕ снятия, не должен
+// воскрешать desired: unlock вычистил lock_hash, и 'locked' без хеша — команда,
+// которую агент выполнить не может, то есть устройство навсегда числилось бы
+// заблокированным в панели, оставаясь рабочим. Отчёт при этом ПРИНИМАЕТСЯ
+// (Received=true, агент не должен ретраить вечно) и зеркалится в actual —
+// расхождение desired=unlocked / actual=locked обязано быть видимым.
+func TestReportLockStatus_StaleLockedAfterUnlock_DesiredUntouched(t *testing.T) {
+	db := newDB(t)
+	certCtx, fingerprint := makeCertCtx(t, "stale-lock-agent")
+	registerDevice(t, db, "stale-lock-agent", fingerprint)
+	gw := newGW(t, db)
+
+	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	ctx := context.Background()
+	if err := db.SetDeviceLockState(ctx, devID, "locked", gwLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+		t.Fatalf("seed desired lock: %v", err)
+	}
+	if err := db.SetDeviceLockState(ctx, devID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
+		State:      pb.LockState_LOCK_STATE_LOCKED,
+		OccurredAt: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("ReportLockStatus: %v", err)
+	}
+	if !resp.Received {
+		t.Error("expected Received=true (иначе агент ретраит устаревший отчёт вечно)")
+	}
+
+	dev, _, _ := db.GetDevice(ctx, devID)
+	if dev.LockStatus != "unlocked" {
+		t.Errorf("LockStatus = %q, want unlocked — устаревший LOCKED воскресил desired", dev.LockStatus)
+	}
+	if state, _ := readLockActual(t, devID); state != "locked" {
+		t.Errorf("actual = %q, want locked — расхождение должно быть видно оператору", state)
+	}
+}
+
+// Устаревший UNLOCKED из durable-outbox агента, доехавший ПОСЛЕ выдачи НОВОЙ
+// блокировки, не должен стирать её желаемое состояние: ноутбук, вернувшийся из
+// офлайна, молча разоружал бы свежий kill-switch. Отчёт при этом принимается
+// (Received=true — иначе агент ретраит вечно) и зеркалится в actual.
+//
+// Вторая половина теста не менее важна: гард обязан пропускать снятие ТЕКУЩЕГО
+// лока обоими путями — по id lock-задачи (push) и по lock_hash (pull-реконсиляция).
+func TestReportLockStatus_StaleUnlockedAfterRelock_DesiredKept(t *testing.T) {
+	db := newDB(t)
+	certCtx, fingerprint := makeCertCtx(t, "stale-unlock-agent")
+	registerDevice(t, db, "stale-unlock-agent", fingerprint)
+	gw := newGW(t, db)
+	ctx := context.Background()
+	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
+
+	report := func(reqID string) {
+		t.Helper()
+		resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
+			RequestId:  reqID,
+			State:      pb.LockState_LOCK_STATE_UNLOCKED,
+			OccurredAt: time.Now().Unix(),
+		})
+		if err != nil {
+			t.Fatalf("ReportLockStatus(%s): %v", reqID, err)
+		}
+		if !resp.Received {
+			t.Errorf("Received=false для %s — агент будет ретраить вечно", reqID)
+		}
+	}
+	desiredStatus := func() string {
+		t.Helper()
+		st, _, _, _, _, err := db.GetDesiredLockState(ctx, devID)
+		if err != nil {
+			t.Fatalf("GetDesiredLockState: %v", err)
+		}
+		return st
+	}
+	seedLock := func(reqID string) {
+		t.Helper()
+		if err := db.SetDeviceLockState(ctx, devID, "locked", gwLockHash, "повторная блокировка", storage.LockModeOverlay, reqID); err != nil {
+			t.Fatalf("seed desired lock: %v", err)
+		}
+	}
+
+	// Лок №1 сняли офлайн, отчёт лёг в outbox. Пока машина была офлайн, IT выдал
+	// лок №2 другим паролем — и только теперь доезжает снятие ПЕРВОГО.
+	seedLock("lock-task-2")
+	report("lock-task-1")
+	if got := desiredStatus(); got != "locked" {
+		t.Errorf("desired = %q, want locked — устаревший UNLOCKED разоружил свежий лок", got)
+	}
+	if state, _ := readLockActual(t, devID); state != "unlocked" {
+		t.Errorf("actual = %q, want unlocked — расхождение должно быть видно оператору", state)
+	}
+
+	// Снятие ТЕКУЩЕГО лока по id задачи (push-путь) проходит.
+	report("lock-task-2")
+	if got := desiredStatus(); got != "unlocked" {
+		t.Errorf("desired = %q, want unlocked — гард отверг снятие текущего лока (push)", got)
+	}
+
+	// И по lock_hash (pull-путь: лок применён реконсиляцией, агент представляется хешем).
+	seedLock("lock-task-3")
+	report(gwLockHash)
+	if got := desiredStatus(); got != "unlocked" {
+		t.Errorf("desired = %q, want unlocked — гард отверг снятие текущего лока (pull)", got)
 	}
 }
 
@@ -419,7 +539,7 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 	gw := newGWWithBot(t, db, bot)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря устройства", "filevault"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-fv"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -437,7 +557,7 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 	}
 
 	// desired ЦЕЛ: статус/хеш/причина не тронуты.
-	lockStatus, lockHash, lockReason, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, lockReason, _, _, err := db.GetDesiredLockState(context.Background(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -481,7 +601,7 @@ func TestReportLockStatus_Unspecified_Dropped(t *testing.T) {
 	gw := newGW(t, db)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-u", "лок", "overlay"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-u", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -495,7 +615,7 @@ func TestReportLockStatus_Unspecified_Dropped(t *testing.T) {
 	if !resp.Received {
 		t.Error("expected Received=true (accept-and-drop)")
 	}
-	lockStatus, lockHash, _, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(context.Background(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -519,7 +639,7 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	gw := newGW(t, db)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-x", "лок", "overlay"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-x", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -533,7 +653,7 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	if !resp.Received {
 		t.Error("expected Received=true (accept-and-drop)")
 	}
-	lockStatus, lockHash, _, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(context.Background(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -556,7 +676,7 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 	gw := newGWWithBot(t, db, bot)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря устройства", "filevault"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -574,7 +694,7 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 	}
 
 	// desired ЦЕЛ (как и для FILEVAULT_REVOKED) — иначе агент самоотменил бы лок.
-	lockStatus, lockHash, lockReason, lockMode, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -620,7 +740,7 @@ func TestReportLockStatus_Unlocked_IgnoredWhenFilevaultDesired(t *testing.T) {
 	gw := newGW(t, db)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "увольнение", "filevault"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "увольнение", "filevault", "lock-task-fv"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -638,7 +758,7 @@ func TestReportLockStatus_Unlocked_IgnoredWhenFilevaultDesired(t *testing.T) {
 	}
 
 	// desired FILEVAULT-лок ЦЕЛ: не понижен в unlocked/overlay.
-	lockStatus, lockHash, _, lockMode, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -656,7 +776,7 @@ func TestFetchLockStatus_FileVaultMode(t *testing.T) {
 	gw := newGW(t, db)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря", "filevault"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-fv", "утеря", "filevault", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 	resp, err := gw.FetchLockStatus(certCtx, &pb.FetchLockStatusRequest{})
@@ -680,7 +800,7 @@ func TestFetchLockStatus_OverlayDefault(t *testing.T) {
 	gw := newGW(t, db)
 
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-ov", "лок", "overlay"); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-ov", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 	resp, err := gw.FetchLockStatus(certCtx, &pb.FetchLockStatusRequest{})

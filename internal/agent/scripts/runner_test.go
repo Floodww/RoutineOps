@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Floodww/RoutineOps/internal/agent/outbox"
+	"github.com/Floodww/RoutineOps/internal/agent/scriptenc"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"google.golang.org/protobuf/proto"
 )
@@ -83,8 +84,8 @@ func TestDefaultExecBackgroundChildDoesNotHang(t *testing.T) {
 	if !strings.Contains(res.stdout, "hi") {
 		t.Errorf("stdout=%q, ожидали вывод до фонового потомка", res.stdout)
 	}
-	if !strings.Contains(res.stderr, "фоновые потомки") {
-		t.Errorf("stderr=%q, ожидали пометку о фоновых потомках", res.stderr)
+	if !strings.Contains(res.stderr, "будут прерваны") {
+		t.Errorf("stderr=%q, ожидали ЧЕСТНУЮ пометку WaitDelayNote (пайпы закрыты — пишущие потомки будут прерваны)", res.stderr)
 	}
 	if elapsed >= 20*time.Second {
 		t.Fatalf("defaultExec висел %v — WaitDelay не сработал", elapsed)
@@ -96,6 +97,57 @@ func TestDefaultExecUnknownInterpreter(t *testing.T) {
 	if res.exitCode != -1 {
 		t.Fatalf("ожидали exit -1 для неизвестного интерпретатора, got %d", res.exitCode)
 	}
+}
+
+// №4.5 (регресс порядка sanitize/append): пометка обязана пережить UTF-8-
+// санитайз, даже когда он РАСШИРЯЕТ хвост за MaxOutputBytes. defaultExec
+// заливает stderr одиночными 0xC0 (каждый → 3-байтовый U+FFFD при санитайзе,
+// ~3x рост) до потолка CaptureBuffer и валится по таймауту (ветка с пометкой
+// «прервано по таймауту»). Прежний порядок (AppendNote на СЫРОЙ хвост →
+// SanitizeUTF8 → TruncateOutput в Run) уводил пометку за 256 КиБ и срезал её;
+// правильный (Sanitize → AppendNote) держит её. Пишем через Runner.Run, чтобы
+// пройти и финальный TruncateOutput. Дедлайн 500мс против мгновенной заливки —
+// детерминизм не на тайминге, а на факте DeadlineExceeded.
+func TestDefaultExecNoteSurvivesExpandingSanitize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh + /dev/zero + tr: unix-платформы")
+	}
+	var got []byte
+	r := &Runner{log: discardLog(), exec: defaultExec,
+		enqueue: func(_ string, data []byte) error { got = data; return nil }}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// ЧЕРЕДУЮЩИЙСЯ паттерн "A\300": каждый одиночный 0xC0 между валидными 'A' —
+	// отдельный невалидный ПРОГОН, поэтому SanitizeUTF8 (strings.ToValidUTF8
+	// заменяет каждый прогон одним U+FFFD) расширяет его в 3 байта, а не
+	// схлопывает. Сплошной прогон 0xC0 (tr) дал бы ОДИН U+FFFD на весь хвост и
+	// расширения бы не было — баг не воспроизвёлся бы. 300 КиБ пар → CaptureBuffer
+	// срежет до ~260 КиБ сырых, после санитайза ~530 КиБ; затем блок до дедлайна.
+	r.Run(ctx, &pb.ScriptPolicy{
+		PolicyId:      "p-expand",
+		Interpreter:   "shell",
+		ScriptContent: `awk 'BEGIN{for(i=0;i<300000;i++)printf "A\300"}' >&2; sleep 10`,
+	}, pb.ScriptTrigger_SCRIPT_TRIGGER_UNSPECIFIED)
+
+	var result pb.ScriptResult
+	if err := proto.Unmarshal(got, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result.GetStderr(), "прервано по таймауту") {
+		t.Errorf("пометка о таймауте не пережила расширяющий санитайз (регресс порядка): хвост=%q",
+			tail(result.GetStderr(), 80))
+	}
+	if n := len(result.GetStderr()); n > scriptenc.MaxOutputBytes+512 {
+		t.Errorf("stderr=%d байт, ожидали ≤ MaxOutputBytes(+пометка)", n)
+	}
+}
+
+// tail возвращает последние n байт строки (для диагностики без гигантских дампов).
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // Гарантия, что Runner удовлетворяет интерфейсу policyRunner.

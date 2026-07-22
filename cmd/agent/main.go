@@ -949,6 +949,25 @@ func applyStatePaths(cfg *config.Config, lay service.Layout) {
 	rebase(&cfg.FilevaultEscrowDir, config.DefaultFilevaultEscrowDir, "filevault_escrow")
 }
 
+// durableUnlockDir — каталог durable-памяти последнего локально снятого лока
+// ("" = память отключена, RAM-only). Файл живёт ТОЛЬКО в машинном каталоге
+// состояния lay.DataDir: на Windows его admin-only DACL ставит EnsureDataDir,
+// на unix он под root с relocateForService. Каталог task-state, с ним не
+// совпадающий, означает одно из: дев-запуск с относительными дефолтами, явный
+// -task-state оператора, отказ EnsureDataDir на старте службы — во всех трёх
+// случаях durable-память выключается: fail-safe (после ребута возможен лишний
+// ре-лок до догона сервера), но файл никогда не оказывается в незащищённом
+// месте, где его можно подделать (ревью #7, п. 2.3). Платформы без машинной
+// раскладки (lay.DataDir == "") сохраняют прежний вывод из task-state — Locker
+// там лог-заглушка, поверхности подделки замка нет.
+func durableUnlockDir(cfg *config.Config, lay service.Layout) string {
+	dir := filepath.Dir(cfg.TaskStateFile)
+	if lay.DataDir == "" || dir == lay.DataDir {
+		return dir
+	}
+	return ""
+}
+
 // relocateForService раскладывает агента в постоянные пути службы (macOS/Linux):
 // бинарь и mTLS-материал из временного каталога enroll переносятся в стабильные
 // каталоги, а изменяемое состояние (outbox, *.seen, lock, forbidden) переводится
@@ -1621,17 +1640,35 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	lockPath := lockStatePath(cfg)
 	// Каталог состояния должен быть доступен на запись юзер-сессии (лок-экран
 	// снимает блокировку, трей кладёт заявку на права) — служба под SYSTEM ставит ACL.
+	//
+	// КАКОЙ каталог хардится на Windows-службе: LockStateFile здесь пуст (на
+	// Windows его НЕ переставляет ни applyStatePaths, ни relocateForService —
+	// relocateForService идёт только при lay.Relocate, а это macOS/Linux), поэтому
+	// lockStatePath → lock.DefaultPath() = ProgramData\RoutineOps\lock.json, и
+	// filepath.Dir даёт КОРЕНЬ ProgramData\RoutineOps. Именно его EnsureUserWritableDir
+	// защищает split-ACE + владелец=Администраторы (ревью #7 п. 2.2): корень нельзя
+	// унести, а вложенный admin-only `state` (durable-память снятия) — подменить,
+	// т.к. на корне у Users нет FILE_DELETE_CHILD. НЕ спутать с mac/linux-значением
+	// LockStateFile=DataDir/shared/lock.json (relocateForService) — там лок лог-
+	// заглушка и durable-файл под root-владением DataDir, NTFS-поверхности подмены нет.
 	if err := lock.EnsureUserWritableDir(filepath.Dir(lockPath)); err != nil {
 		log.Warn("lock: не удалось открыть каталог состояния на запись пользователю", slog.Any("error", err))
 	}
 	self, _ := os.Executable()
 	locker := lock.New(lockPath, lock.NewPlatformLocker(self, log), log)
-	// Durable-память локального снятия — в ЗАЩИЩЁННОМ каталоге состояния (рядом
-	// с tasks.seen: ProgramData\...\state на Windows, DataDir на unix), а НЕ в
-	// user-writable каталоге lock.json: оттуда подделка файла при остановленной
-	// службе молча и бессрочно подавляла бы пере-запирание (#7). Путь выводится
-	// из TaskStateFile — те же каталог и права, без новых флагов службы.
-	locker.SetDurableUnlockPath(filepath.Join(filepath.Dir(cfg.TaskStateFile), "lock.last_unlocked"))
+	// Durable-память локального снятия — ТОЛЬКО в защищённом машинном каталоге
+	// состояния (ProgramData\...\state на Windows под admin-only DACL, DataDir
+	// под root на unix), а НЕ в user-writable каталоге lock.json: оттуда
+	// подделка при остановленной службе молча подавляла бы пере-запирание (#7).
+	// Каталог сверяется с InstallLayout (durableUnlockDir): прежний вывод «из
+	// TaskStateFile» следовал за оператором — явный -task-state в user-writable
+	// месте уводил туда и durable-файл (ревью #7, п. 2.3).
+	if dud := durableUnlockDir(cfg, service.InstallLayout()); dud != "" {
+		locker.SetDurableUnlockPath(filepath.Join(dud, "lock.last_unlocked"))
+	} else {
+		log.Warn("lock: durable-память локального снятия отключена (RAM-only) — каталог task-state вне машинного каталога состояния",
+			slog.String("task_state", cfg.TaskStateFile))
+	}
 	if err := locker.Load(); err != nil {
 		log.Error("lock: загрузка состояния блокировки", slog.Any("error", err))
 	}

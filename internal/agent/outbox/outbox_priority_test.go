@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -102,6 +103,59 @@ func TestFileKind(t *testing.T) {
 	for name, want := range cases {
 		if got := fileKind(name); got != want {
 			t.Errorf("fileKind(%q)=%q, want %q", name, got, want)
+		}
+	}
+}
+
+// №4.3: enforceLimit вне q.mu защищал только запись СВОЕГО вызова (исключение
+// f == newName) — свежий файл ПАРАЛЛЕЛЬНОГО Enqueue лежал в списке обычным
+// кандидатом и вытеснялся чужим проходом, а его собственный проход видел
+// очередь уже в пределах max и возвращал nil: ложный durable-успех, вызывающий
+// не уходил в фолбэк. С Enqueue под q.mu каждый параллельный evictable-Enqueue
+// в очередь, забитую protected, обязан вернуть ошибку.
+func TestEnqueue_ParallelEvictableIntoProtectedFullQueue_AllError(t *testing.T) {
+	dir := t.TempDir()
+	q, err := New(dir, 2, time.Hour, discardLog(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := q.Enqueue(KindSecurity, []byte("alert")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const par = 8
+	begin := make(chan struct{})
+	errs := make(chan error, par)
+	var wg sync.WaitGroup
+	for i := 0; i < par; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-begin
+			errs <- q.Enqueue(KindTask, []byte("task result"))
+		}()
+	}
+	close(begin)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err == nil {
+			t.Fatal("параллельный Enqueue вернул durable-успех, а его запись вытеснена чужим enforceLimit (№4.3)")
+		}
+	}
+	files, err := q.list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("ожидалось 2 записи (protected целы), got %d", len(files))
+	}
+	for _, f := range files {
+		if fileKind(f) != KindSecurity {
+			t.Fatalf("protected-запись вытеснена параллельным evictable-Enqueue: %v", files)
 		}
 	}
 }

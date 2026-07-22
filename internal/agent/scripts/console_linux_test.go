@@ -14,6 +14,11 @@ func TestParseLoginctl(t *testing.T) {
 		{"графический сеанс за seat0", "   3 1000 alice seat0 tty2\n", "alice"},
 		{"старый systemd без колонки TTY", "   3 1000 alice seat0\n", "alice"},
 		{"ssh-сеанс (seat='-') пропускается", "  15 1001 deploy - -\n", ""},
+		// Пустой SEAT схлопывается strings.Fields → в f[3] попадает pts/tty. Прежнее
+		// `seat != "-"` принимало это за физический вход → ложные LOGIN/LOGOUT на
+		// каждый ssh-коннект (#1.4). Prefix "seat" отсекает.
+		{"ssh с pts в колонке места (пустой seat схлопнут) пропускается", "  20 1001 deploy pts/0\n", ""},
+		{"текстовый сеанс tty без места пропускается", "  21 1000 alice tty3\n", ""},
 		{"ssh пропущен, локальный найден", "  15 1001 deploy - -\n   3 1000 alice seat0 tty2\n", "alice"},
 		{"root не возвращается никогда", "   1    0 root seat0 tty1\n", ""},
 		{"строка-заголовок (UID не число) пропускается", "SESSION UID USER SEAT TTY\n   3 1000 alice seat0 tty2\n", "alice"},
