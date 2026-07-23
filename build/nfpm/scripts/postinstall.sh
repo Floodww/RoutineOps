@@ -57,10 +57,18 @@ if [ -f "$ENROLL_ENV" ] && consume_enroll_env "$ENROLL_ENV"; then
     echo "Найден доверенный $ENROLL_ENV. Выполняю автоматическую регистрацию..."
     if [ -n "$ENROLL_URL" ] && [ -n "$ENROLL_TOKEN" ] && [ -n "$ENROLL_SERVER" ] \
        && [ -n "$CA_URL" ] && [ -n "$CA_SHA256" ]; then
-        /usr/local/bin/RoutineOps-agent enroll -install-service \
+        if /usr/local/bin/RoutineOps-agent enroll -install-service \
             -enroll-url "$ENROLL_URL" -token "$ENROLL_TOKEN" -server "$ENROLL_SERVER" \
-            -ca "$CA_PATH" -ca-url "$CA_URL" -ca-sha256 "$CA_SHA256" \
-            || echo "Ошибка авто-регистрации"
+            -ca "$CA_PATH" -ca-url "$CA_URL" -ca-sha256 "$CA_SHA256"; then
+            # Файл отработал — удаляем. Он стоячий креденшл: bulk-токен многоразовый и
+            # заводит устройства, а лежит на КАЖДОМ эндпоинте. Плюс postinstall бежит и
+            # на апгрейде пакета: уцелевший файл молча переэнролливает хост (и воскрешал
+            # бы списанный). Оператору для повторного энролла файл надо положить заново.
+            rm -f "$ENROLL_ENV"
+            echo "Регистрация выполнена, $ENROLL_ENV удалён."
+        else
+            echo "Ошибка авто-регистрации ($ENROLL_ENV оставлен для повтора)" >&2
+        fi
         exit 0
     fi
     echo "В $ENROLL_ENV не хватает переменных." >&2

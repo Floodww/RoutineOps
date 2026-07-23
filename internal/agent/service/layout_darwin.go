@@ -8,10 +8,12 @@ package service
 // перезагрузки демон стартует с несуществующим бинарём/сертами.
 func InstallLayout() Layout {
 	return Layout{
-		Relocate: true,
-		BinPath:  "/usr/local/bin/RoutineOps-agent",
-		DataDir:  "/var/lib/RoutineOps-agent",
-		CertDir:  "/var/lib/RoutineOps-agent/certs",
-		LogDir:   "/Library/Logs/RoutineOps",
+		Relocate:        true,
+		BinPath:         "/usr/local/bin/RoutineOps-agent",
+		DataDir:         "/var/lib/RoutineOps-agent",
+		CertDir:         "/var/lib/RoutineOps-agent/certs",
+		LogDir:          "/Library/Logs/RoutineOps",
+		EnrollEnvPath:   darwinEnrollEnvPath,
+		BootstrapCAPath: darwinBootstrapCAPath,
 	}
 }

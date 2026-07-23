@@ -49,6 +49,10 @@ type Plan struct {
 type Hooks struct {
 	StopService  func() error // снять службу (service.Uninstall)
 	DisarmTamper func()       // снять tamper (Windows Cleanup; macOS Disarm+Unlock)
+	// PurgeKeystore удаляет идентичность (cert + приватный ключ) из хранилища ОС
+	// (Keychain/Cert Store). Ставится только при cert-source=keystore: там
+	// идентичность живёт вне файлов и файловый план её не достаёт. nil — режим file.
+	PurgeKeystore func() error
 }
 
 // Run выполняет teardown. Возвращает ошибку только планирования отложенного
@@ -62,6 +66,14 @@ func Run(plan Plan, hooks Hooks, log *slog.Logger) error {
 	if hooks.StopService != nil {
 		if err := hooks.StopService(); err != nil {
 			log.Warn("decommission: снятие службы не удалось — продолжаю снос", slog.Any("error", err))
+		}
+	}
+	// Идентичность в хранилище ОС — пока процесс ещё привилегирован и до удаления
+	// файлов/бинаря. Best-effort: остаточный ключевой материал на списанном железе —
+	// вопрос гигиены, доступа он не даёт (сервер режет decommissioned на границе).
+	if hooks.PurgeKeystore != nil {
+		if err := hooks.PurgeKeystore(); err != nil {
+			log.Warn("decommission: чистка идентичности в хранилище ОС не удалась — продолжаю снос", slog.Any("error", err))
 		}
 	}
 

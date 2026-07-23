@@ -8,6 +8,7 @@ import (
 
 	"github.com/Floodww/RoutineOps/internal/agent/config"
 	"github.com/Floodww/RoutineOps/internal/agent/decommission"
+	"github.com/Floodww/RoutineOps/internal/agent/keystore"
 	"github.com/Floodww/RoutineOps/internal/agent/service"
 	"github.com/Floodww/RoutineOps/internal/agent/tamper"
 )
@@ -32,6 +33,17 @@ func runDecommission(cfg *config.Config, reason string, log *slog.Logger) {
 			_ = tamper.Disarm()
 		},
 	}
+	if cfg.CertSource == keystore.SourceKeystore {
+		// В режиме keystore идентичность живёт НЕ в файлах (cfg.CertFile/KeyFile —
+		// нетронутые дефолты в никуда), а в Keychain/Cert Store — файловый план её
+		// не достаёт, и приватный ключ пережил бы снос. Хуком, а не полем плана,
+		// чтобы пакет decommission не тянул keystore (та же развязка, что service/
+		// tamper). ProvisionTarget: тот же keychain/scope, куда клал Import при
+		// энролле (под root/LocalSystem — системное хранилище).
+		hooks.PurgeKeystore = func() error {
+			return keystore.Purge(cfg.KeystoreLabel, keystore.ProvisionTarget())
+		}
+	}
 	log.Warn("decommission: начинаю снос агента", slog.String("reason", reason))
 	if err := decommission.Run(plan, hooks, log); err != nil {
 		log.Error("decommission: снос завершился с ошибкой", slog.Any("error", err))
@@ -50,6 +62,13 @@ func buildDecommissionPlan(cfg *config.Config) decommission.Plan {
 		lockStatePath(cfg), statusFilePath(cfg), adminRequestPath(cfg),
 		cfg.TaskStateFile, cfg.ScriptDedupFile,
 		cfg.ForbiddenListFile, cfg.UpdateFloorFile,
+		// Материалы авто-энролла, положенные оператором (упаковочные скрипты их
+		// только читают): enroll.env несёт multi-use ENROLL_TOKEN — живой креденшл,
+		// по которому переустановка пакета молча вернула бы списанную машину в
+		// парк; bootstrap-CA — гигиена того же каталога. Именно Files, а не Dirs:
+		// /etc/routineops не наш каталог целиком, и /etc в чёрном списке
+		// isDangerousDir. На Windows пути пусты (MSI env-файлом не пользуется).
+		lay.EnrollEnvPath, lay.BootstrapCAPath,
 	}
 
 	dirs := dedupNonEmpty([]string{
@@ -57,6 +76,10 @@ func buildDecommissionPlan(cfg *config.Config) decommission.Plan {
 		cfg.FilevaultEscrowDir,
 		lay.DataDir,
 		lay.CertDir,
+		// Каталог логов демона: на macOS (/Library/Logs/RoutineOps) и Linux он вне
+		// DataDir и без этой строки переживал снос. На Windows пуст (логи под
+		// ProgramData, её сносит windowsLockDir/делетер).
+		lay.LogDir,
 		// Windows: общий машинный каталог ProgramData\RoutineOps (lock/status/
 		// admin-request + подкаталог state). На unix каталог lock.json может быть
 		// разделяемым temp — там его целиком не сносим, ограничиваемся файлами выше.

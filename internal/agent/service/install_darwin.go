@@ -143,6 +143,11 @@ func Uninstall() error {
 	if os.Geteuid() == 0 {
 		_ = exec.Command("launchctl", "bootout", "system/"+Name).Run()
 		_ = exec.Command("launchctl", "unload", "-w", path).Run()
+		// Receipt .pkg: без forget `pkgutil --pkgs` числит агента установленным и
+		// после сноса — аналог ARP-записи Windows, которую там снимает msiexec /x.
+		// Best-effort: при ручной установке бинарём receipt-а нет («No receipt») —
+		// это норма, не сбой снятия службы.
+		_ = exec.Command("pkgutil", "--forget", pkgReceiptIdentifier).Run()
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("удаление plist %s: %w", path, err)

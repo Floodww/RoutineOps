@@ -39,6 +39,16 @@ var ErrEnrollTokenAlreadyUsed = errors.New("enrollment token already used")
 // возврат в строй обязан идти через выделенную ручку, а не в обход неё.
 var ErrDeviceNotReenrollable = errors.New("device status forbids reenroll")
 
+// ErrDeviceNotEnrollable — редим токена для устройства в статусе, который запрещает
+// самостоятельный возврат в строй (см. notEnrollableStatuses).
+var ErrDeviceNotEnrollable = errors.New("device status forbids enroll")
+
+// notEnrollableStatuses — статусы, из которых устройство НЕ возвращается в строй
+// само: только явным действием оператора (approve / отдельная ручка). Один список на
+// оба входа — редим токена (EnrollDevice) и реенролл (ResetDeviceForReenroll), иначе
+// закрытая в одном месте дверь остаётся открытой в другом.
+var notEnrollableStatuses = []string{"pending_approval", "rejected", "decommissioned", "blocked"}
+
 func (db *DB) CreatePendingDevice(ctx context.Context, hostname, os string) (*Device, error) {
 	var d Device
 	err := db.pool.QueryRow(ctx, `
@@ -254,12 +264,20 @@ func (db *DB) EnrollDevice(ctx context.Context, tokenID, deviceID, certSerial, c
 		// Токен уже погашен (в т.ч. параллельным redeem) — единоразовость (E/TOCTOU).
 		return ErrEnrollTokenAlreadyUsed
 	}
-	if _, err := tx.Exec(ctx, `
+	// Гейт по статусу — как в ResetDeviceForReenroll: уцелевший на машине enroll.env
+	// (или просто невыбранный токен) не должен воскрешать списанное/заблокированное
+	// устройство в 'enrolled' мимо оператора. Ошибка откатывает и погашение токена,
+	// поэтому неудачная попытка не сжигает его молча.
+	ct, err = tx.Exec(ctx, `
 		UPDATE devices SET status = 'enrolled', cert_serial = $2, enrolled_at = now(),
 		    certificate_fingerprint = COALESCE(NULLIF($3, ''), certificate_fingerprint)
-		WHERE id = $1
-	`, deviceID, certSerial, certFingerprint); err != nil {
+		WHERE id = $1 AND status <> ALL($4)
+	`, deviceID, certSerial, certFingerprint, notEnrollableStatuses)
+	if err != nil {
 		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrDeviceNotEnrollable
 	}
 	return tx.Commit(ctx)
 }
@@ -295,8 +313,8 @@ func (db *DB) ResetDeviceForReenroll(ctx context.Context, deviceID, newToken str
 	// закрыли, а эту забыли. В storage, чтобы закрыть для всех вызывающих сразу.
 	ct, err := tx.Exec(ctx,
 		`UPDATE devices SET status = 'pending', cert_serial = NULL, enrolled_at = NULL
-		 WHERE id = $1 AND status NOT IN ('pending_approval', 'rejected', 'decommissioned', 'blocked')`,
-		deviceID)
+		 WHERE id = $1 AND status <> ALL($2)`,
+		deviceID, notEnrollableStatuses)
 	if err != nil {
 		return err
 	}

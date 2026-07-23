@@ -2,9 +2,12 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
 func TestCreateEnrollmentToken_And_GetByToken(t *testing.T) {
@@ -94,6 +97,47 @@ func TestEnrollDevice_MarksTokenUsedAndDeviceEnrolled(t *testing.T) {
 	}
 	if st != "enrolled" {
 		t.Errorf("по отпечатку статус = %q, want enrolled (отпечаток не сохранён при enroll)", st)
+	}
+}
+
+// Уцелевший на машине enroll.env (или просто невыбранный токен) не должен воскрешать
+// списанное устройство: EnrollDevice гейтит по статусу так же, как реенролл. Токен при
+// отказе НЕ гасится — вся операция в одной транзакции.
+func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		mark   func(*storage.DB, string) error
+	}{
+		{"decommissioned", func(db *storage.DB, id string) error {
+			return db.MarkDeviceDecommissioned(context.Background(), id)
+		}},
+		{"blocked", func(db *storage.DB, id string) error {
+			return db.UpdateDeviceStatus(context.Background(), id, "blocked")
+		}},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			db := newDB(t)
+			d := mustCreateDevice(t, db, fmt.Sprintf("host-enrollgate-%s", uniq(t)), "linux")
+			tok := fmt.Sprintf("tok-enrollgate-%s", uniq(t))
+			if err := db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
+				t.Fatalf("CreateEnrollmentToken: %v", err)
+			}
+			tokenRec, _ := db.GetEnrollmentToken(context.Background(), tok)
+			if err := tc.mark(db, d.ID); err != nil {
+				t.Fatalf("перевод в %s: %v", tc.status, err)
+			}
+
+			err := db.EnrollDevice(context.Background(), tokenRec.ID, d.ID, "CERT-SERIAL-GATE", "fpgate")
+			if !errors.Is(err, storage.ErrDeviceNotEnrollable) {
+				t.Fatalf("EnrollDevice = %v, want ErrDeviceNotEnrollable", err)
+			}
+			if st, _ := db.GetDeviceStatusByID(context.Background(), d.ID); st != tc.status {
+				t.Errorf("устройство воскрешено энроллом: status = %q, want %s", st, tc.status)
+			}
+			if after, _ := db.GetEnrollmentToken(context.Background(), tok); after == nil || after.UsedAt != nil {
+				t.Error("токен погашен при отказе — транзакция не откатилась")
+			}
+		})
 	}
 }
 

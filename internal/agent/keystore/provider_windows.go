@@ -125,6 +125,9 @@ func acquireNCryptKey(ctx *windows.CertContext) (windows.Handle, error) {
 		return 0, fmt.Errorf("cert store: CryptAcquireCertificatePrivateKey: %w", err)
 	}
 	if keySpec != windows.CERT_NCRYPT_KEY_SPEC {
+		// Защитная ветка (с ONLY_NCRYPT-флагом практически недостижима), но хэндл
+		// при успешном Acquire уже наш (callerFree) — без free он утёк бы.
+		freeNCryptHandle(h)
 		return 0, fmt.Errorf("cert store: ключ не CNG/NCrypt (keySpec=%d)", keySpec)
 	}
 	return h, nil

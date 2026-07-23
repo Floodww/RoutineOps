@@ -24,6 +24,11 @@ func scheduleSelfDelete(binPath string, leftover []string, log *slog.Logger) err
 		log.Warn("decommission: не удалить бинарь", slog.String("path", binPath), slog.Any("error", err))
 		return err
 	}
+	// Дерегистрация пакета (dpkg/rpm) — СТРОГО после удаления бинаря: preremove
+	// пакета гардит вызов `agent uninstall` по [ -x бинарь ]; с ещё живым бинарём
+	// dpkg -r дёрнул бы systemctl disable --now и послал SIGTERM самому процессу
+	// сноса на полпути. С удалённым бинарём гард false → preremove тихо проходит.
+	deregisterPackage(log)
 	log.Warn("decommission: бинарь удалён — агент снят с устройства", slog.String("path", binPath))
 	return nil
 }

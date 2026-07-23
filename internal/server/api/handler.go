@@ -881,6 +881,12 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 	// Сохраняем отпечаток выданного серта: иначе после переустановки heartbeat
 	// создаст дубль устройства вместо обновления (БАГ 4).
 	if err := h.db.EnrollDevice(r.Context(), tok.ID, deviceID, certSerial, fingerprint); err != nil {
+		if errors.Is(err, storage.ErrDeviceNotEnrollable) {
+			// Списанное/заблокированное/неодобренное устройство не возвращается в строй
+			// само по уцелевшему токену — только решением оператора.
+			http.Error(w, "device status forbids enroll", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

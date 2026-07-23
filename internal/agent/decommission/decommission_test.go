@@ -75,6 +75,21 @@ func TestRun_ContinuesWhenStopServiceFails(t *testing.T) {
 	}
 }
 
+// Run зовёт PurgeKeystore-хук и не прерывает снос на его ошибке (best-effort,
+// как StopService): устройство списывается в любом случае.
+func TestRun_CallsPurgeKeystoreHookAndContinuesOnError(t *testing.T) {
+	var purged bool
+	err := Run(Plan{}, Hooks{
+		PurgeKeystore: func() error { purged = true; return os.ErrPermission },
+	}, quietLog())
+	if err != nil {
+		t.Fatalf("Run не должен падать на ошибке PurgeKeystore: %v", err)
+	}
+	if !purged {
+		t.Error("PurgeKeystore не вызван — идентичность в хранилище ОС пережила бы снос")
+	}
+}
+
 // removeDirSafe обязан отказаться удалять корень ФС и системные каталоги.
 func TestRemoveDirSafe_RejectsDangerous(t *testing.T) {
 	dangerous := []string{string(filepath.Separator), ""}
