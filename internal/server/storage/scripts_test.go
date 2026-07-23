@@ -2,8 +2,12 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
 func TestCreateScript_ReturnsScript(t *testing.T) {
@@ -194,5 +198,82 @@ func TestCreateDeviceGroup_And_AddRemoveMember(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Имя скрипта/скрипт-политики — идентичность ресурса для YAML-apply (миграция 033),
+// поэтому дубли обязаны отбиваться, причём нечувствительно к регистру и краевым
+// пробелам: именно так люди создают «второй такой же» и потом не понимают, какой из
+// них правит apply.
+func TestDuplicateNames_ScriptsAndPolicies(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+
+	name := fmt.Sprintf("Проверка антивируса %s", uniq(t))
+	s, err := db.CreateScript(ctx, name, "windows", "echo ok")
+	if err != nil {
+		t.Fatalf("CreateScript: %v", err)
+	}
+	if _, err := db.CreateScript(ctx, "  "+strings.ToUpper(name)+" ", "windows", "echo dup"); !errors.Is(err, storage.ErrDuplicateName) {
+		t.Errorf("дубль имени скрипта = %v, want ErrDuplicateName", err)
+	}
+
+	// Переименование в занятое имя — тот же конфликт, что и создание.
+	other, err := db.CreateScript(ctx, name+" второй", "windows", "echo other")
+	if err != nil {
+		t.Fatalf("CreateScript (второй): %v", err)
+	}
+	if _, err := db.UpdateScript(ctx, other.ID, name, "windows", "echo other"); !errors.Is(err, storage.ErrDuplicateName) {
+		t.Errorf("переименование в занятое = %v, want ErrDuplicateName", err)
+	}
+
+	polName := fmt.Sprintf("Ежедневная проверка %s", uniq(t))
+	if _, err := db.CreateScriptPolicy(ctx, polName, s.ID, "manual", nil, nil); err != nil {
+		t.Fatalf("CreateScriptPolicy: %v", err)
+	}
+	if _, err := db.CreateScriptPolicy(ctx, strings.ToLower(polName), s.ID, "manual", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
+		t.Errorf("дубль имени скрипт-политики = %v, want ErrDuplicateName", err)
+	}
+}
+
+// UpdateScriptPolicy сохраняет id (на него ссылаются назначения групп) и историю, меняя
+// только содержимое политики. Без этой ручки apply правил бы расписание через
+// delete+create — с потерей и того, и другого.
+func TestUpdateScriptPolicy_KeepsIDChangesFields(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	s1, _ := db.CreateScript(ctx, fmt.Sprintf("upd-pol-script-a-%s", uniq(t)), "linux", "echo a")
+	s2, _ := db.CreateScript(ctx, fmt.Sprintf("upd-pol-script-b-%s", uniq(t)), "linux", "echo b")
+
+	name := fmt.Sprintf("Политика %s", uniq(t))
+	p, err := db.CreateScriptPolicy(ctx, name, s1.ID, "schedule", []byte(`{"cron":"0 9 * * *"}`), nil)
+	if err != nil {
+		t.Fatalf("CreateScriptPolicy: %v", err)
+	}
+
+	upd, err := db.UpdateScriptPolicy(ctx, p.ID, name+" (новое имя)", s2.ID, "on_connect", nil, nil)
+	if err != nil {
+		t.Fatalf("UpdateScriptPolicy: %v", err)
+	}
+	if upd.ID != p.ID {
+		t.Errorf("id изменился: %s → %s", p.ID, upd.ID)
+	}
+	if upd.ScriptID != s2.ID || upd.TriggerType != "on_connect" {
+		t.Errorf("поля не обновились: %+v", upd)
+	}
+	if string(upd.ScheduleConfig) != "null" {
+		t.Errorf("расписание не сброшено: %s", upd.ScheduleConfig)
+	}
+
+	// Несуществующая политика — (nil, nil), хендлер отдаёт 404, а не 500.
+	got, err := db.UpdateScriptPolicy(ctx, "00000000-0000-0000-0000-000000000000", "x", s1.ID, "on_connect", nil, nil)
+	if err != nil || got != nil {
+		t.Errorf("UpdateScriptPolicy(нет такой) = %v, %v; want nil, nil", got, err)
+	}
+
+	// Переименование в занятое имя — 409, а не 500.
+	other, _ := db.CreateScriptPolicy(ctx, name+" сосед", s1.ID, "on_connect", nil, nil)
+	if _, err := db.UpdateScriptPolicy(ctx, other.ID, name+" (новое имя)", s1.ID, "on_connect", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
+		t.Errorf("переименование в занятое = %v, want ErrDuplicateName", err)
 	}
 }

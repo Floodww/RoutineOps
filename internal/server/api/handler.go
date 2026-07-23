@@ -239,6 +239,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Put("/scripts/{id}", h.updateScript)
 			r.Delete("/scripts/{id}", h.deleteScript)
 			r.Post("/script-policies", h.createScriptPolicy)
+			r.Put("/script-policies/{id}", h.updateScriptPolicy)
 			r.Delete("/script-policies/{id}", h.deleteScriptPolicy)
 			r.Patch("/script-policies/{id}/toggle", h.toggleScriptPolicy)
 			r.Post("/device-groups", h.createDeviceGroup)

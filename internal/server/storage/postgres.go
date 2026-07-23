@@ -1631,6 +1631,21 @@ func (db *DB) ListScripts(ctx context.Context) ([]Script, error) {
 	return scripts, rows.Err()
 }
 
+// ErrDuplicateName — имя ресурса занято (уникальные индексы по lower(btrim(name)):
+// device_groups в 026, scripts и policies в 033). Имя — идентичность ресурса для
+// YAML-apply, поэтому занятое имя обязано отдаваться 409, а не 500.
+var ErrDuplicateName = errors.New("resource name already exists")
+
+// asDuplicateName переводит нарушение уникального индекса в ErrDuplicateName, прочие
+// ошибки пропускает как есть.
+func asDuplicateName(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return ErrDuplicateName
+	}
+	return err
+}
+
 func (db *DB) CreateScript(ctx context.Context, name, platform, content string) (*Script, error) {
 	var s Script
 	err := db.pool.QueryRow(ctx, `
@@ -1638,7 +1653,10 @@ func (db *DB) CreateScript(ctx context.Context, name, platform, content string) 
 		VALUES ($1, $2, $3)
 		RETURNING id, name, platform, content, created_at, updated_at
 	`, name, platform, content).Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
-	return &s, err
+	if err != nil {
+		return nil, asDuplicateName(err)
+	}
+	return &s, nil
 }
 
 func (db *DB) GetScript(ctx context.Context, id string) (*Script, error) {
@@ -1669,7 +1687,7 @@ func (db *DB) UpdateScript(ctx context.Context, id, name, platform, content stri
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, asDuplicateName(err)
 	}
 	return &s, nil
 }
@@ -1749,7 +1767,7 @@ func (db *DB) CreateScriptPolicy(ctx context.Context, name, scriptID, triggerTyp
 	`, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
 		Scan(&p.ID, &p.Name, &p.ScriptID, &p.TriggerType, &schedRaw, &eventRaw, &p.IsActive, &p.CreatedAt)
 	if err != nil {
-		return nil, err
+		return nil, asDuplicateName(err)
 	}
 	p.ScheduleConfig = json.RawMessage(schedRaw)
 	p.EventTriggerConfig = json.RawMessage(eventRaw)
@@ -1759,6 +1777,34 @@ func (db *DB) CreateScriptPolicy(ctx context.Context, name, scriptID, triggerTyp
 func (db *DB) DeleteScriptPolicy(ctx context.Context, id string) error {
 	_, err := db.pool.Exec(ctx, `DELETE FROM policies WHERE id = $1`, id)
 	return err
+}
+
+// UpdateScriptPolicy переписывает политику целиком (кроме is_active — им управляет
+// ToggleScriptPolicy). Нужен для идемпотентного YAML-apply: без него правка расписания
+// требовала бы delete+create, а это потеря истории результатов и id, на который
+// ссылаются назначения групп. (nil, nil) = политики нет → 404.
+func (db *DB) UpdateScriptPolicy(ctx context.Context, id, name, scriptID, triggerType string, scheduleConfig, eventTriggerConfig []byte) (*ScriptPolicy, error) {
+	var p ScriptPolicy
+	var schedRaw, eventRaw string
+	err := db.pool.QueryRow(ctx, `
+		UPDATE policies
+		SET    name = $2, script_id = $3, trigger_type = $4,
+		       schedule_config = $5::jsonb, event_trigger_config = $6::jsonb
+		WHERE  id::text = $1
+		RETURNING id, name, script_id, trigger_type,
+		          COALESCE(schedule_config::text, 'null'), COALESCE(event_trigger_config::text, 'null'),
+		          is_active, created_at
+	`, id, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
+		Scan(&p.ID, &p.Name, &p.ScriptID, &p.TriggerType, &schedRaw, &eventRaw, &p.IsActive, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, asDuplicateName(err)
+	}
+	p.ScheduleConfig = json.RawMessage(schedRaw)
+	p.EventTriggerConfig = json.RawMessage(eventRaw)
+	return &p, nil
 }
 
 func (db *DB) ToggleScriptPolicy(ctx context.Context, id string, active bool) error {

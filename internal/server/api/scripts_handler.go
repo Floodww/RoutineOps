@@ -43,6 +43,12 @@ func (h *Handler) createScript(w http.ResponseWriter, r *http.Request) {
 	}
 	script, err := h.db.CreateScript(r.Context(), req.Name, req.Platform, req.Content)
 	if err != nil {
+		if errors.Is(err, storage.ErrDuplicateName) {
+			// Имя скрипта — идентичность ресурса (033, как у групп в 026): по нему его
+			// находит YAML-apply. Занятое имя — конфликт, а не внутренняя ошибка.
+			http.Error(w, "script name already exists", http.StatusConflict)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -83,6 +89,10 @@ func (h *Handler) updateScript(w http.ResponseWriter, r *http.Request) {
 	}
 	script, err := h.db.UpdateScript(r.Context(), id, req.Name, req.Platform, req.Content)
 	if err != nil {
+		if errors.Is(err, storage.ErrDuplicateName) {
+			http.Error(w, "script name already exists", http.StatusConflict)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

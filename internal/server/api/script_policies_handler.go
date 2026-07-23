@@ -116,6 +116,13 @@ func (h *Handler) createScriptPolicy(w http.ResponseWriter, r *http.Request) {
 	policy, err := h.db.CreateScriptPolicy(r.Context(), req.Name, req.ScriptID, req.TriggerType,
 		[]byte(req.ScheduleConfig), []byte(req.EventTriggerConfig))
 	if err != nil {
+		if errors.Is(err, storage.ErrDuplicateName) {
+			http.Error(w, "script policy name already exists", http.StatusConflict)
+			return
+		}
+		if fkBadRequest(w, err) { // несуществующий script_id — 400, а не 500
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -123,6 +130,52 @@ func (h *Handler) createScriptPolicy(w http.ResponseWriter, r *http.Request) {
 	h.audit(r.Context(), claims.UserID, claims.Email, "create_script_policy", "script_policy", policy.ID,
 		map[string]string{"name": policy.Name, "trigger": req.TriggerType})
 	writeJSON(w, http.StatusCreated, policy)
+}
+
+// updateScriptPolicy переписывает политику целиком. Появился ради идемпотентного
+// YAML-apply: без него правка расписания = delete+create, а это новый id (назначения
+// групп отваливаются) и потерянная история результатов. Валидация — та же, что на
+// создании: политика с битым cron не должна проходить через «чёрный ход» обновления.
+func (h *Handler) updateScriptPolicy(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req createScriptPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.ScriptID == "" || req.TriggerType == "" {
+		http.Error(w, "name, script_id and trigger_type are required", http.StatusBadRequest)
+		return
+	}
+	if req.TriggerType != "schedule" && req.TriggerType != "event_trigger" && req.TriggerType != "on_connect" {
+		http.Error(w, "trigger_type must be schedule, event_trigger or on_connect", http.StatusBadRequest)
+		return
+	}
+	if msg := validateScheduleConfig(req.TriggerType, req.ScheduleConfig); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	policy, err := h.db.UpdateScriptPolicy(r.Context(), id, req.Name, req.ScriptID, req.TriggerType,
+		[]byte(req.ScheduleConfig), []byte(req.EventTriggerConfig))
+	if err != nil {
+		if errors.Is(err, storage.ErrDuplicateName) {
+			http.Error(w, "script policy name already exists", http.StatusConflict)
+			return
+		}
+		if fkBadRequest(w, err) {
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if policy == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "update_script_policy", "script_policy", policy.ID,
+		map[string]string{"name": policy.Name, "trigger": req.TriggerType})
+	writeJSON(w, http.StatusOK, policy)
 }
 
 func (h *Handler) deleteScriptPolicy(w http.ResponseWriter, r *http.Request) {

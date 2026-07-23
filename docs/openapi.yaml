@@ -839,6 +839,37 @@ paths:
 
   /api/v1/script-policies/{id}:
     parameters: [{ $ref: '#/components/parameters/Id' }]
+    put:
+      tags: [Скрипт-политики]
+      summary: Обновление скрипт-политики
+      description: |
+        Роль: `it_admin`. Переписывает политику целиком, кроме `is_active` (для него
+        отдельная ручка `toggle`). Нужен идемпотентному `routineops apply`: без него
+        правка расписания шла бы через удаление и создание, то есть новый `id` —
+        назначения групп отвалились бы, а история результатов потерялась.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, script_id, trigger_type]
+              properties:
+                name: { type: string }
+                script_id: { type: string, format: uuid }
+                trigger_type: { $ref: '#/components/schemas/TriggerType' }
+                schedule_config: { type: object }
+                event_trigger_config: { type: object }
+      responses:
+        '200':
+          description: Обновлена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScriptPolicy' }
+        '400': { description: Некорректный триггер или cron-выражение }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Имя политики занято }
     delete:
       tags: [Скрипт-политики]
       summary: Удаление скрипт-политики
