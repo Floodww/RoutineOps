@@ -1,10 +1,12 @@
 // routineops — CLI управления конфигурацией парка через YAML.
 //
 //	routineops export -o routineops.yaml     # текущее состояние сервера → файл + скрипты
-//	routineops apply  -f routineops.yaml     # файл → сервер (пока не реализовано)
+//	routineops apply  -f routineops.yaml     # файл → сервер
 //
 // Ходит публичным HTTP API под API-токеном (Authorization: Bearer) — теми же ручками,
 // что и UI. Отдельного канала доступа у CLI нет намеренно.
+//
+// Формат файла, семантика скоупа и рецепты — docs/config-as-code.md.
 package main
 
 import (

@@ -49,6 +49,7 @@ no VPN required. Version: see [`VERSION`](./VERSION).
 [`docs/self-hosted-deploy.md`](./docs/self-hosted-deploy.md) ·
 [`docs/enrollment.md`](./docs/enrollment.md) ·
 [`docs/agent-cli.md`](./docs/agent-cli.md) ·
+[`docs/config-as-code.md`](./docs/config-as-code.md) ·
 [`docs/self-update.md`](./docs/self-update.md) ·
 [`docs/operations.md`](./docs/operations.md) ·
 [`docs/field-troubleshooting.md`](./docs/field-troubleshooting.md) ·

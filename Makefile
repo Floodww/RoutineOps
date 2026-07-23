@@ -78,6 +78,9 @@ agent: ## Собрать агент -> bin/agent
 mockserver: ## Собрать mock-сервер -> bin/mockserver
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/mockserver ./cmd/mockserver
 
+cli: ## Собрать CLI конфигурации парка -> bin/routineops (см. docs/config-as-code.md)
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/routineops ./cmd/routineops
+
 build: agent mockserver ## Собрать оба бинарника
 
 certs: ## Сгенерировать dev-сертификаты. Агентский — задать DEVICE_ID=<uuid>
