@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Select } from "@/components/ui/select"
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import ConfirmDialog from "@/components/ConfirmDialog"
 import { toast } from "@/lib/toast"
@@ -42,6 +43,15 @@ const LOCK_ACTUAL_ALERTS: Record<string, { label: string; hint: string }> = {
 }
 
 const lockDivergence = (device: Device) => LOCK_ACTUAL_ALERTS[device.lock_actual_state ?? ""] ?? null
+
+// decommissionArmed — кнопку сноса разрешаем только после того, как оператор ввёл имя
+// устройства руками. Операция необратима и стирает агента с ЖИВОЙ машины, а пункт меню
+// стоит в двух строках от «Заблокировать экран» — одного клика для неё мало.
+// Регистр и пробелы прощаем: имя копируют из заголовка, промах по Caps не должен злить.
+export function decommissionArmed(hostname: string, typed: string): boolean {
+  const want = hostname.trim().toLowerCase()
+  return want !== "" && typed.trim().toLowerCase() === want
+}
 
 const taskStatusLabel: Record<string, string> = {
   pending:   "Ожидает",
@@ -97,6 +107,10 @@ export default function DeviceDetail() {
   const [locking, setLocking] = useState(false)
   const [lockPassword, setLockPassword] = useState<string | null>(null)
   const [lockCopied, setLockCopied] = useState(false)
+  const [decomOpen, setDecomOpen] = useState(false)
+  const [decomReason, setDecomReason] = useState("")
+  const [decomTyped, setDecomTyped] = useState("")
+  const [decommissioning, setDecommissioning] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -169,6 +183,36 @@ export default function DeviceDetail() {
       toast({ title: "Команда разблокировки отправлена", variant: "success" })
     } catch {
       toast({ title: "Не удалось отправить команду разблокировки", variant: "destructive" })
+    }
+  }
+
+  // Снос агента. Статус устройства НЕ трогаем: сервер тоже его не меняет, терминальный
+  // decommissioned ставит gateway по подтверждению агента (handler.go:1131). Поэтому
+  // никакого оптимистичного setDevice — только обновляем список задач, чтобы оператор
+  // видел прогресс, и говорим прямо, что команда ждёт выхода машины на связь.
+  async function sendDecommission() {
+    if (!device) return
+    setDecommissioning(true)
+    try {
+      await api.post(`/devices/${id}/decommission`, { reason: decomReason })
+      setDecomOpen(false)
+      toast({
+        title: "Задача сноса поставлена",
+        description: "Агент удалит себя, когда устройство выйдет на связь. Статус сменится после подтверждения.",
+        variant: "success",
+      })
+      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(t.data ?? [])
+    } catch (e) {
+      const status = (e as { response?: { status?: number } }).response?.status
+      toast({
+        title: status === 409
+          ? "Устройство уже выведено из эксплуатации"
+          : "Не удалось поставить задачу сноса",
+        variant: "destructive",
+      })
+    } finally {
+      setDecommissioning(false)
     }
   }
 
@@ -321,6 +365,16 @@ export default function DeviceDetail() {
                 onSelect={() => device.status === "active" ? setConfirmBlock(true) : toggleBlock()}
               >
                 {device.status === "active" ? "Заблокировать доступ" : "Разблокировать доступ"}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Гасим только уже списанные — сервер на них отвечает 409 (handler.go:1155).
+                  Оффлайн-машину списывать РАЗРЕШАЕМ: задача штатно ждёт выхода на связь. */}
+              <DropdownMenuItem
+                destructive
+                disabled={decommissioning || device.status === "decommissioned"}
+                onSelect={() => { setDecomReason(""); setDecomTyped(""); setDecomOpen(true) }}
+              >
+                Вывести из эксплуатации
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem destructive disabled={deleting} onSelect={() => setConfirmDelete(true)}>
@@ -737,6 +791,61 @@ export default function DeviceDetail() {
               </Button>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Диалог вывода из эксплуатации. Отдельный, а не ConfirmDialog: нужны причина
+          для аудита и ввод имени руками — операция необратима. */}
+      <Dialog open={decomOpen} onOpenChange={(o) => { setDecomOpen(o); if (!o) { setDecomReason(""); setDecomTyped("") } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Вывести из эксплуатации</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <p className="text-sm text-soft">
+              Агент удалит себя с «{device.hostname}»: службу, сертификат, приватный ключ,
+              каталоги данных и собственный бинарник. Отменить нельзя — вернуть машину
+              под управление можно только новой регистрацией.
+            </p>
+            <p className="text-sm text-soft">
+              Команда доставляется, когда устройство выйдет на связь. Статус сменится на
+              «Выведен из эксплуатации» только после подтверждения агента; если машина
+              в сеть уже не вернётся — снимайте агента вручную. Это не kill-switch: для
+              украденной техники нужна блокировка доступа.
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="decom-reason">Причина (необязательно)</Label>
+              <Input
+                id="decom-reason"
+                placeholder="Списание техники, увольнение сотрудника..."
+                value={decomReason}
+                onChange={(e) => setDecomReason(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="decom-confirm">
+                Введите <span className="font-mono text-foreground">{device.hostname}</span> для подтверждения
+              </Label>
+              <Input
+                id="decom-confirm"
+                className="font-mono"
+                autoComplete="off"
+                value={decomTyped}
+                onChange={(e) => setDecomTyped(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && decommissionArmed(device.hostname, decomTyped)) sendDecommission()
+                }}
+              />
+            </div>
+            <Button
+              className="w-full"
+              variant="destructive"
+              onClick={sendDecommission}
+              disabled={decommissioning || !decommissionArmed(device.hostname, decomTyped)}
+            >
+              {decommissioning ? "Отправка..." : "Вывести из эксплуатации"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

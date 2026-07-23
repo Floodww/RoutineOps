@@ -1614,8 +1614,22 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		resetURL := fmt.Sprintf("%s/reset-password?token=%s", h.publicWebURL, token)
 		// Ответ всегда 200 (анти-энумерация), но ошибку мейлера логируем — иначе
 		// оператор не увидит, почему письма сброса не доходят (напр. SMTP-мисконфиг).
-		if err := h.mailer.SendPasswordReset(req.Email, resetURL); err != nil {
-			slog.Error("send password reset email", "err", err)
+		switch {
+		case !h.mailer.Enabled():
+			// SMTP не настроен: Send вернул бы nil, и запрос выглядел бы успешным —
+			// 200 клиенту, ни письма, ни строчки в логе. Ровно так сброс пароля молча
+			// не работал на проде (SMTP_* потерялись при переустановке), и заметили это
+			// только когда админ не смог войти. Приглашения этот случай уже разбирают
+			// явно, отдавая invite_url в ответе; здесь так нельзя — ссылка меняет пароль,
+			// и отдать её тому, кто просто дёрнул ручку с чужим адресом, значит подарить
+			// ему чужую учётку. Поэтому громко в лог оператору, а не в ответ.
+			slog.Warn("сброс пароля запрошен, но мейлер выключен (SMTP_HOST не задан) — письмо не отправлено",
+				"to", req.Email)
+		default:
+			// resetURL в лог не пишем ни здесь, ни в ошибке: в нём одноразовый токен.
+			if err := h.mailer.SendPasswordReset(req.Email, resetURL); err != nil {
+				slog.Error("send password reset email", "to", req.Email, "err", err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

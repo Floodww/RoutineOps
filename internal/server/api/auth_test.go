@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -215,5 +217,36 @@ func TestResetPassword_ShortPassword_Returns400(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("got %d, want 400", w.Code)
+	}
+}
+
+// Мейлер в тестах выключен (mailer.New("", …)) — ровно то состояние, в котором прод
+// неделю молча не отправлял письма сброса: SMTP_* потерялись при переустановке, Send
+// возвращал nil, ручка отвечала 200, и заметили это только когда админ не смог войти.
+// Ответ обязан остаться 200 (анти-энумерация), но оператора надо предупредить в логе.
+func TestForgotPassword_MailerDisabled_WarnsInLog(t *testing.T) {
+	rtr, db := newRouterWithDB(t)
+	seedUser(t, db, "warn@test.com", "secret123", "admin")
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	body, _ := json.Marshal(map[string]string{"email": "warn@test.com"})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/forgot-password", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	rtr.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("got %d, want 200", w.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "мейлер выключен") {
+		t.Errorf("нет предупреждения о выключенном мейлере, лог: %q", out)
+	}
+	// Ссылка сброса в лог попадать не должна ни при каком исходе: по её токену меняют пароль.
+	if strings.Contains(out, "reset-password?token=") {
+		t.Errorf("в лог утёк токен сброса: %q", out)
 	}
 }
