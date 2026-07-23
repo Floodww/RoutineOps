@@ -12,10 +12,13 @@ The version number is shared by the server, the web interface and the agent.
 
 ---
 
-## 2.4.7 — upcoming
+## 2.4.8 — 23 July 2026
 
 A follow-up release: complete agent removal on Windows, and visibility when a lock fails
 to apply.
+
+> Version 2.4.7 was prepared but never shipped: it carried the decommissioning bug
+> described below. All of its changes are included in 2.4.8.
 
 ### Devices
 
@@ -24,6 +27,13 @@ to apply.
   and the package itself is uninstalled properly — along with its entry in Add or Remove
   Programs. Previously a decommissioned device kept files, an installation record and a
   tray icon that came back at the next sign-in.
+- Directory removal during decommissioning is limited to the agent's own installation
+  directory. If the agent was running from somewhere else (a manual placement next to
+  unrelated files), that directory is no longer deleted as a whole — only the agent
+  file itself is removed. A regular package installation behaves as before.
+- The agent service is deregistered before processes are force-terminated. Otherwise the
+  system's configured service recovery could bring the agent back mid-removal, leaving it
+  holding its own file.
 
 ### Security
 
