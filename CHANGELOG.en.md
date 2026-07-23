@@ -12,6 +12,46 @@ The version number is shared by the server, the web interface and the agent.
 
 ---
 
+## 2.4.7 — upcoming
+
+A follow-up release: complete agent removal on Windows, and visibility when a lock fails
+to apply.
+
+### Devices
+
+- Decommissioning on Windows is now complete: the tray icon holding the agent file is
+  terminated, tray autostart is removed, the installation directory is deleted in full,
+  and the package itself is uninstalled properly — along with its entry in Add or Remove
+  Programs. Previously a decommissioned device kept files, an installation record and a
+  tray icon that came back at the next sign-in.
+
+### Security
+
+- A failed lock is now visible to the operator: a device where the lock did not come up
+  is flagged in its device page, the event is written to the audit log and sent as a
+  notification. Previously the console showed "locked" while the device stayed fully
+  usable, and the discrepancy was visible nowhere. The assigned lock is preserved — the
+  agent keeps retrying.
+- The device page now shows the actual lock state reported by the agent next to the
+  assigned one. Intermediate FileVault states (key revoked but reboot not yet done;
+  revoke not completed) became visible too — they were recorded in the database but
+  never displayed.
+
+### Known limitations
+
+- **Windows, decommissioning during a system update.** If Windows Installer is busy with
+  another installation while the agent is being removed, package removal is retried six
+  times at roughly ten-second intervals. If the system stays busy longer, files are
+  removed by a fallback path, but the Add or Remove Programs entry remains — it does not
+  clear itself and has to be removed manually or by reimaging.
+
+### Compatibility
+
+- Upgrading from 2.4.6 requires no manual steps: the release contains no database
+  migrations.
+
+---
+
 ## 2.4.6 — 22 July 2026
 
 A large release: two rounds of adversarial review of the agent, bulk enrollment,

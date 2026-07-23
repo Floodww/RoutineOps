@@ -15,6 +15,12 @@ import (
 
 const fetchTimeout = 30 * time.Second
 
+// lockFailedReportInterval — минимальный интервал между повторными отчётами
+// LOCK_FAILED по ОДНОМУ request_id. Первый отказ отчитывается сразу; дальше, пока
+// ретраи (каждые 30с) продолжают проваливаться, отчёт повторяется не чаще раза в
+// час — иначе actual-only-алерт IT превратился бы в дребезг (требование ревью).
+const lockFailedReportInterval = time.Hour
+
 // Reconciler периодически сверяет локальное состояние блокировки с ЖЕЛАЕМЫМ
 // состоянием сервера (FetchLockStatus, pull). Нужен, потому что канал команды
 // блокировки push-only: LockCommand едет РАЗ задачей по Connect-стриму, без
@@ -48,10 +54,16 @@ type Reconciler struct {
 	// desired=locked (пустой/битый hash от сервера #1.1, транзиентный отказ
 	// persist). Тик крутит ретрай каждые 30с; без дедупа лог провала флудил бы
 	// LevelError на каждом тике. Сбрасывается, когда лок применён или desired стал
-	// unlocked. Серверу о провале НЕ отчитываемся: UNLOCKED стёр бы desired
-	// (разоружил kill-switch), а actual-only канал требует нового proto-состояния.
+	// unlocked. Серверу о провале отчитываемся actual-only каналом LOCK_FAILED
+	// (desired НЕ трогаем — UNLOCKED стёр бы его и разоружил kill-switch).
 	applyFailReported string
 	applyFailSet      bool
+	// applyFailReportedAt — время последнего durable-отчёта LOCK_FAILED по текущему
+	// applyFailReported. Первый отказ по hash отчитывается сразу, дальше — не чаще
+	// lockFailedReportInterval (гейт против дребезга алерта на бесконечных ретраях).
+	// Нулевое значение = «пора отчитаться» (первый раз либо форс-повтор после того,
+	// как отчёт не встал даже в очередь outbox).
+	applyFailReportedAt time.Time
 
 	// fvInFlight/fvWG — одиночный фоновый воркер FileVault-revoke:
 	// RevokeAndShutdown держит блокирующий durable ReportState
@@ -257,23 +269,47 @@ func (r *Reconciler) reconcileLocked(ctx context.Context, resp *pb.FetchLockStat
 		// ревью: critical). Держим desired нетронутым — Manager.Lock теперь
 		// откатывает состояние при отказе, поэтому mgr.Locked()==false, и следующий
 		// тик честно ретраит: транзиентный сбой самозаживает, как только диск
-		// восстановится. Пустой хеш от сервера чинится на источнике (серверная
-		// ветка FetchLockStatus); до тех пор тик крутит ретрай (дедуп лога — ниже).
-		// Видимость в панели через actual-only канал (LOCK_STATE_LOCK_FAILED) —
-		// отдельная задача: требует нового proto-состояния и серверного роутинга.
+		// восстановится.
+		//
+		// Видимость в панели/алерте — через ACTUAL-ONLY канал LOCK_FAILED (серверная
+		// половина: SetDeviceLockActualState, desired НЕ трогается). Отчёт durable (через outbox — терять «лок не применился» нельзя,
+		// как и revoke_failed), с текстом реальной ошибки и request_id этой блокировки
+		// (сервер коррелирует поздний отчёт из outbox с конкретным локом). Дедуп: ПЕРВЫЙ
+		// отказ по hash отчитывается сразу; дальше, пока ретраи проваливаются, — не чаще
+		// lockFailedReportInterval (иначе алерт задребезжал бы на тиках каждые 30с).
+		now := time.Now()
 		r.mu.Lock()
-		already := r.applyFailSet && r.applyFailReported == hash
+		firstForHash := !r.applyFailSet || r.applyFailReported != hash
+		doReport := firstForHash || now.Sub(r.applyFailReportedAt) >= lockFailedReportInterval
 		r.applyFailReported = hash
 		r.applyFailSet = true
+		if doReport {
+			r.applyFailReportedAt = now
+		}
 		r.mu.Unlock()
-		if !already {
+
+		if firstForHash {
 			r.log.Error("lock: reconcile Lock ОТКАЗАЛ — desired=locked не применён (ретраю, desired на сервере не трогаю)",
 				slog.String("request_id", hash), slog.Any("error", err))
+		}
+		if doReport {
+			if rerr := r.report(ctx, &pb.ReportLockStatusRequest{
+				RequestId:  hash,
+				State:      pb.LockState_LOCK_STATE_LOCK_FAILED,
+				OccurredAt: now.Unix(),
+				Details:    "overlay lock apply failed: " + err.Error(),
+			}); rerr != nil {
+				r.log.Error("lock: ReportLockStatus(LOCK_FAILED) в outbox", slog.Any("error", rerr))
+				r.mu.Lock()
+				r.applyFailReportedAt = time.Time{} // не встал даже в очередь — повторим на следующем тике
+				r.mu.Unlock()
+			}
 		}
 		return
 	}
 	r.mu.Lock()
-	r.applyFailSet = false // лок применён — дедуп лога провала сброшен
+	r.applyFailSet = false              // лок применён — дедуп лога провала сброшен
+	r.applyFailReportedAt = time.Time{} // и таймер отчёта: следующий провал (если будет) отчитается сразу
 	r.mu.Unlock()
 	r.log.Warn("lock: реконсиляция применила desired-состояние locked после рестарта/расхождения")
 	if err := r.report(ctx, &pb.ReportLockStatusRequest{
@@ -298,7 +334,8 @@ func (r *Reconciler) reconcileUnlocked(ctx context.Context) {
 	r.mu.Lock()
 	r.lastUnlockedHash = ""
 	r.durableReported = ""
-	r.applyFailSet = false // desired=unlocked — дедуп провала применения тоже сброшен
+	r.applyFailSet = false              // desired=unlocked — дедуп провала применения тоже сброшен
+	r.applyFailReportedAt = time.Time{} // и таймер отчёта LOCK_FAILED
 	r.mu.Unlock()
 	r.mgr.ClearLastUnlocked()
 

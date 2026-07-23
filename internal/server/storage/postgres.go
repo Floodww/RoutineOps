@@ -139,24 +139,32 @@ func (db *DB) CreateUser(ctx context.Context, name, email, passwordHash, role st
 }
 
 type Device struct {
-	ID           string     `json:"id"`
-	Hostname     string     `json:"hostname"`
-	OS           string     `json:"os"`
-	OSVersion    string     `json:"os_version"`
-	IPAddress    string     `json:"ip_address"`
-	Status       string     `json:"status"`
-	LockStatus   string     `json:"lock_status"`
-	LastSeenAt   *time.Time `json:"last_seen_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	CertCN       string     `json:"cert_cn"`
-	EnrolledAt   *time.Time `json:"enrolled_at"`
-	CPU          string     `json:"cpu"`
-	RAM          int64      `json:"ram_mb"`
-	Disk         string     `json:"disk"`
-	MACAddress   string     `json:"mac_address"`
-	SerialNumber string     `json:"serial_number"`
-	PublicIP     string     `json:"public_ip"`
-	AgentVersion string     `json:"agent_version"`
+	ID         string `json:"id"`
+	Hostname   string `json:"hostname"`
+	OS         string `json:"os"`
+	OSVersion  string `json:"os_version"`
+	IPAddress  string `json:"ip_address"`
+	Status     string `json:"status"`
+	LockStatus string `json:"lock_status"`
+	// LockActualState — что агент ФАКТИЧЕСКИ доложил про лок, в отличие от
+	// lock_status (желаемое). Заполняется только в GetDevice (карточка). Пусто =
+	// отчётов не было. Расхождение desired/actual — единственный способ увидеть,
+	// что лок выдан, но на устройстве не применился (lock_failed) либо применён
+	// наполовину (filevault_revoked/filevault_revoke_failed): до этого колонка
+	// писалась, но не читалась НИГДЕ, и оператор видел только «заблокировано».
+	LockActualState string     `json:"lock_actual_state"`
+	LockActualAt    *time.Time `json:"lock_actual_at"`
+	LastSeenAt      *time.Time `json:"last_seen_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CertCN          string     `json:"cert_cn"`
+	EnrolledAt      *time.Time `json:"enrolled_at"`
+	CPU             string     `json:"cpu"`
+	RAM             int64      `json:"ram_mb"`
+	Disk            string     `json:"disk"`
+	MACAddress      string     `json:"mac_address"`
+	SerialNumber    string     `json:"serial_number"`
+	PublicIP        string     `json:"public_ip"`
+	AgentVersion    string     `json:"agent_version"`
 	// Расширение инвентаря (миграция 030). Заполняются в GetDevice (карточка);
 	// в списках устройств пока не выбираются. Пусто/0 = агент не сообщил.
 	Arch           string `json:"arch"`
@@ -368,7 +376,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
        COALESCE(agent_version, ''),
        COALESCE(arch, ''), COALESCE(console_user, ''), COALESCE(disk_encryption, ''),
        COALESCE(os_patch_date, ''), COALESCE(boot_time, 0), COALESCE(disk_free, ''),
-       COALESCE(domain_joined, ''), COALESCE(tpm, ''), COALESCE(secure_boot, '')
+       COALESCE(domain_joined, ''), COALESCE(tpm, ''), COALESCE(secure_boot, ''),
+       COALESCE(lock_actual_state, ''), lock_actual_at
   FROM devices WHERE id = $1
  `, id).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LockStatus, &d.LastSeenAt, &d.CreatedAt,
@@ -376,7 +385,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 		&d.AgentVersion,
 		&d.Arch, &d.ConsoleUser, &d.DiskEncryption,
 		&d.OSPatchDate, &d.BootTime, &d.DiskFree,
-		&d.DomainJoined, &d.TPM, &d.SecureBoot)
+		&d.DomainJoined, &d.TPM, &d.SecureBoot,
+		&d.LockActualState, &d.LockActualAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil

@@ -13,8 +13,9 @@ import (
 // транзиентно). Реконсиляция НЕ должна слать серверу состояние, стирающее
 // desired: overlay-UNLOCKED на сервере идёт в SetDeviceLockState('unlocked',”)
 // и уничтожает desired=locked — транзиентный сбой навсегда разоружил бы
-// kill-switch (adversarial-ревью: critical). Держим desired нетронутым (ни
-// одного отчёта), логируем, и полагаемся на ретрай следующего тика.
+// kill-switch (adversarial-ревью: critical). Держим desired нетронутым: провал
+// виден серверу ТОЛЬКО через actual-only LOCK_FAILED (desired не трогается), и
+// ретрай следующего тика доводит лок.
 func TestReconcile_LockApplyFailure_DoesNotEraseDesired(t *testing.T) {
 	fl := &fakeLocker{}
 	mgr := newMgr(t, fl)
@@ -32,10 +33,17 @@ func TestReconcile_LockApplyFailure_DoesNotEraseDesired(t *testing.T) {
 	}
 
 	r.tick(context.Background())
-	r.tick(context.Background()) // ретрай — тоже без отчёта
+	r.tick(context.Background()) // ретрай — LOCK_FAILED дедупится, UNLOCKED не шлётся никогда
 
-	if len(reports) != 0 {
-		t.Fatalf("реконсиляция отправила %d отчёт(ов) при провале Lock — desired на сервере мог быть стёрт (kill-switch разоружён)", len(reports))
+	// Инвариант kill-switch: НИ ОДНОГО desired-стирающего UNLOCKED при провале Lock.
+	for _, rep := range reports {
+		if rep.GetState() == pb.LockState_LOCK_STATE_UNLOCKED {
+			t.Fatal("реконсиляция отправила UNLOCKED при провале Lock — desired стёрт (kill-switch разоружён)")
+		}
+	}
+	// Провал виден серверу через actual-only LOCK_FAILED — ровно один (дедуп по request_id).
+	if len(reports) != 1 || reports[0].GetState() != pb.LockState_LOCK_STATE_LOCK_FAILED {
+		t.Fatalf("ожидали ровно один LOCK_FAILED отчёт, получили %d: %+v", len(reports), reports)
 	}
 	if mgr.Locked() || fl.shows != 0 {
 		t.Fatalf("оверлей НЕ должен подниматься при пустом хеше: locked=%v shows=%d", mgr.Locked(), fl.shows)

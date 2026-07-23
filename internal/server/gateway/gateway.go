@@ -703,10 +703,37 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		}
 		g.logger.Warn("filevault revoke FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
+
+	case pb.LockState_LOCK_STATE_LOCK_FAILED:
+		// Overlay-лок НЕ применился (оверлей не поднялся, состояние не записалось).
+		// Агент откатывает состояние и ретраит, но машина ОСТАЁТСЯ РАБОЧЕЙ — а в
+		// панели устройство числится заблокированным. Именно это расхождение и
+		// закрывает ветка: actual-only, как у деструктивных состояний выше.
+		// desired НЕ трогаем — иначе реконсайл снял бы лок, который оператор выдал,
+		// из-за временной локальной ошибки на устройстве.
+		if err := g.db.SetDeviceLockActualState(ctx, deviceID, "lock_failed"); err != nil {
+			g.logger.Error("update lock actual state (lock_failed)", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "update lock actual state: %v", err) // transient → ретрай
+		}
+		// Аудит + алерт: ретрай после сбоя даст дубль — приемлемо (потеря записи о
+		// неприменённом локе хуже: оператор считает машину закрытой, а она работает).
+		if err := g.db.WriteAuditLog(ctx, "", "agent", "lock_failed", "device", deviceID,
+			map[string]any{"details": req.Details, "occurred_at": req.OccurredAt, "request_id": req.RequestId}); err != nil {
+			g.logger.Error("audit lock_failed", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "audit: %v", err)
+		}
+		if g.bot != nil {
+			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
+			text := fmt.Sprintf("⚠️ <b>Блокировка НЕ применена</b>\nУстройство: <code>%s</code>\nАгент не смог поднять лок и продолжает попытки — машина пока РАБОЧАЯ, хотя в панели помечена как заблокированная.\nДетали: %s",
+				hostname, req.Details)
+			go g.bot.NotifyITAdmins(context.Background(), text)
+		}
+		g.logger.Warn("lock apply FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
+		return &pb.ReportLockStatusResponse{Received: true}, nil
 	}
 
 	// Терминальные состояния маппим ЯВНО. default (любой будущий/битый enum, напр.
-	// зарезервированный 4) — accept-and-drop как UNSPECIFIED: НЕ трогаем desired,
+	// ещё не занятый 6) — accept-and-drop как UNSPECIFIED: НЕ трогаем desired,
 	// иначе неизвестный отчёт стёр бы hash/reason и реконсайл самоотменил бы лок.
 	var lockStatus string
 	switch req.State {

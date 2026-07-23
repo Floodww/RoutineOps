@@ -22,6 +22,27 @@ const statusBadge = (status: Device["status"]) => {
   return <Badge variant={variant}>{label}</Badge>
 }
 
+// lockDivergence — расхождение ЖЕЛАЕМОГО лока (lock_status) с ФАКТИЧЕСКИМ, о котором
+// доложил агент (lock_actual_state). Показываем только состояния, где машина НЕ закрыта
+// или закрыта наполовину: именно они опасны молчанием — панель рисует «заблокировано»,
+// а устройством пользуются. Совпадение desired/actual и пустой actual — не рисуем.
+const LOCK_ACTUAL_ALERTS: Record<string, { label: string; hint: string }> = {
+  lock_failed: {
+    label: "Лок НЕ применён",
+    hint: "Агент не смог поднять блокировку и продолжает попытки. Устройство сейчас РАБОЧЕЕ, несмотря на статус «заблокировано».",
+  },
+  filevault_revoked: {
+    label: "FileVault: нужен ребут",
+    hint: "Secure Token снят, ключ восстановления заэскроен, но до перезагрузки том остаётся открытым — лок ещё не эффективен.",
+  },
+  filevault_revoke_failed: {
+    label: "FileVault: revoke не завершён",
+    hint: "Деструктивная операция могла примениться частично. Требуется ручной разбор IT.",
+  },
+}
+
+const lockDivergence = (device: Device) => LOCK_ACTUAL_ALERTS[device.lock_actual_state ?? ""] ?? null
+
 const taskStatusLabel: Record<string, string> = {
   pending:   "Ожидает",
   acked:     "Принята",
@@ -252,6 +273,15 @@ export default function DeviceDetail() {
         <h1 className="text-xl font-semibold text-foreground">{device.hostname}</h1>
         {statusBadge(device.status)}
         {device.lock_status === "locked" && <Badge variant="destructive">Экран заблокирован</Badge>}
+        {/* Фактическое состояние лока расходится с желаемым — оператору это ВАЖНЕЕ
+            бейджа «заблокировано» рядом: машина в этот момент рабочая либо закрыта
+            наполовину. Пусто/unlocked-совпадение ничего не рисуем — шум. */}
+        {lockDivergence(device) && (
+          <Badge variant="outline" className="border-amber-500 text-amber-600 dark:text-amber-400"
+                 title={lockDivergence(device)!.hint}>
+            ⚠ {lockDivergence(device)!.label}
+          </Badge>
+        )}
         {device.groups?.map((g) => <GroupBadge key={g.id} group={g} />)}
         <div className="ml-auto flex gap-2">
           {/* Действия: перерегистрация и блокировка — только it_admin */}

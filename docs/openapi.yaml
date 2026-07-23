@@ -1565,6 +1565,16 @@ components:
         lock_status:
           type: string
           enum: [locked, unlocked]
+          description: ЖЕЛАЕМОЕ состояние блокировки (что назначил оператор).
+        lock_actual_state:
+          type: string
+          enum: ['', locked, unlocked, lock_failed, filevault_revoked, filevault_revoke_failed]
+          description: >
+            ФАКТИЧЕСКОЕ состояние, о котором доложил агент. Отдаётся только карточкой
+            устройства (`GET /devices/{id}`), в списке отсутствует. Пусто — отчётов не
+            было. Расхождение с `lock_status` означает, что блокировка не применилась
+            (`lock_failed`) либо применена наполовину (`filevault_*`).
+        lock_actual_at: { type: string, format: date-time, nullable: true }
         last_seen_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         enrolled_at: { type: string, format: date-time, nullable: true }

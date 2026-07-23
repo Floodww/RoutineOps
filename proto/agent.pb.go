@@ -447,6 +447,7 @@ const (
 	LockState_LOCK_STATE_UNLOCKED                LockState = 2 // снят (сервером или верным паролем)
 	LockState_LOCK_STATE_FILEVAULT_REVOKED       LockState = 3 // filevault: токен снят + PRK заэскроен; РЕБУТ НУЖЕН; ещё НЕ эффективен
 	LockState_LOCK_STATE_FILEVAULT_REVOKE_FAILED LockState = 4 // filevault: revoke НЕ завершён (partial/ABORT/misbuild) — деструктив мог частично примениться; требует ручного разбора IT; desired НЕ трогать
+	LockState_LOCK_STATE_LOCK_FAILED             LockState = 5 // overlay: лок НЕ применился (оверлей не поднялся / состояние не записалось); агент откатился и ретраит, машина ОСТАЁТСЯ РАБОЧЕЙ; desired НЕ трогать
 )
 
 // Enum value maps for LockState.
@@ -457,6 +458,7 @@ var (
 		2: "LOCK_STATE_UNLOCKED",
 		3: "LOCK_STATE_FILEVAULT_REVOKED",
 		4: "LOCK_STATE_FILEVAULT_REVOKE_FAILED",
+		5: "LOCK_STATE_LOCK_FAILED",
 	}
 	LockState_value = map[string]int32{
 		"LOCK_STATE_UNSPECIFIED":             0,
@@ -464,6 +466,7 @@ var (
 		"LOCK_STATE_UNLOCKED":                2,
 		"LOCK_STATE_FILEVAULT_REVOKED":       3,
 		"LOCK_STATE_FILEVAULT_REVOKE_FAILED": 4,
+		"LOCK_STATE_LOCK_FAILED":             5,
 	}
 )
 
@@ -2954,13 +2957,14 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x0fRecoveryKeyType\x12!\n" +
 	"\x1dRECOVERY_KEY_TYPE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fRECOVERY_KEY_TYPE_FILEVAULT_PRK\x10\x01\x12*\n" +
-	"&RECOVERY_KEY_TYPE_SECONDARY_CREDENTIAL\x10\x02*\xa1\x01\n" +
+	"&RECOVERY_KEY_TYPE_SECONDARY_CREDENTIAL\x10\x02*\xbd\x01\n" +
 	"\tLockState\x12\x1a\n" +
 	"\x16LOCK_STATE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOCK_STATE_LOCKED\x10\x01\x12\x17\n" +
 	"\x13LOCK_STATE_UNLOCKED\x10\x02\x12 \n" +
 	"\x1cLOCK_STATE_FILEVAULT_REVOKED\x10\x03\x12&\n" +
-	"\"LOCK_STATE_FILEVAULT_REVOKE_FAILED\x10\x04*U\n" +
+	"\"LOCK_STATE_FILEVAULT_REVOKE_FAILED\x10\x04\x12\x1a\n" +
+	"\x16LOCK_STATE_LOCK_FAILED\x10\x05*U\n" +
 	"\bLockMode\x12\x19\n" +
 	"\x15LOCK_MODE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOCK_MODE_OVERLAY\x10\x01\x12\x17\n" +

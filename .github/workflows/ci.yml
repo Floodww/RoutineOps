@@ -161,6 +161,12 @@ jobs:
       - name: test keystore (windows)
         run: go test -v -timeout 2m ./internal/agent/keystore/...
 
+      # Windows-tagged тесты decommission (батч-делетер, resolveInstallDir, контракт с
+      # именем службы) не компилируются на ubuntu, поэтому в основном job не гоняются
+      # вообще — без этого шага регрессия сноса ловилась бы только руками на стенде.
+      - name: test decommission (windows)
+        run: go test -v -timeout 2m ./internal/agent/decommission/...
+
   windows-msi:
     name: windows · MSI build + install
     runs-on: windows-latest

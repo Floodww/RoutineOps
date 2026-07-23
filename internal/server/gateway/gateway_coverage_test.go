@@ -627,11 +627,11 @@ func TestReportLockStatus_Unspecified_Dropped(t *testing.T) {
 	}
 }
 
-// Неизвестный/будущий enum (напр. зарезервированный 5) — accept-and-drop как
+// Неизвестный/будущий enum (напр. ещё не занятый 6) — accept-and-drop как
 // UNSPECIFIED; НЕ маппится в "unlocked" и НЕ стирает desired (форвард-компат:
 // иначе новый агент, эмитящий будущий enum, самоотменил бы лок против старого
-// сервера). NB: 4 = FILEVAULT_REVOKE_FAILED — это ТЕПЕРЬ реальный state,
-// у него своя ветка+тест; здесь берём следующий свободный 5.
+// сервера). NB: 4 = FILEVAULT_REVOKE_FAILED и 5 = LOCK_FAILED — ТЕПЕРЬ реальные
+// state'ы, у каждого своя ветка+тест; здесь берём следующий свободный 6.
 func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	db := newDB(t)
 	certCtx, fingerprint := makeCertCtx(t, "unknown-state-agent")
@@ -644,7 +644,7 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	}
 
 	resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
-		State:      pb.LockState(5), // зарезервирован в прото, живой агент не шлёт
+		State:      pb.LockState(6), // не занят в прото, живой агент не шлёт
 		OccurredAt: time.Now().Unix(),
 	})
 	if err != nil {
@@ -726,6 +726,68 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 	case <-bot.notified:
 	case <-time.After(2 * time.Second):
 		t.Error("NotifyITAdmins was not called for revoke-failed")
+	}
+}
+
+// state=5 (LOCK_FAILED) — лок НЕ применился на устройстве: actual=lock_failed,
+// desired НЕ трогается, аудит + алерт IT уходят. Смысл ветки: без неё панель
+// показывает «заблокировано», машина при этом полностью рабочая, и расхождение
+// не видно оператору вообще (известное ограничение 2.4.6).
+func TestReportLockStatus_LockFailed_AuditedAndAlerted(t *testing.T) {
+	db := newDB(t)
+	certCtx, fingerprint := makeCertCtx(t, "lock-failed-agent")
+	registerDevice(t, db, "lock-failed-agent", fingerprint)
+	bot := newMockNotifier()
+	gw := newGWWithBot(t, db, bot)
+
+	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "hash-ov", "утеря устройства", "overlay", "lock-task-seed"); err != nil {
+		t.Fatalf("seed desired: %v", err)
+	}
+
+	resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
+		RequestId:  "lock-fail-1",
+		State:      pb.LockState_LOCK_STATE_LOCK_FAILED,
+		OccurredAt: time.Now().Unix(),
+		Details:    "overlay не поднялся: CreateWindowEx failed",
+	})
+	if err != nil {
+		t.Fatalf("ReportLockStatus: %v", err)
+	}
+	if !resp.Received {
+		t.Error("expected Received=true")
+	}
+
+	// desired ЦЕЛ: временный локальный сбой на устройстве НЕ снимает выданный лок.
+	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
+	if err != nil {
+		t.Fatalf("GetDesiredLockState: %v", err)
+	}
+	if lockStatus != "locked" || lockHash != "hash-ov" || lockReason != "утеря устройства" || lockMode != "overlay" {
+		t.Errorf("desired corrupted: status=%q hash=%q reason=%q mode=%q", lockStatus, lockHash, lockReason, lockMode)
+	}
+	state, atSet := readLockActual(t, devID)
+	if state != "lock_failed" || !atSet {
+		t.Errorf("actual = (%q, at set=%v), want (lock_failed, true)", state, atSet)
+	}
+	entries, err := db.ListAuditLog(context.Background(), "lock_failed", 100)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.TargetID == devID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("audit entry lock_failed for device not found")
+	}
+	select {
+	case <-bot.notified:
+	case <-time.After(2 * time.Second):
+		t.Error("NotifyITAdmins was not called for lock-failed")
 	}
 }
 

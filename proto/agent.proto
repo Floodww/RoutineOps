@@ -466,6 +466,7 @@ enum LockState {
   LOCK_STATE_UNLOCKED          = 2; // снят (сервером или верным паролем)
   LOCK_STATE_FILEVAULT_REVOKED = 3; // filevault: токен снят + PRK заэскроен; РЕБУТ НУЖЕН; ещё НЕ эффективен
   LOCK_STATE_FILEVAULT_REVOKE_FAILED = 4; // filevault: revoke НЕ завершён (partial/ABORT/misbuild) — деструктив мог частично примениться; требует ручного разбора IT; desired НЕ трогать
+  LOCK_STATE_LOCK_FAILED             = 5; // overlay: лок НЕ применился (оверлей не поднялся / состояние не записалось); агент откатился и ретраит, машина ОСТАЁТСЯ РАБОЧЕЙ; desired НЕ трогать
 }
 
 // LockMode — режим блокировки. FAIL-SAFE: 0 НИКОГДА не FILEVAULT.

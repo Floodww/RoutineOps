@@ -85,6 +85,11 @@ export interface Device {
   ip_address: string
   status: DeviceStatus
   lock_status: "unlocked" | "locked"
+  // Что агент ФАКТИЧЕСКИ доложил про лок (lock_status — желаемое). Отдаётся только
+  // карточкой устройства; сервер старой версии поля не пришлёт. Расхождение с
+  // lock_status — единственный признак того, что лок выдан, но не применился.
+  lock_actual_state?: "" | "lock_failed" | "filevault_revoked" | "filevault_revoke_failed"
+  lock_actual_at?: string | null
   last_seen_at: string | null
   created_at: string
   cert_cn: string
