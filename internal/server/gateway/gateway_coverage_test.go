@@ -570,7 +570,7 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 		t.Errorf("actual = (%q, at set=%v), want (filevault_revoked, true)", state, atSet)
 	}
 	// Аудит есть (общая БД — фильтруем по target_id).
-	entries, err := db.ListAuditLog(context.Background(), "filevault_revoked", 100)
+	entries, _, err := db.ListAuditLog(context.Background(), storage.AuditFilter{Action: "filevault_revoked"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -707,7 +707,7 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 		t.Errorf("actual = (%q, at set=%v), want (filevault_revoke_failed, true)", state, atSet)
 	}
 	// Аудит есть.
-	entries, err := db.ListAuditLog(context.Background(), "filevault_revoke_failed", 100)
+	entries, _, err := db.ListAuditLog(context.Background(), storage.AuditFilter{Action: "filevault_revoke_failed"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestReportLockStatus_LockFailed_AuditedAndAlerted(t *testing.T) {
 	if state != "lock_failed" || !atSet {
 		t.Errorf("actual = (%q, at set=%v), want (lock_failed, true)", state, atSet)
 	}
-	entries, err := db.ListAuditLog(context.Background(), "lock_failed", 100)
+	entries, _, err := db.ListAuditLog(context.Background(), storage.AuditFilter{Action: "lock_failed"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}

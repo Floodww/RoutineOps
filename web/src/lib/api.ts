@@ -20,6 +20,19 @@ export function errStatus(e: unknown): number {
   return axios.isAxiosError(e) ? (e.response?.status ?? 0) : 0
 }
 
+// PAGE_SIZE — размер страницы постраничных списков. Совпадает с серверным дефолтом
+// (storage.DefaultPageLimit): расхождение выглядело бы как «пагинация врёт».
+export const PAGE_SIZE = 50
+
+// totalCount — общее число записей под фильтром из заголовка X-Total-Count.
+// Заголовка нет (старый сервер, прокси его срезал) — считаем, что всё уместилось
+// на текущей странице: пагинатор тогда просто не рисуется, а не врёт нулём.
+export function totalCount(headers: unknown, fallback: number): number {
+  const raw = (headers as Record<string, unknown> | undefined)?.["x-total-count"]
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {

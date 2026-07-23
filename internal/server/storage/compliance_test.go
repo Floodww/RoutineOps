@@ -120,7 +120,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
-		all, err := db.ListEnrolledDevices(ctx, "", "")
+		all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
 		if err != nil {
 			t.Fatalf("ListEnrolledDevices: %v", err)
 		}

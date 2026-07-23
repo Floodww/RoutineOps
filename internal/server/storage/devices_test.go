@@ -40,27 +40,6 @@ func TestGetDevice_NotFound_ReturnsNil(t *testing.T) {
 	}
 }
 
-func TestListDevices_ContainsCreated(t *testing.T) {
-	db := newDB(t)
-	hostname := fmt.Sprintf("host-list-%s", uniq(t))
-	d := mustCreateDevice(t, db, hostname, "windows")
-
-	devices, err := db.ListDevices(context.Background())
-	if err != nil {
-		t.Fatalf("ListDevices: %v", err)
-	}
-	found := false
-	for _, dev := range devices {
-		if dev.ID == d.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("created device %s not in list", d.ID)
-	}
-}
-
 func TestUpdateDeviceStatus(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-status-%s", uniq(t)), "macos")
@@ -501,7 +480,7 @@ func TestListEnrolledDevices_Search(t *testing.T) {
 
 	found := func(query string) bool {
 		t.Helper()
-		devices, err := db.ListEnrolledDevices(ctx, query, "")
+		devices, _, err := db.ListEnrolledDevices(ctx, query, "", 0, 0)
 		if err != nil {
 			t.Fatalf("ListEnrolledDevices(%q): %v", query, err)
 		}
@@ -542,7 +521,7 @@ func TestListEnrolledDevices_Search(t *testing.T) {
 	}
 
 	// Пустой запрос = весь парк.
-	all, err := db.ListEnrolledDevices(ctx, "", "")
+	all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(\"\"): %v", err)
 	}
@@ -574,7 +553,7 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	}
 
 	// Пустой groupID — весь парк, включая устройство вне группы.
-	all, err := db.ListEnrolledDevices(ctx, "", "")
+	all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(all): %v", err)
 	}
@@ -583,7 +562,7 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	}
 
 	// Реальная группа — только её члены.
-	inGroup, err := db.ListEnrolledDevices(ctx, "", group.ID)
+	inGroup, _, err := db.ListEnrolledDevices(ctx, "", group.ID, 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(group): %v", err)
 	}
@@ -592,14 +571,14 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	}
 
 	// Группа без членов — пусто, а не «весь парк».
-	if got, err := db.ListEnrolledDevices(ctx, "", empty.ID); err != nil {
+	if got, _, err := db.ListEnrolledDevices(ctx, "", empty.ID, 0, 0); err != nil {
 		t.Fatalf("ListEnrolledDevices(empty group): %v", err)
 	} else if len(got) != 0 {
 		t.Errorf("пустая группа вернула %d устройств, want 0", len(got))
 	}
 
 	// Кривой UUID из URL сравнивается как group_id::text: пустая выдача, а не 22P02 → 500.
-	if got, err := db.ListEnrolledDevices(ctx, "", "не-uuid-вовсе"); err != nil {
+	if got, _, err := db.ListEnrolledDevices(ctx, "", "не-uuid-вовсе", 0, 0); err != nil {
 		t.Errorf("кривой group_id: err = %v, want nil", err)
 	} else if len(got) != 0 {
 		t.Errorf("кривой group_id вернул %d устройств, want 0", len(got))
@@ -632,7 +611,7 @@ func TestListEnrolledDevices_AttachesGroups(t *testing.T) {
 		}
 	}
 
-	devices, err := db.ListEnrolledDevices(ctx, "", "")
+	devices, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices: %v", err)
 	}

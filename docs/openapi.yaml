@@ -286,9 +286,30 @@ paths:
         Поля расширенного инвентаря (`arch`, `console_user`, `disk_encryption`,
         `os_patch_date`, `boot_time`, `disk_free`, `domain_joined`, `tpm`,
         `secure_boot`) в списке НЕ заполняются — они приходят в карточке устройства.
+
+        Выдача постраничная: тело — страница, общее число устройств под фильтром
+        отдаётся заголовком `X-Total-Count`. Устройства в статусе `pending` в
+        список не попадают.
+      parameters:
+        - name: q
+          in: query
+          description: |
+            Поиск по подстроке любого собираемого атрибута: имя, ОС, IP (внутренний
+            и внешний), MAC, серийник, CPU, диск, версия агента, CN сертификата, id.
+            MAC и серийник сравниваются и без разделителей. Длиннее 128 символов —
+            обрезается.
+          schema: { type: string, maxLength: 128 }
+        - name: group_id
+          in: query
+          description: Только члены этой группы. Не-UUID даёт пустую выдачу, а не ошибку.
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
       responses:
         '200':
           description: Устройства
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/TotalCount' }
           content:
             application/json:
               schema:
@@ -1396,14 +1417,43 @@ paths:
     get:
       tags: [Аудит]
       summary: Журнал аудита
+      description: |
+        Фильтры применяет сервер, выдача постраничная: тело — страница, общее число
+        записей под фильтром — в заголовке `X-Total-Count`.
+      parameters:
+        - name: action
+          in: query
+          description: Точное совпадение действия (`login`, `create_device`, ...).
+          schema: { type: string }
+        - name: who
+          in: query
+          description: |
+            Подстрока в адресе автора события. Действия агента записаны как
+            `agent:<device_id>`.
+          schema: { type: string }
+        - name: from
+          in: query
+          description: |
+            Нижняя граница периода, включительно. Момент времени в RFC3339 с зоной —
+            границу суток считает клиент в своём поясе. Другой формат = 400.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Верхняя граница периода, включительно. Формат тот же.
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
       responses:
         '200':
           description: Записи
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/TotalCount' }
           content:
             application/json:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/AuditEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   # ─────────────────────────── Служебное ───────────────────────────
   /healthz:
@@ -1509,6 +1559,27 @@ components:
       required: true
       description: Идентификатор устройства
       schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      description: |
+        Размер страницы. По умолчанию 50, потолок 500; значение вне диапазона
+        (0, отрицательное, больше потолка) молча приводится к умолчанию.
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      description: Смещение от начала выдачи.
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  headers:
+    TotalCount:
+      description: |
+        Общее число записей под фильтром, без учёта `limit`/`offset`. Заголовком,
+        а не полем в теле: тело остаётся массивом, поэтому существующие клиенты
+        не ломаются. На пустой странице (`offset` за концом выдачи) приходит 0 —
+        счётчик считается вместе со строками.
+      schema: { type: integer, minimum: 0 }
 
   responses:
     BadRequest:

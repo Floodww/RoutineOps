@@ -215,29 +215,6 @@ func (db *DB) Pool() *pgxpool.Pool {
 	return db.pool
 }
 
-func (db *DB) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := db.pool.Query(ctx, `
-		SELECT id, hostname, os, COALESCE(os_version, ''), COALESCE(ip_address, ''),
-		       status, last_seen_at, created_at, COALESCE(agent_version, '')
-		FROM devices ORDER BY last_seen_at DESC NULLS LAST
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var devices []Device
-	for rows.Next() {
-		var d Device
-		if err := rows.Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
-			&d.IPAddress, &d.Status, &d.LastSeenAt, &d.CreatedAt, &d.AgentVersion); err != nil {
-			return nil, err
-		}
-		devices = append(devices, d)
-	}
-	return devices, rows.Err()
-}
-
 // UpsertDeviceHeartbeat создаёт устройство при первом подключении или обновляет last_seen_at/ip.
 // hostname = device_id (CN сертификата) до тех пор, пока не придёт ReportInventory.
 // Heartbeat переводит enrolled→active И pending→active: раз пришёл heartbeat с валидным
@@ -2299,7 +2276,8 @@ const deviceSearchColumns = `
 // или куска IP. Пустой query — весь список, как раньше. Непустой groupID оставляет
 // только членов этой группы; сравнение через group_id::text, иначе кривой UUID из
 // URL даёт 22P02 и превращается в 500 вместо пустой выдачи.
-func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string) ([]Device, error) {
+func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string, limit, offset int) ([]Device, int, error) {
+	limit, offset = clampPage(limit, offset)
 	q := strings.TrimSpace(query)
 	pattern, stripped := "", ""
 	if q != "" {
@@ -2311,39 +2289,45 @@ func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string) ([
 			stripped = "%" + likeEscaper.Replace(s) + "%"
 		}
 	}
+	// Порядок дополнен id: last_seen_at у устройств одной волны раскатки совпадает
+	// с точностью до секунды, а нестабильный порядок постранично = строки, которые
+	// перепрыгивают со страницы на страницу и «пропадают» из выдачи.
 	rows, err := db.pool.Query(ctx, `
 		SELECT d.id, d.hostname, d.os, COALESCE(d.os_version, ''), COALESCE(d.ip_address, ''),
 		       d.status, d.last_seen_at, d.created_at, COALESCE(d.agent_version, ''),
-		       COALESCE(d.mac_address, ''), COALESCE(d.serial_number, ''), COALESCE(d.public_ip, '')
+		       COALESCE(d.mac_address, ''), COALESCE(d.serial_number, ''), COALESCE(d.public_ip, ''),
+		       COUNT(*) OVER() AS total
 		FROM devices d
 		WHERE d.status != 'pending'
 		  AND ($1 = '' OR (`+deviceSearchColumns+`))
 		  AND ($4 = '' OR EXISTS (SELECT 1 FROM device_group_members m
 		                          WHERE m.device_id = d.id AND m.group_id::text = $4))
-		ORDER BY d.last_seen_at DESC NULLS LAST
-	`, q, pattern, stripped, strings.TrimSpace(groupID))
+		ORDER BY d.last_seen_at DESC NULLS LAST, d.id
+		LIMIT $5 OFFSET $6
+	`, q, pattern, stripped, strings.TrimSpace(groupID), limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var devices []Device
+	total := 0
 	for rows.Next() {
 		var d Device
 		if err := rows.Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 			&d.IPAddress, &d.Status, &d.LastSeenAt, &d.CreatedAt, &d.AgentVersion,
-			&d.MACAddress, &d.SerialNumber, &d.PublicIP); err != nil {
-			return nil, err
+			&d.MACAddress, &d.SerialNumber, &d.PublicIP, &total); err != nil {
+			return nil, 0, err
 		}
 		d.Groups = []DeviceGroupRef{}
 		devices = append(devices, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := db.attachDeviceGroups(ctx, devices); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return devices, nil
+	return devices, total, nil
 }
 
 // attachDeviceGroups заполняет Device.Groups ОДНИМ запросом на всю страницу (было бы

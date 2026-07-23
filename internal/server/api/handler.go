@@ -430,7 +430,8 @@ func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 	// group_id пустой = все устройства. Мусор вместо UUID отдаст пустой список
 	// (сравнение по group_id::text в SQL), а не 500.
 	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
-	devices, err := h.db.ListEnrolledDevices(r.Context(), query, groupID)
+	limit, offset := parsePage(r)
+	devices, total, err := h.db.ListEnrolledDevices(r.Context(), query, groupID, limit, offset)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -438,6 +439,7 @@ func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 	if devices == nil {
 		devices = []storage.Device{}
 	}
+	writeTotal(w, total)
 	writeJSON(w, http.StatusOK, devices)
 }
 

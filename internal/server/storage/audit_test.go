@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
 func TestWriteAuditLog_NoError(t *testing.T) {
@@ -34,7 +36,7 @@ func TestListAuditLog_ContainsWritten(t *testing.T) {
 
 	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, action, "device", "dev-1", nil)
 
-	entries, err := db.ListAuditLog(context.Background(), action, 10)
+	entries, _, err := db.ListAuditLog(context.Background(), storage.AuditFilter{Action: action}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestListAuditLog_FilterByAction_Isolates(t *testing.T) {
 	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, actionA, "x", "1", nil)
 	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, actionB, "x", "2", nil)
 
-	entries, err := db.ListAuditLog(context.Background(), actionA, 10)
+	entries, _, err := db.ListAuditLog(context.Background(), storage.AuditFilter{Action: actionA}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}

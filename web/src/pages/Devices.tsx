@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Copy, Check, ChevronRight } from "lucide-react"
-import api, { Device, CreateDeviceResponse, DeviceGroup, DEVICE_STATUS } from "@/lib/api"
+import api, { Device, CreateDeviceResponse, DeviceGroup, DEVICE_STATUS, PAGE_SIZE, totalCount } from "@/lib/api"
+import Pager from "@/components/Pager"
 import { GroupBadges, groupAccent } from "@/components/GroupBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -90,32 +91,46 @@ export default function Devices() {
   const [copied, setCopied] = useState(false)
   const [arch, setArch] = useState("amd64")
   const [query, setQuery] = useState("")
+  const [offset, setOffset] = useState(0)
+  const [total, setTotal] = useState(0)
   const navigate = useNavigate()
   const { isAdmin } = useMe()
   // Счётчик запросов: медленный ответ по старому запросу не должен затирать свежий.
   const reqSeq = useRef(0)
 
-  // Поиск и фильтр по группе — серверные: поиск лезет в атрибуты, которых нет в таблице
-  // (MAC, серийник, CPU), а членство в группе живёт в отдельной таблице.
+  // Поиск, фильтр по группе и страница — серверные: поиск лезет в атрибуты, которых нет
+  // в таблице (MAC, серийник, CPU), членство в группе живёт в отдельной таблице, а парк
+  // целиком в браузер больше не едет.
   useEffect(() => {
     const q = query.trim()
     const params = new URLSearchParams()
     if (q) params.set("q", q)
     if (groupId !== ALL_GROUPS) params.set("group_id", groupId)
-    const qs = params.toString()
+    params.set("limit", String(PAGE_SIZE))
+    if (offset) params.set("offset", String(offset))
     const seq = ++reqSeq.current
     const timer = setTimeout(() => {
       api
-        .get<Device[]>(`/devices${qs ? `?${qs}` : ""}`)
+        .get<Device[]>(`/devices?${params.toString()}`)
         .then((r) => {
-          if (seq === reqSeq.current) setDevices(r.data ?? [])
+          if (seq !== reqSeq.current) return
+          const rows = r.data ?? []
+          // Страница пуста, а мы не на первой — устройства удалили, пока листали.
+          // Возвращаемся в начало: total на пустой странице приходит нулём (счётчик
+          // едет окном вместе со строками), и пагинатор нарисовал бы «0 записей».
+          if (rows.length === 0 && offset > 0) {
+            setOffset(0)
+            return
+          }
+          setDevices(rows)
+          setTotal(totalCount(r.headers, rows.length))
         })
         .finally(() => {
           if (seq === reqSeq.current) setLoading(false)
         })
     }, q ? 250 : 0)
     return () => clearTimeout(timer)
-  }, [query, groupId])
+  }, [query, groupId, offset])
 
   // Группы нужны только для выпадашки фильтра — тянем один раз. Ошибку глотаем: без
   // списка групп страница устройств остаётся полностью рабочей.
@@ -198,7 +213,9 @@ export default function Devices() {
   // Пока устройство не заэнролилось, сервер его не вернёт — показываем сами.
   // При активном поиске ИЛИ фильтре по группе выдачей владеет сервер: примешивать
   // локальные строки нельзя (свежесозданное устройство ни в одной группе не состоит).
-  const pendingRows = filtering ? [] : justCreated.filter((p) => !devices.some((d) => d.id === p.id))
+  // Со второй страницы тоже не примешиваем — иначе одна и та же pending-строка
+  // висела бы сверху на каждой странице.
+  const pendingRows = filtering || offset > 0 ? [] : justCreated.filter((p) => !devices.some((d) => d.id === p.id))
   const rows = [...pendingRows, ...devices]
 
   return (
@@ -300,12 +317,12 @@ export default function Devices() {
         <Input
           placeholder="Поиск: имя, IP, MAC, серийник, ОС, CPU..."
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); setOffset(0) }}
           className="max-w-sm"
         />
         <Select
           value={groupId}
-          onChange={setGroupId}
+          onChange={(v) => { setGroupId(v); setOffset(0) }}
           className="w-56"
           options={[
             { value: ALL_GROUPS, label: "Все устройства" },
@@ -390,6 +407,7 @@ export default function Devices() {
             })}
           </TableBody>
         </Table>
+        <Pager offset={offset} limit={PAGE_SIZE} total={total} onChange={setOffset} />
       </div>
     </div>
   )
