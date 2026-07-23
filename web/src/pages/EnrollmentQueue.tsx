@@ -76,6 +76,21 @@ function isDead(t: BulkEnrollmentToken): boolean {
   return new Date(t.expires_at).getTime() <= Date.now()
 }
 
+// Заведены, но так и не подключились. Два источника: устройство создали руками и агент
+// ещё не приехал, либо энролл по массовому токену оборвался между созданием строки и
+// подписью CSR — такая машина остаётся 'pending' навсегда и не видна нигде, кроме
+// общего списка парка, где она неотличима от нормально ждущей. Старые сверху: чем
+// дольше висит, тем вероятнее, что это осадок, а не машина в пути.
+// 🔴 last_seen_at обязателен в условии, и ради него функция вынесена под тест: реенролл
+// тоже ставит 'pending', и БОЕВОЕ устройство со всей историей попало бы в этот список
+// под кнопку «Удалить» — да ещё и помеченным просроченным, потому что created_at у него
+// давний. «Ни разу не выходило на связь» — это именно last_seen_at IS NULL.
+export function pendingNotConnected(devices: Device[]): Device[] {
+  return devices
+    .filter((d) => d.status === "pending" && !d.last_seen_at)
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+}
+
 export default function EnrollmentQueue() {
   const navigate = useNavigate()
   const [devices, setDevices] = useState<Device[]>([])
@@ -101,6 +116,7 @@ export default function EnrollmentQueue() {
 
   const [tokens, setTokens] = useState<BulkEnrollmentToken[]>([])
   const [confirmRevoke, setConfirmRevoke] = useState<BulkEnrollmentToken | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<Device | null>(null)
 
   // Отдельной ручки под очередь на сервере нет: GET /devices отдаёт весь парк
   // (фильтруется только литеральный 'pending'), поэтому режем на клиенте.
@@ -145,6 +161,7 @@ export default function EnrollmentQueue() {
 
   const queue = devices.filter((d) => d.status === "pending_approval")
   const rejected = devices.filter((d) => d.status === "rejected")
+  const notConnected = pendingNotConnected(devices)
   // Отзыв на сервере = мгновенное истечение, поэтому «отозван» и «истёк сам» на экране
   // одно и то же состояние: не действует. Кто отозвал — в аудите.
   const liveTokens = tokens.filter((t) => !isDead(t))
@@ -208,6 +225,19 @@ export default function EnrollmentQueue() {
       // авто-тост интерсептора
     } finally {
       setIssuing(false)
+    }
+  }
+
+  async function deletePending(d: Device) {
+    setSubmitting(true)
+    try {
+      await api.delete(`/devices/${d.id}`)
+      toast({ title: `${d.hostname} удалено` })
+    } catch {
+      // авто-тост интерсептора
+    } finally {
+      setSubmitting(false)
+      load()
     }
   }
 
@@ -510,6 +540,71 @@ export default function EnrollmentQueue() {
           </Table>
         </div>
       )}
+
+      {/* Заведённые, но не подключившиеся. Показываем только когда есть: в отличие от
+          токенов, пустота тут — норма, а не отсутствие информации. */}
+      {notConnected.length > 0 && (
+        <div className="glass overflow-hidden">
+          <div className="px-5 pt-4 pb-3">
+            <h2 className="text-[15px] font-semibold text-foreground">Не подключились — {notConnected.length}</h2>
+            <p className="text-xs text-muted-foreground">
+              Устройство заведено, но агент ни разу не вышел на связь. Старше суток —
+              скорее всего осадок от прерванной установки: токен уже мёртв, машина не приедет.
+            </p>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="text-xs">Имя</TableHead>
+                <TableHead className="text-xs">ОС</TableHead>
+                <TableHead className="text-xs">Заведено</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {notConnected.map((d) => {
+                const stale = Date.now() - new Date(d.created_at).getTime() > 24 * 3600_000
+                return (
+                  <TableRow key={d.id} className="glass-hover">
+                    <TableCell className="px-4 py-3">
+                      <button
+                        type="button"
+                        className="text-sm font-medium text-foreground hover:underline text-left"
+                        onClick={() => navigate(`/devices/${d.id}`)}
+                      >
+                        {d.hostname}
+                      </button>
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-xs text-muted-foreground">{d.os} {d.os_version}</TableCell>
+                    <TableCell className="px-4 py-3 text-xs">
+                      <span className={stale ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>
+                        {formatDistanceToNow(d.created_at)}
+                      </span>
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-right">
+                      <Button size="sm" variant="outline" disabled={submitting} onClick={() => setConfirmDelete(d)}>
+                        Удалить
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        onOpenChange={(o) => !o && setConfirmDelete(null)}
+        title="Удалить запись?"
+        description={confirmDelete
+          ? `«${confirmDelete.hostname}» ни разу не выходило на связь, поэтому удаление затрагивает только запись в панели — на самой машине ничего не произойдёт. Если агент туда всё-таки поставят, он заведёт устройство заново.`
+          : ""}
+        confirmLabel="Удалить"
+        destructive
+        onConfirm={() => { if (confirmDelete) deletePending(confirmDelete) }}
+      />
 
       {/* Выпущенные массовые токены. Показываем ВСЕГДА, даже когда список пуст: живой
           токен — это стоячее право заводить машины в парке, и оператор должен видеть,

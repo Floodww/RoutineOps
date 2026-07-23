@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
-import { bulkTokenBody } from "./EnrollmentQueue"
-import { DEVICE_STATUS, DeviceStatus } from "@/lib/api"
+import { bulkTokenBody, pendingNotConnected } from "./EnrollmentQueue"
+import { DEVICE_STATUS, DeviceStatus, Device } from "@/lib/api"
 
 const base = { groupID: "none", maxUses: "", ttlHours: "168", requireApproval: true }
 
@@ -62,5 +62,41 @@ describe("DEVICE_STATUS", () => {
     for (const s of serverStatuses) {
       expect(DEVICE_STATUS[s].label, `${s} не переведён`).toMatch(/[а-яА-Я]/)
     }
+  })
+})
+
+describe("pendingNotConnected", () => {
+  const dev = (over: Partial<Device>): Device => ({
+    id: "d", hostname: "h", os: "linux", os_version: "", ip_address: "",
+    status: "pending", lock_status: "unlocked", last_seen_at: null,
+    created_at: "2026-07-01T00:00:00Z", cert_cn: "", enrolled_at: null,
+    cpu: "", ram_mb: 0, disk: "", ...over,
+  })
+
+  it("берёт только pending, ни разу не выходившие на связь", () => {
+    const got = pendingNotConnected([
+      dev({ id: "never", status: "pending", last_seen_at: null }),
+      dev({ id: "active", status: "active", last_seen_at: "2026-07-20T00:00:00Z" }),
+      dev({ id: "queue", status: "pending_approval", last_seen_at: null }),
+    ])
+    expect(got.map((d) => d.id)).toEqual(["never"])
+  })
+
+  // 🔴 Регрессия, которую этот тест и стережёт: реенролл ставит боевому устройству
+  // 'pending', и без проверки last_seen_at оно оказалось бы в списке «не подключились»
+  // под кнопкой «Удалить» — с давним created_at, то есть ещё и помеченным просроченным.
+  it("не втягивает реенролленное устройство с историей связи", () => {
+    const got = pendingNotConnected([
+      dev({ id: "reenroll", status: "pending", last_seen_at: "2026-07-22T10:00:00Z" }),
+    ])
+    expect(got).toEqual([])
+  })
+
+  it("старые сверху", () => {
+    const got = pendingNotConnected([
+      dev({ id: "new", created_at: "2026-07-20T00:00:00Z" }),
+      dev({ id: "old", created_at: "2026-07-01T00:00:00Z" }),
+    ])
+    expect(got.map((d) => d.id)).toEqual(["old", "new"])
   })
 })
