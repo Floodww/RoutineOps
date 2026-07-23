@@ -102,6 +102,68 @@ func (db *DB) CreateBulkEnrollmentToken(ctx context.Context, token, groupID stri
 	return err
 }
 
+// BulkEnrollmentToken — выпущенный массовый токен для показа оператору. Самого секрета
+// тут нет и быть не может: в БД лежит только SHA-256 (N6), плейнтекст отдаётся один раз
+// при выпуске. Оператору нужен не сам токен, а ответ на вопрос «что сейчас позволяет
+// заводить устройства и сколько раз этим воспользовались».
+type BulkEnrollmentToken struct {
+	ID              string    `json:"id"`
+	GroupID         string    `json:"group_id"`
+	GroupName       string    `json:"group_name"`
+	MaxUses         *int      `json:"max_uses"`
+	Uses            int       `json:"uses"`
+	RequireApproval bool      `json:"require_approval"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// ListBulkEnrollmentTokens — выпущенные массовые токены, свежие сверху. Истёкшие тоже
+// отдаём: оператору важно видеть, чем энроллили парк последнее время.
+// ponytail: LIMIT 100 вместо пагинации — токены выпускают штуками, не тысячами.
+func (db *DB) ListBulkEnrollmentTokens(ctx context.Context) ([]BulkEnrollmentToken, error) {
+	rows, err := db.pool.Query(ctx, `
+		SELECT t.id::text, COALESCE(t.group_id::text, ''), COALESCE(g.name, ''),
+		       t.max_uses, t.uses, t.require_approval, t.expires_at, t.created_at
+		FROM enrollment_tokens t
+		LEFT JOIN device_groups g ON g.id = t.group_id
+		WHERE t.device_id IS NULL
+		ORDER BY t.created_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tokens := []BulkEnrollmentToken{}
+	for rows.Next() {
+		var t BulkEnrollmentToken
+		if err := rows.Scan(&t.ID, &t.GroupID, &t.GroupName, &t.MaxUses, &t.Uses,
+			&t.RequireApproval, &t.ExpiresAt, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// RevokeEnrollmentToken гасит токен, сдвигая срок в прошлое. Отдельной колонки
+// revoked_at намеренно НЕТ: и bulk-редим (BeginBulkEnroll), и обычный (enroll-хендлер)
+// уже проверяют expires_at, поэтому отзыв не заводит НОВОГО условия, которое можно
+// забыть в одном из путей — ровно так и жила дыра с гейтом статуса, закрытая в одном
+// месте из двух. Кто и когда отозвал — в аудите.
+// false = токена нет или он уже мёртв (истёк/отозван), повторный отзыв не нужен.
+// ponytail: отозванный в списке неотличим от истёкшего сам; понадобится различать —
+// добавить revoked_at и показывать причину.
+func (db *DB) RevokeEnrollmentToken(ctx context.Context, id string) (bool, error) {
+	ct, err := db.pool.Exec(ctx,
+		`UPDATE enrollment_tokens SET expires_at = now() WHERE id = $1 AND expires_at > now()`, id)
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
 // BeginBulkEnroll атомарно резервирует ОДНО использование bulk-токена (проверка
 // max_uses/срока — гонку закрывает guarded UPDATE ... uses+1 с RETURNING), создаёт
 // устройство (status 'pending') и привязывает к группе токена. Возвращает id

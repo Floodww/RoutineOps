@@ -141,6 +141,61 @@ func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
 	}
 }
 
+// Отозванный массовый токен перестаёт заводить устройства. Проверяем именно через
+// BeginBulkEnroll: отзыв сделан как мгновенное истечение, отдельного флага нет, и тест
+// обязан ловить реальный отказ редима, а не запись в колонке.
+func TestRevokeEnrollmentToken_KillsBulkToken(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	tok := fmt.Sprintf("bulk-revoke-%s", uniq(t))
+	if err := db.CreateBulkEnrollmentToken(ctx, tok, "", nil, false, time.Now().Add(1*time.Hour)); err != nil {
+		t.Fatalf("CreateBulkEnrollmentToken: %v", err)
+	}
+	rec, err := db.GetEnrollmentToken(ctx, tok)
+	if err != nil || rec == nil {
+		t.Fatalf("GetEnrollmentToken: %v", err)
+	}
+
+	if _, _, err := db.BeginBulkEnroll(ctx, rec.ID, "host-before-revoke", "linux"); err != nil {
+		t.Fatalf("до отзыва энролл обязан работать: %v", err)
+	}
+
+	revoked, err := db.RevokeEnrollmentToken(ctx, rec.ID)
+	if err != nil || !revoked {
+		t.Fatalf("RevokeEnrollmentToken = %v, %v; want true, nil", revoked, err)
+	}
+	if _, _, err := db.BeginBulkEnroll(ctx, rec.ID, "host-after-revoke", "linux"); !errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
+		t.Errorf("после отзыва BeginBulkEnroll = %v, want ErrEnrollTokenAlreadyUsed", err)
+	}
+
+	// Повторный отзыв мёртвого токена — не ошибка, но и не «отозвали»: ручка отдаёт 409.
+	if again, err := db.RevokeEnrollmentToken(ctx, rec.ID); err != nil || again {
+		t.Errorf("повторный отзыв = %v, %v; want false, nil", again, err)
+	}
+
+	// Токен обязан остаться видимым в списке вместе со счётчиком использований —
+	// оператору важно, что им успели воспользоваться один раз до отзыва.
+	list, err := db.ListBulkEnrollmentTokens(ctx)
+	if err != nil {
+		t.Fatalf("ListBulkEnrollmentTokens: %v", err)
+	}
+	var found *storage.BulkEnrollmentToken
+	for i := range list {
+		if list[i].ID == rec.ID {
+			found = &list[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("отозванный токен пропал из списка")
+	}
+	if found.Uses != 1 {
+		t.Errorf("uses = %d, want 1", found.Uses)
+	}
+	if found.ExpiresAt.After(time.Now()) {
+		t.Errorf("expires_at = %v, отозванный токен обязан быть просроченным", found.ExpiresAt)
+	}
+}
+
 func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-reenroll-%s", uniq(t)), "windows")

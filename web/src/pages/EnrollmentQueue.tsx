@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Copy, Check } from "lucide-react"
-import api, { Device, DeviceGroup, DEVICE_STATUS, BulkEnrollmentTokenResponse } from "@/lib/api"
+import api, { Device, DeviceGroup, DEVICE_STATUS, BulkEnrollmentTokenResponse, BulkEnrollmentToken } from "@/lib/api"
 import { GroupBadges } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -72,6 +72,10 @@ export function bulkTokenBody(opts: {
   return body
 }
 
+function isDead(t: BulkEnrollmentToken): boolean {
+  return new Date(t.expires_at).getTime() <= Date.now()
+}
+
 export default function EnrollmentQueue() {
   const navigate = useNavigate()
   const [devices, setDevices] = useState<Device[]>([])
@@ -94,6 +98,9 @@ export default function EnrollmentQueue() {
   const [confirmRejectAll, setConfirmRejectAll] = useState(false)
   const [confirmApproveAll, setConfirmApproveAll] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
+
+  const [tokens, setTokens] = useState<BulkEnrollmentToken[]>([])
+  const [confirmRevoke, setConfirmRevoke] = useState<BulkEnrollmentToken | null>(null)
 
   // Отдельной ручки под очередь на сервере нет: GET /devices отдаёт весь парк
   // (фильтруется только литеральный 'pending'), поэтому режем на клиенте.
@@ -129,8 +136,18 @@ export default function EnrollmentQueue() {
       .catch(() => setGroups([]))
   }, [])
 
+  function loadTokens() {
+    api.get<BulkEnrollmentToken[]>("/enrollment-tokens/bulk")
+      .then((r) => setTokens(r.data ?? []))
+      .catch(() => setTokens([]))
+  }
+  useEffect(loadTokens, [])
+
   const queue = devices.filter((d) => d.status === "pending_approval")
   const rejected = devices.filter((d) => d.status === "rejected")
+  // Отзыв на сервере = мгновенное истечение, поэтому «отозван» и «истёк сам» на экране
+  // одно и то же состояние: не действует. Кто отозвал — в аудите.
+  const liveTokens = tokens.filter((t) => !isDead(t))
 
   async function decide(device: Device, action: "approve" | "reject") {
     setSubmitting(true)
@@ -186,10 +203,22 @@ export default function EnrollmentQueue() {
       const r = await api.post<BulkEnrollmentTokenResponse>("/enrollment-tokens/bulk", body)
       setResult(r.data)
       setStep("token")
+      loadTokens()
     } catch {
       // авто-тост интерсептора
     } finally {
       setIssuing(false)
+    }
+  }
+
+  async function revokeToken(t: BulkEnrollmentToken) {
+    try {
+      await api.delete(`/enrollment-tokens/${t.id}`)
+      toast({ title: "Токен отозван", variant: "success" })
+    } catch {
+      // авто-тост интерсептора. 409 = токен уже мёртв, перечитываем список.
+    } finally {
+      loadTokens()
     }
   }
 
@@ -219,8 +248,9 @@ export default function EnrollmentQueue() {
         <h1 className="text-xl font-semibold text-foreground">Энроллмент</h1>
         {/* Сбрасываем ТОЛЬКО когда закрыли форму: на шаге «токен» Esc или клик мимо
             стёрли бы единственную копию токена — на сервере он лежит хэшем, перечитать
-            нечем, отозвать тоже нечем. Случайное закрытие теперь просто прячет диалог,
-            «Выпустить токен» возвращает к той же команде. Стирает только «Готово». */}
+            нечем. Случайное закрытие теперь просто прячет диалог, «Выпустить токен»
+            возвращает к той же команде. Стирает только «Готово». Потерянный таким
+            образом токен теперь хотя бы гасится: он виден в списке ниже. */}
         <Dialog open={dialogOpen} onOpenChange={(o) => { setDialogOpen(o); if (!o && step === "form") resetDialog() }}>
           <DialogTrigger asChild>
             <Button size="sm">Выпустить токен</Button>
@@ -480,6 +510,84 @@ export default function EnrollmentQueue() {
           </Table>
         </div>
       )}
+
+      {/* Выпущенные массовые токены. Показываем ВСЕГДА, даже когда список пуст: живой
+          токен — это стоячее право заводить машины в парке, и оператор должен видеть,
+          сколько таких прав сейчас выдано, не листая аудит. */}
+      <div className="glass overflow-hidden">
+        <div className="px-5 pt-4 pb-3">
+          <h2 className="text-[15px] font-semibold text-foreground">
+            Массовые токены{liveTokens.length > 0 && <span className="text-muted-foreground"> — {liveTokens.length} действующих</span>}
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Сам токен не хранится — только отпечаток. Утёк или больше не нужен — отзывайте.
+          </p>
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="text-xs">Группа</TableHead>
+              <TableHead className="text-xs">Использований</TableHead>
+              <TableHead className="text-xs">Очередь одобрения</TableHead>
+              <TableHead className="text-xs">Выпущен</TableHead>
+              <TableHead className="text-xs">Действует до</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {tokens.length === 0 && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={6} className="text-center py-8 text-sm text-muted-foreground">
+                  Массовых токенов нет — «Выпустить токен» заводит партию машин одной командой.
+                </TableCell>
+              </TableRow>
+            )}
+            {tokens.map((t) => {
+              const dead = isDead(t)
+              return (
+                <TableRow key={t.id} className={dead ? "opacity-55 hover:bg-transparent" : "glass-hover"}>
+                  <TableCell className="px-4 py-3 text-sm">{t.group_name || <span className="text-muted-foreground">без группы</span>}</TableCell>
+                  <TableCell className="px-4 py-3 text-sm font-mono">
+                    {t.uses}{t.max_uses ? ` / ${t.max_uses}` : <span className="text-muted-foreground"> / ∞</span>}
+                  </TableCell>
+                  <TableCell className="px-4 py-3">
+                    {/* Токен без очереди одобрения заводит машины сразу в строй — это
+                        более опасная конфигурация, и она обязана быть видна в списке. */}
+                    {t.require_approval
+                      ? <span className="text-xs text-muted-foreground">включена</span>
+                      : <Badge variant="destructive">выключена</Badge>}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</TableCell>
+                  <TableCell className="px-4 py-3 text-xs">
+                    {dead
+                      ? <span className="text-muted-foreground">не действует</span>
+                      : <span className="text-foreground">{formatDistanceToNow(t.expires_at)}</span>}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 text-right">
+                    {!dead && (
+                      <Button size="sm" variant="destructive" onClick={() => setConfirmRevoke(t)}>
+                        Отозвать
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <ConfirmDialog
+        open={!!confirmRevoke}
+        onOpenChange={(o) => !o && setConfirmRevoke(null)}
+        title="Отозвать токен?"
+        description={confirmRevoke
+          ? `Машины, которые ещё не подключились по нему, энролиться не смогут — команду установки придётся выдать заново с новым токеном. Уже заведённые устройства останутся в парке: отзыв не снимает их с обслуживания.${confirmRevoke.uses > 0 ? ` Этим токеном уже воспользовались: ${confirmRevoke.uses}.` : ""}`
+          : ""}
+        confirmLabel="Отозвать"
+        destructive
+        onConfirm={() => { if (confirmRevoke) revokeToken(confirmRevoke) }}
+      />
 
       <ConfirmDialog
         open={!!confirmReject}

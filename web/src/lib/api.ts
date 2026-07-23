@@ -139,6 +139,19 @@ export interface BulkEnrollmentTokenResponse {
   require_approval: boolean
 }
 
+// Выпущенный массовый токен в списке. Самого секрета тут НЕТ (в БД только хеш) —
+// показываем то, что нужно оператору: куда заводит, сколько раз сработал, когда умрёт.
+export interface BulkEnrollmentToken {
+  id: string
+  group_id: string
+  group_name: string
+  max_uses: number | null
+  uses: number
+  require_approval: boolean
+  expires_at: string
+  created_at: string
+}
+
 export interface ReenrollResponse {
   enrollment_token: string
   expires_at: string

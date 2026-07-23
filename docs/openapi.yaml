@@ -511,6 +511,49 @@ paths:
                   token: { type: string }
                   expires_at: { type: string, format: date-time }
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
+    get:
+      tags: [Энроллмент]
+      summary: Список выпущенных массовых токенов
+      description: |
+        Роль: `it_admin`. Самого токена в ответе нет — в базе хранится только его
+        отпечаток. Отдаёт и истёкшие/отозванные: важно видеть, чем энроллили парк.
+      responses:
+        '200':
+          description: Токены, свежие сверху
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    group_id: { type: string }
+                    group_name: { type: string }
+                    max_uses: { type: integer, nullable: true }
+                    uses: { type: integer }
+                    require_approval: { type: boolean }
+                    expires_at: { type: string, format: date-time }
+                    created_at: { type: string, format: date-time }
+
+  /api/v1/enrollment-tokens/{id}:
+    delete:
+      tags: [Энроллмент]
+      summary: Отзыв токена энроллмента
+      description: |
+        Роль: `it_admin`. Гасит токен немедленно (срок сдвигается в прошлое) — новые
+        машины по нему не заведутся, уже заведённые остаются в парке. Защитное
+        действие, поэтому сервисному токену разрешено.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Отозван }
+        '400': { description: Некорректный идентификатор }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Токен не найден или уже недействителен }
 
   /api/v1/devices/{id}/approve:
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]

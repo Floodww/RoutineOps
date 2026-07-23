@@ -214,6 +214,9 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			// Bulk enrollment. requireHuman на выпуск токена и одобрение (выпускают доступ
 			// к парку — только человеком); reject/batch-reject НЕ гейтим (защитное действие).
 			r.With(requireHuman).Post("/enrollment-tokens/bulk", h.issueBulkEnrollmentToken)
+			r.Get("/enrollment-tokens/bulk", h.listBulkEnrollmentTokens)
+			// Отзыв НЕ гейтим requireHuman: защитное действие (ниже тот же приём с правами).
+			r.Delete("/enrollment-tokens/{id}", h.revokeEnrollmentToken)
 			r.With(requireHuman).Post("/devices/{id}/approve", h.approveDevice)
 			r.Post("/devices/{id}/reject", h.rejectDevice)
 			r.With(requireHuman).Post("/enrollment-queue/approve", h.approvePendingDevices)
@@ -1224,6 +1227,47 @@ func (h *Handler) issueBulkEnrollmentToken(w http.ResponseWriter, r *http.Reques
 		"ca_sha256":        caSHA256,
 		"require_approval": requireApproval,
 	})
+}
+
+// listBulkEnrollmentTokens — что прямо сейчас позволяет заводить устройства в парке.
+// Секретов в ответе нет: в БД лежит только хеш, плейнтекст отдавался один раз при
+// выпуске. Без этой ручки выпущенный массовый токен был невидим — узнать, сколько их
+// живых и сколько раз ими воспользовались, было неоткуда.
+func (h *Handler) listBulkEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
+	tokens, err := h.db.ListBulkEnrollmentTokens(r.Context())
+	if err != nil {
+		slog.Error("list bulk tokens", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+// revokeEnrollmentToken гасит выпущенный токен (и массовый, и одноразовый device-токен).
+// Массовый токен — стоячий креденшл: он многоразовый, живёт неделями и лежит в
+// enroll.env на каждом энроллящемся хосте. Утёк — до этой ручки погасить его было
+// нечем, оставалось ждать expires_at.
+// requireHuman НЕ ставим: отзыв отбирает права, а не выдаёт (см. правило выше), и
+// запрещать его автоматике вредно — гасить утёкший креденшл надо немедленно.
+func (h *Handler) revokeEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		http.Error(w, "invalid token id", http.StatusBadRequest)
+		return
+	}
+	ok, err := h.db.RevokeEnrollmentToken(r.Context(), id)
+	if err != nil {
+		slog.Error("revoke enrollment token", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "token not found or already expired", http.StatusConflict)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "revoke_enrollment_token", "enrollment_token", id, nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // approveDevice одобряет устройство из очереди (requireHuman: решение о членстве в
