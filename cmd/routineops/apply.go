@@ -367,7 +367,7 @@ func scriptContent(s Script, baseDir string) (string, error) {
 	}
 	if filepath.IsAbs(s.File) || strings.Contains(s.File, "..") {
 		// Путь из файла конфигурации не должен уводить за пределы каталога с YAML.
-		return "", fmt.Errorf("скрипт %q: путь %q должен быть относительным и без ..", s.Name, s.File)
+		return "", fmt.Errorf("скрипт %q: путь %q должен быть относительным, без переходов вверх", s.Name, s.File)
 	}
 	raw, err := os.ReadFile(filepath.Join(baseDir, filepath.FromSlash(s.File)))
 	if err != nil {

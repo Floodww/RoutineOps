@@ -44,7 +44,7 @@ func newRecordingServer(t *testing.T) *recordingServer {
 		// Ответ на создание: id, по которому следующие шаги плана свяжут ресурсы.
 		_, _ = w.Write([]byte(`{"id":"NEW-ID","name":"x","platform":"Windows","content":"","group_names":[]}`))
 	}))
-	t.Cleanup(rs.Server.Close)
+	t.Cleanup(rs.Close)
 	return rs
 }
 
