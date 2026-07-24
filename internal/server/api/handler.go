@@ -104,6 +104,9 @@ type Handler struct {
 	// lockPolicy валидирует режим лока. Дефолт (open-core) — overlay-only; enterprise
 	// подменяет через WithLockModePolicy. См. lockmode.go.
 	lockPolicy LockModePolicy
+	// directorySvc — enterprise-каталог (LDAP). nil в open-core → /directory/* → 501.
+	// Регистрируется enterprise-оверлеем через WithDirectoryService. См. directory_seam.go.
+	directorySvc DirectoryService
 	// telegramBotUsername — @username бота этого деплоя (getMe). nil = бот не настроен.
 	telegramBotUsername func(context.Context) string
 }
@@ -204,6 +207,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Post("/devices", h.createPendingDevice)
 			r.Post("/devices/{id}/tasks", h.createTask)
 			r.Put("/devices/{id}/status", h.updateDeviceStatus)
+			r.Put("/devices/{id}/owner", h.setDeviceOwner) // ручная привязка владельца (Free)
 			r.Delete("/devices/{id}", h.deleteDevice)
 			r.Post("/devices/{id}/lock", h.lockDevice)
 			r.Post("/devices/{id}/unlock", h.unlockDevice)
@@ -268,6 +272,15 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.With(requireHuman).Get("/api-tokens", h.listAPITokens)
 			r.With(requireHuman).Post("/api-tokens", h.createAPIToken)
 			r.With(requireHuman).Delete("/api-tokens/{id}", h.deleteAPIToken)
+
+			// Каталог (LDAP, enterprise). Конфиг/тест/синк — requireHuman (меняют секрет /
+			// дёргают внешний каталог); список персон — чтение. Open-core (directorySvc==nil)
+			// → 501, страница «Каталог» в UI скрыта. См. directory_seam.go.
+			r.With(requireHuman).Get("/directory/config", h.getDirectoryConfig)
+			r.With(requireHuman).Put("/directory/config", h.setDirectoryConfig)
+			r.With(requireHuman).Post("/directory/test", h.testDirectory)
+			r.With(requireHuman).Post("/directory/sync", h.syncDirectory)
+			r.Get("/directory/persons", h.listDirectoryPersons)
 		})
 
 		// Enterprise-оверлей монтирует свои роуты/политику в authed-группу
@@ -458,6 +471,34 @@ func (h *Handler) getDevice(w http.ResponseWriter, r *http.Request) {
 		"device":   device,
 		"software": software,
 	})
+}
+
+// setDeviceOwner — ручная привязка владельца (Free-путь): body {owner_user_id}. Пустой id
+// снимает владельца. Авто-владелец из каталога (owner_directory_id, Enterprise LDAP-синк)
+// этой ручкой НЕ трогается — это отдельный слой.
+func (h *Handler) setDeviceOwner(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		OwnerUserID string `json:"owner_user_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024)).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	found, err := h.db.SetDeviceOwner(r.Context(), id, strings.TrimSpace(req.OwnerUserID))
+	if err != nil {
+		// неверный uuid / несуществующий пользователь ловит FK/parse — это ввод оператора, 400.
+		http.Error(w, "invalid owner: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !found {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "set_device_owner", "device", id,
+		map[string]any{"owner_user_id": req.OwnerUserID})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type createTaskRequest struct {

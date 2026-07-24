@@ -108,6 +108,21 @@ func osConsoleUserFull() (string, bool) {
 	return u, true
 }
 
+// osUserSID — строковый SID учётки по имени DOMAIN\user (LookupAccountName).
+// Деривация от УЖЕ доложенного логина, не отдельная проба сессии: SID в снимке
+// гарантированно принадлежит тому же пользователю, что console_user (см.
+// ConsoleIdentity). LSA резолвит доменные учётки и без связи с DC — из
+// локального кэша для всех, кто хоть раз входил на машину. Тип сверяется:
+// группа/алиас/машина с совпавшим именем не уедет как пользовательский SID.
+// Отказ → "" (сервер деградирует на резолв логина через каталог).
+func osUserSID(account string) string {
+	sid, _, accType, err := windows.LookupSID("", account)
+	if err != nil || accType != windows.SidTypeUser {
+		return ""
+	}
+	return sid.String()
+}
+
 // osConsoleUser — интерактивный пользователь БЕЗ домена для ВЫДАЧИ временной
 // админки (`net localgroup` ждёт голое имя локальной учётки). При отказе опроса
 // сохраняется прежний env-фолбэк: тут неверное имя лишь безвредно уронит

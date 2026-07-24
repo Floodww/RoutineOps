@@ -117,9 +117,46 @@ export interface Device {
   // Кто сейчас за консолью (Windows — DOMAIN\user; darwin/linux — логин активной сессии).
   // "" / отсутствует = за консолью никого либо сервер старой версии поля не отдаёт.
   console_user?: string
+  // Владелец. Ручной (owner_user_*, Free-привязка через users) ПРИОРИТЕТНЕЕ авто из
+  // каталога (owner_directory_name, Enterprise LDAP-синк): явное намерение оператора бьёт
+  // автоматику. Отсутствуют у сервера старой версии.
+  owner_user_id?: string
+  owner_user_email?: string
+  owner_directory_name?: string
   // Устройство может состоять в нескольких группах. Может отсутствовать: сервер старой
   // версии поля не отдаёт, а только что созданное pending-устройство держим локально.
   groups?: DeviceGroupRef[]
+}
+
+// Каталог (LDAP) — только enterprise-сборка; в open-core ручки /directory/* → 501, а
+// страница «Каталог» показывает «недоступно в этой редакции». Bind-пароль сюда НЕ входит
+// (секрет, живёт в rw-томе сервера); has_password лишь говорит, задан ли он.
+export interface DirectoryConfig {
+  enabled: boolean
+  url: string
+  bind_dn: string
+  base_dn: string
+  user_filter: string
+  sync_interval_min: number
+  has_password: boolean
+}
+
+export interface DirectorySyncResult {
+  synced: number
+  disabled: number
+  matched: number
+}
+
+export interface DirectoryPerson {
+  id: string
+  object_guid: string
+  object_sid: string
+  sam_account: string
+  user_principal: string
+  display_name: string
+  email: string
+  distinguished_name: string
+  disabled: boolean
 }
 
 // GROUP_PALETTE — те же 8 цветов, которыми миграция 027 бэкфилит существующие группы.

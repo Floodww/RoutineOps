@@ -78,6 +78,10 @@ message DeviceInfo {
   string tpm             = 19; // TPM присутствует: "true"/"false"/"" — Windows
   string secure_boot     = 20; // Secure Boot включён: "true"/"false"/"" — Windows
                                // (legacy BIOS = "false": UEFI-защиты заведомо нет)
+  string console_user_sid = 21; // стабильный SID интерактивного пользователя (Windows) —
+                               // ключ матча с каталогом (objectSid), rename-proof в отличие
+                               // от console_user-логина. "" = неизвестно / не Windows /
+                               // локальный юзер вне каталога. Заполняет агент (Тинки).
 }
 
 message SoftwareItem {

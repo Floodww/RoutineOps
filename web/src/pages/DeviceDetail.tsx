@@ -6,6 +6,7 @@ import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Select } from "@/components/ui/select"
+import OwnerCard from "@/components/OwnerCard"
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
@@ -543,6 +544,15 @@ export default function DeviceDetail() {
           </div>
         ))}
       </div>
+
+      <OwnerCard
+        device={device}
+        isAdmin={isAdmin}
+        onChanged={async () => {
+          const d = await api.get<DeviceDetailResponse>(`/devices/${id}`)
+          setDevice(d.data.device)
+        }}
+      />
 
       <div className="glass px-5 py-[18px]">
         <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2 mb-4">

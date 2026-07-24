@@ -632,10 +632,12 @@ type DeviceInfo struct {
 	DiskFree     string `protobuf:"bytes,17,opt,name=disk_free,json=diskFree,proto3" json:"disk_free,omitempty"`             // свободно на системном томе, человекочитаемо
 	DomainJoined string `protobuf:"bytes,18,opt,name=domain_joined,json=domainJoined,proto3" json:"domain_joined,omitempty"` // "true"/"false"/""; Windows — Win32_ComputerSystem
 	// .PartOfDomain, macOS/Linux — заведомое "false"
-	Tpm           string `protobuf:"bytes,19,opt,name=tpm,proto3" json:"tpm,omitempty"`                                 // TPM присутствует: "true"/"false"/"" — Windows
-	SecureBoot    string `protobuf:"bytes,20,opt,name=secure_boot,json=secureBoot,proto3" json:"secure_boot,omitempty"` // Secure Boot включён: "true"/"false"/"" — Windows
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Tpm        string `protobuf:"bytes,19,opt,name=tpm,proto3" json:"tpm,omitempty"`                                 // TPM присутствует: "true"/"false"/"" — Windows
+	SecureBoot string `protobuf:"bytes,20,opt,name=secure_boot,json=secureBoot,proto3" json:"secure_boot,omitempty"` // Secure Boot включён: "true"/"false"/"" — Windows
+	// (legacy BIOS = "false": UEFI-защиты заведомо нет)
+	ConsoleUserSid string `protobuf:"bytes,21,opt,name=console_user_sid,json=consoleUserSid,proto3" json:"console_user_sid,omitempty"` // стабильный SID интерактивного пользователя (Windows) —
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DeviceInfo) Reset() {
@@ -797,6 +799,13 @@ func (x *DeviceInfo) GetTpm() string {
 func (x *DeviceInfo) GetSecureBoot() string {
 	if x != nil {
 		return x.SecureBoot
+	}
+	return ""
+}
+
+func (x *DeviceInfo) GetConsoleUserSid() string {
+	if x != nil {
+		return x.ConsoleUserSid
 	}
 	return ""
 }
@@ -2748,7 +2757,7 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x1d\n" +
 	"\n" +
 	"ip_address\x18\x02 \x01(\tR\tipAddress\x12\x1c\n" +
-	"\ttimestamp\x18\x03 \x01(\x03R\ttimestampJ\x04\b\x01\x10\x02R\tdevice_id\"\xc0\x04\n" +
+	"\ttimestamp\x18\x03 \x01(\x03R\ttimestampJ\x04\b\x01\x10\x02R\tdevice_id\"\xea\x04\n" +
 	"\n" +
 	"DeviceInfo\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x0e\n" +
@@ -2774,7 +2783,8 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\rdomain_joined\x18\x12 \x01(\tR\fdomainJoined\x12\x10\n" +
 	"\x03tpm\x18\x13 \x01(\tR\x03tpm\x12\x1f\n" +
 	"\vsecure_boot\x18\x14 \x01(\tR\n" +
-	"secureBootJ\x04\b\x01\x10\x02R\tdevice_id\"M\n" +
+	"secureBoot\x12(\n" +
+	"\x10console_user_sid\x18\x15 \x01(\tR\x0econsoleUserSidJ\x04\b\x01\x10\x02R\tdevice_id\"M\n" +
 	"\fSoftwareItem\x12#\n" +
 	"\rsoftware_name\x18\x01 \x01(\tR\fsoftwareName\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"\x91\x01\n" +

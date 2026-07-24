@@ -22,6 +22,7 @@ import AuditLog from "@/pages/AuditLog"
 import Users from "@/pages/Users"
 import License from "@/pages/License"
 import APITokens from "@/pages/APITokens"
+import Directory from "@/pages/Directory"
 import Profile from "@/pages/Profile"
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -70,6 +71,7 @@ export default function App() {
           <Route path="users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="license" element={<AdminRoute><License /></AdminRoute>} />
           <Route path="api-tokens" element={<AdminRoute><APITokens /></AdminRoute>} />
+          <Route path="directory" element={<AdminRoute><Directory /></AdminRoute>} />
           <Route path="profile" element={<Profile />} />
         </Route>
       </Routes>

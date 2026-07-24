@@ -9,13 +9,14 @@
 
 RoutineOps — self-hosted MDM/RMM for Windows, macOS and Linux devices. Agents keep a
 persistent gRPC/mTLS channel to your own server and work over the internet —
-no VPN required. Version: see [`VERSION`](./VERSION).
+no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent version:
+[`AGENT_VERSION`](./AGENT_VERSION) (the agent is versioned and released separately).
 
 > Detailed documentation is in Russian — see [README.md](./README.md) and the links below.
 
 ## Features
 
-- **Inventory** — hostname, OS, CPU/RAM/disk, IP, serial number, agent version, installed software, process events.
+- **Inventory** — hostname, OS, CPU/RAM/disk, IP, serial number, agent version, installed software, process events, console user, device owner.
 - **Scripts** — one-off runs on a device or group; scheduled (cron), on-connect and event-triggered policies; script library with results.
 - **Device groups** — membership, per-group policies, run a script on a whole group.
 - **Software policies** — allowed/forbidden rules per device, group or platform.
@@ -24,6 +25,9 @@ no VPN required. Version: see [`VERSION`](./VERSION).
 - **Audit log** — all admin actions, configurable retention.
 - **RBAC** — `it_admin` and read-only `viewer` roles; email invites.
 - **Agent self-update** — ed25519-signed releases, sha256 + manifest signature verification, anti-rollback.
+- **Decommission** — one button in the device page: the agent fully removes itself (files, keys, autostart, installer record). Deleting a device from inventory revokes its certificate, so it cannot "resurrect" as an empty record.
+- **Config as code** — scripts, policies and groups in YAML: `routineops export` / `apply`, fleet configuration in git.
+- **API tokens** — issue and revoke from the UI (role, lifetime) for REST API automation.
 - **mTLS** — agents authenticate with client certificates issued at enrollment.
 
 ## Quick start
@@ -70,6 +74,7 @@ Enterprise adds on top of the features above:
 |---|---|
 | FileVault recovery-key escrow (macOS) | ✅ |
 | Enforced FileVault device lock | ✅ |
+| User directory (LDAP / Active Directory): sync and automatic device-owner assignment | ✅ |
 | Software removal from the UI | in development |
 | Multi-tenancy | in development |
 | SSO/OIDC, MFA, SCIM, SIEM export | in development |

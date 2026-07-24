@@ -234,6 +234,7 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 		AgentVersion:    req.DeviceInfo.AgentVersion,
 		Arch:            req.DeviceInfo.Arch,
 		ConsoleUser:     req.DeviceInfo.ConsoleUser,
+		ConsoleUserSid:  req.DeviceInfo.ConsoleUserSid,
 		DiskEncryption:  req.DeviceInfo.DiskEncryption,
 		OSPatchDate:     req.DeviceInfo.OsPatchDate,
 		BootTime:        req.DeviceInfo.BootTime,

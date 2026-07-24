@@ -14,6 +14,21 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## Unreleased (in main after 2.5.0)
+
+### Devices
+
+- Device owner on the device page: manual assignment to a panel user
+  (`PUT /devices/{id}/owner`); a manual owner takes precedence over the automatic one.
+- **[Enterprise]** User directory (LDAP / Active Directory): a "Directory" page —
+  connection (ldaps), test, scheduled and manual sync; automatic device-owner
+  assignment by exact console-user SID match with a login fallback; disabled
+  accounts never match; the binding survives account renames (canonical key —
+  objectGUID). The free edition ships without the directory code entirely
+  (`/directory/*` → 501).
+
+---
+
 ## 2.5.0 — 24 July 2026
 
 A server-and-web release: panel and server changes accumulated since 2.4.8 —

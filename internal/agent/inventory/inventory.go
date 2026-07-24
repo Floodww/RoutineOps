@@ -167,11 +167,13 @@ func hashReport(r *pb.InventoryReport) (string, error) {
 
 // build собирает proto.InventoryReport. device_id не заполняется — сервер берёт
 // его из mTLS-сертификата (ADR-1). agentVersion — версия бинаря (ldflags).
-// console_user приходит из пакета admin (osConsoleUserFull), а не из collector:
-// collector собирает факты о железе/ОС, «кто за консолью» — знание admin-слоя.
+// console_user и console_user_sid приходят из пакета admin (ConsoleIdentity)
+// одной атомарной парой, а не из collector: collector собирает факты о
+// железе/ОС, «кто за консолью» — знание admin-слоя.
 func build(agentVersion string) *pb.InventoryReport {
 	d := collector.Collect()
 	sw := collector.InstalledSoftware()
+	consoleUser, consoleUserSID := admin.ConsoleIdentity()
 
 	items := make([]*pb.SoftwareItem, 0, len(sw))
 	for _, s := range sw {
@@ -191,7 +193,8 @@ func build(agentVersion string) *pb.InventoryReport {
 			AgentVersion: agentVersion,
 
 			Arch:           d.Arch,
-			ConsoleUser:    admin.ConsoleUser(),
+			ConsoleUser:    consoleUser,
+			ConsoleUserSid: consoleUserSID,
 			DiskEncryption: d.DiskEncryption,
 			OsPatchDate:    d.OSPatchDate,
 			BootTime:       d.BootTime,

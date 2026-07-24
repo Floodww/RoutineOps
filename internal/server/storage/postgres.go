@@ -179,6 +179,12 @@ type Device struct {
 	// Устройство может состоять в НЕСКОЛЬКИХ группах (device_group_members — m2m),
 	// поэтому это список, а не одна ссылка. Первая группа задаёт цвет рамки в UI.
 	Groups []DeviceGroupRef `json:"groups"`
+	// Владелец. owner_id → users (ручная привязка, Free); owner_directory_id →
+	// directory_persons (авто из каталога, Enterprise, LDAP-синк). Заполняются в GetDevice.
+	// Показ: ручной приоритетнее (явное намерение оператора бьёт автоматику), иначе авто.
+	OwnerUserID        string `json:"owner_user_id"`        // owner_id; "" = ручного владельца нет
+	OwnerUserEmail     string `json:"owner_user_email"`     // e-mail ручного владельца (для показа)
+	OwnerDirectoryName string `json:"owner_directory_name"` // имя авто-владельца из каталога
 }
 
 // DeviceGroupRef — компактная ссылка на группу в строке/карточке устройства. Цвет едет
@@ -268,6 +274,7 @@ type InventoryData struct {
 	// normalizeOS(runtime.GOOS), пустым не бывает.
 	Arch           string
 	ConsoleUser    string
+	ConsoleUserSid string // стабильный SID консольного юзера (Windows); ключ матча с каталогом
 	DiskEncryption string
 	OSPatchDate    string
 	BootTime       int64
@@ -309,6 +316,7 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 		    agent_version = COALESCE(NULLIF($11,''), devices.agent_version),
 		    arch = COALESCE(NULLIF($12,''), devices.arch),
 		    console_user = $13,
+		    console_user_sid = $21,
 		    disk_encryption = COALESCE(NULLIF($14,''), devices.disk_encryption),
 		    os_patch_date = COALESCE(NULLIF($15,''), devices.os_patch_date),
 		    boot_time = COALESCE(NULLIF($16::bigint, 0), devices.boot_time),
@@ -320,7 +328,7 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 		WHERE certificate_fingerprint = $8
 		RETURNING id
 	`, d.Hostname, d.OS, d.OSVersion, d.CPU, d.RAM, d.Disk, d.IPAddress, d.CertFingerprint, d.MACAddress, d.SerialNumber, d.AgentVersion,
-		d.Arch, d.ConsoleUser, d.DiskEncryption, d.OSPatchDate, d.BootTime, d.DiskFree, d.DomainJoined, d.TPM, d.SecureBoot).
+		d.Arch, d.ConsoleUser, d.DiskEncryption, d.OSPatchDate, d.BootTime, d.DiskFree, d.DomainJoined, d.TPM, d.SecureBoot, d.ConsoleUserSid).
 		Scan(&deviceID)
 	if err != nil {
 		return fmt.Errorf("update device: %w", err)
@@ -354,8 +362,11 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
        COALESCE(arch, ''), COALESCE(console_user, ''), COALESCE(disk_encryption, ''),
        COALESCE(os_patch_date, ''), COALESCE(boot_time, 0), COALESCE(disk_free, ''),
        COALESCE(domain_joined, ''), COALESCE(tpm, ''), COALESCE(secure_boot, ''),
-       COALESCE(lock_actual_state, ''), lock_actual_at
-  FROM devices WHERE id = $1
+       COALESCE(lock_actual_state, ''), lock_actual_at,
+       COALESCE(d.owner_id::text, ''),
+       COALESCE((SELECT email FROM users WHERE id = d.owner_id), ''),
+       COALESCE((SELECT COALESCE(display_name, sam_account) FROM directory_persons WHERE id = d.owner_directory_id), '')
+  FROM devices d WHERE d.id = $1
  `, id).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LockStatus, &d.LastSeenAt, &d.CreatedAt,
 		&d.CertCN, &d.EnrolledAt, &d.CPU, &d.RAM, &d.Disk, &d.MACAddress, &d.SerialNumber, &d.PublicIP,
@@ -363,7 +374,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 		&d.Arch, &d.ConsoleUser, &d.DiskEncryption,
 		&d.OSPatchDate, &d.BootTime, &d.DiskFree,
 		&d.DomainJoined, &d.TPM, &d.SecureBoot,
-		&d.LockActualState, &d.LockActualAt)
+		&d.LockActualState, &d.LockActualAt,
+		&d.OwnerUserID, &d.OwnerUserEmail, &d.OwnerDirectoryName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil
@@ -414,6 +426,24 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 		software = append(software, s)
 	}
 	return &d, software, rows.Err()
+}
+
+// SetDeviceOwner — ручная привязка владельца (Free): owner_id → users(id). userID == ""
+// снимает привязку (NULL). Авто-владельца из каталога (owner_directory_id) НЕ трогаем —
+// это отдельный слой (LDAP-синк). Неверный uuid / несуществующий пользователь → ошибка
+// (parse/FK) наверх, вызывающий отдаёт 400. Возвращает, нашлось ли устройство.
+func (db *DB) SetDeviceOwner(ctx context.Context, deviceID, userID string) (bool, error) {
+	var tag pgconn.CommandTag
+	var err error
+	if userID == "" {
+		tag, err = db.pool.Exec(ctx, `UPDATE devices SET owner_id = NULL WHERE id = $1`, deviceID)
+	} else {
+		tag, err = db.pool.Exec(ctx, `UPDATE devices SET owner_id = $2 WHERE id = $1`, deviceID, userID)
+	}
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 type Task struct {

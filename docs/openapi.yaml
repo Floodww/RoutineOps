@@ -60,6 +60,7 @@ tags:
   - name: Локальные админ-права
   - name: Пользователи
   - name: API-токены
+  - name: Каталог
   - name: Аудит
   - name: Служебное
 
@@ -362,10 +363,41 @@ paths:
       tags: [Устройства]
       summary: Удаление устройства из базы
       description: |
-        Роль: `it_admin`. Удаляет запись и всё связанное каскадом. Агента на машине
-        НЕ трогает — для этого есть вывод из эксплуатации.
+        Роль: `it_admin`. Удаляет запись и всё связанное каскадом и в той же
+        транзакции отзывает сертификат устройства (тумбстоун отпечатка): живой агент
+        удалённого устройства больше не «воскресит» его пустой записью при следующем
+        подключении. Ре-энролл по новому токену выпускает новый сертификат и проходит.
+        Агента на машине НЕ трогает — для этого есть вывод из эксплуатации; веб-интерфейс
+        предлагает удаление только для уже выведенных из эксплуатации устройств.
       responses:
         '204': { description: Удалено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/devices/{id}/owner:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    put:
+      tags: [Устройства]
+      summary: Ручная привязка владельца устройства
+      description: |
+        Роль: `it_admin`. Привязывает устройство к пользователю панели. Пустой
+        `owner_user_id` снимает владельца. Авто-владельца из каталога
+        (`owner_directory_name`, Enterprise LDAP-синк) эта ручка не трогает — это
+        отдельный слой; при показе ручной владелец приоритетнее.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner_user_id]
+              properties:
+                owner_user_id:
+                  type: string
+                  description: UUID пользователя панели; пустая строка снимает владельца
+      responses:
+        '204': { description: Владелец обновлён }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -1412,6 +1444,106 @@ paths:
         '204': { description: Отозван }
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
 
+  # ─────────────────────────── Каталог (LDAP, Enterprise) ───────────────────────────
+  # Синхронизация персон из LDAP/Active Directory и авто-привязка владельцев устройств.
+  # Возможность редакции Enterprise: в open-core-сборке кода каталога физически нет,
+  # ручки конфига/теста/синка отвечают 501 (страница «Каталог» в UI скрыта).
+
+  /api/v1/directory/config:
+    get:
+      tags: [Каталог]
+      summary: Конфигурация подключения к каталогу
+      description: |
+        Роль: `it_admin`. Bind-пароль в ответ не входит — только флаг `has_password`.
+      x-requires-human: true
+      responses:
+        '200':
+          description: Конфигурация
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DirectoryConfig' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '501': { description: Возможность Enterprise — в этой сборке недоступна }
+    put:
+      tags: [Каталог]
+      summary: Сохранение конфигурации каталога
+      description: |
+        Роль: `it_admin`. Пустой `bind_password` не меняет сохранённый пароль.
+        Пароль хранится вне БД и в аудит не пишется.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/DirectoryConfig'
+                - type: object
+                  properties:
+                    bind_password:
+                      type: string
+                      description: Пустая строка = не менять существующий пароль
+      responses:
+        '204': { description: Сохранено }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '501': { description: Возможность Enterprise — в этой сборке недоступна }
+
+  /api/v1/directory/test:
+    post:
+      tags: [Каталог]
+      summary: Проверка подключения к каталогу
+      description: 'Роль: `it_admin`. Ошибка связи возвращается в теле со статусом 200.'
+      x-requires-human: true
+      responses:
+        '200':
+          description: Итог проверки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, error] }
+                  error: { type: string }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '501': { description: Возможность Enterprise — в этой сборке недоступна }
+
+  /api/v1/directory/sync:
+    post:
+      tags: [Каталог]
+      summary: Немедленная синхронизация каталога
+      description: |
+        Роль: `it_admin`. Тянет персон из каталога и привязывает владельцев устройств:
+        точный матч по SID консольного пользователя, fallback по логину; отключённые
+        учётки не матчатся. Помимо ручного запуска синхронизация идёт по расписанию
+        (`sync_interval_min`).
+      x-requires-human: true
+      responses:
+        '200':
+          description: Итог синхронизации
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DirectorySyncResult' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '501': { description: Возможность Enterprise — в этой сборке недоступна }
+
+  /api/v1/directory/persons:
+    get:
+      tags: [Каталог]
+      summary: Персоны каталога
+      description: |
+        Роль: `it_admin`. Читает синхронизированных персон из БД; в open-core-сборке
+        отвечает пустым списком (синхронизации нет).
+      responses:
+        '200':
+          description: Персоны
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DirectoryPerson' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   # ─────────────────────────── Аудит ───────────────────────────
   /api/v1/audit-log:
     get:
@@ -1735,6 +1867,17 @@ components:
         console_user:
           type: string
           description: 'На Windows в виде `DOMAIN\user`. Пусто — за консолью никого.'
+        owner_user_id:
+          type: string
+          description: UUID ручного владельца (пользователь панели). Пусто — не привязан.
+        owner_user_email:
+          type: string
+          description: E-mail ручного владельца (для показа).
+        owner_directory_name:
+          type: string
+          description: >
+            Имя авто-владельца из каталога (Enterprise LDAP-синк). При показе ручной
+            владелец приоритетнее.
         disk_encryption:
           type: string
           enum: ['enabled', 'disabled', '']
@@ -1913,6 +2056,47 @@ components:
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time, nullable: true }
         last_used_at: { type: string, format: date-time, nullable: true }
+
+    DirectoryConfig:
+      type: object
+      description: >
+        Подключение к LDAP/Active Directory (Enterprise). Bind-пароль в объект не
+        входит: он передаётся отдельным полем `bind_password` при сохранении и
+        обратно не возвращается.
+      properties:
+        enabled: { type: boolean }
+        url: { type: string, example: 'ldaps://dc.example.com:636' }
+        bind_dn: { type: string }
+        base_dn: { type: string }
+        user_filter:
+          type: string
+          example: '(&(objectClass=user)(objectCategory=person))'
+        sync_interval_min:
+          type: integer
+          description: 0 — только ручная синхронизация
+        has_password:
+          type: boolean
+          description: Только в ответе — задан ли bind-пароль
+
+    DirectorySyncResult:
+      type: object
+      properties:
+        synced: { type: integer, description: Персон записано/обновлено }
+        disabled: { type: integer, description: Помечено отключёнными (исчезли из выдачи) }
+        matched: { type: integer, description: Устройств привязано к владельцу }
+
+    DirectoryPerson:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object_guid: { type: string, description: Канон привязки, стабилен при переименовании }
+        object_sid: { type: string }
+        sam_account: { type: string }
+        user_principal: { type: string }
+        display_name: { type: string }
+        email: { type: string }
+        distinguished_name: { type: string }
+        disabled: { type: boolean }
 
     AdminAccessRequest:
       type: object
