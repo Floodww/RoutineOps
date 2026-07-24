@@ -59,7 +59,7 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
   golang:1.26-alpine sh -c '
     set -e
-    V=$(cat VERSION)
+    V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
     # PE-версия для Windows-VERSIONINFO: только semver-часть, иначе 0.0.0 (ср. WINVER в Makefile).
     WINVER=$(echo "$V" | grep -Eo "^[0-9]+\.[0-9]+\.[0-9]+" || echo 0.0.0)
     WV_MAJ=${WINVER%%.*}; WV_REST=${WINVER#*.}; WV_MIN=${WV_REST%%.*}; WV_PAT=${WV_REST#*.}

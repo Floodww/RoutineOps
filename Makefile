@@ -1,6 +1,10 @@
 SHELL := /bin/bash
 MODULE := github.com/Floodww/RoutineOps
-VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0.0)
+# VERSION здесь = ВЕРСИЯ АГЕНТА (файл AGENT_VERSION). Makefile собирает только агента и
+# его пакеты (agent/msi/deb/rpm/pkg/publish-release); сервер+веб версионируются отдельно
+# (файл VERSION в корне, читается Dockerfile). Имя переменной оставлено VERSION, чтобы
+# `make <target> VERSION=<semver>` по-прежнему переопределял версию агента.
+VERSION ?= $(shell cat AGENT_VERSION 2>/dev/null || echo 0.0.0)
 LDFLAGS := -X main.version=$(VERSION)
 
 # Числовая PE-версия для VERSIONINFO Windows-exe из VERSION (semver x.y.z); если

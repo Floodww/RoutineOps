@@ -114,6 +114,9 @@ export interface Device {
   public_ip?: string
   serial_number?: string
   agent_version?: string
+  // Кто сейчас за консолью (Windows — DOMAIN\user; darwin/linux — логин активной сессии).
+  // "" / отсутствует = за консолью никого либо сервер старой версии поля не отдаёт.
+  console_user?: string
   // Устройство может состоять в нескольких группах. Может отсутствовать: сервер старой
   // версии поля не отдаёт, а только что созданное pending-устройство держим локально.
   groups?: DeviceGroupRef[]

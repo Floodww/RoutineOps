@@ -21,7 +21,20 @@ import (
 // Именно .bat, а не one-liner `cmd /c`: батч-контекст даёт корректные метки/goto
 // и `%%i`, которые в командной строке `cmd /c` ведут себя иначе; плюс батник
 // живёт вне удаляемых каталогов (во %TEMP%) и не держит их хэндлом.
-func scheduleSelfDelete(binPath string, leftover []string, log *slog.Logger) error {
+// stopServiceEarly на Windows снимает службу до планирования делетера (как раньше в
+// Run): SCM-стоп кооперативен и процесс синхронно не убивает, а bat-делетер затем
+// добьёт sc stop/delete уже после выхода процесса. stopService в scheduleSelfDelete
+// поэтому не участвует (сигнатура единая, параметр там игнорируется).
+func stopServiceEarly(fn func() error, log *slog.Logger) {
+	if fn == nil {
+		return
+	}
+	if err := fn(); err != nil {
+		log.Warn("decommission: снятие службы не удалось — продолжаю снос", slog.Any("error", err))
+	}
+}
+
+func scheduleSelfDelete(binPath string, leftover []string, _ func() error, log *slog.Logger) error {
 	// Снять трей/оверлей ДО планирования делетера: пока трей юзер-сессии жив, он держит
 	// exe открытым, и Windows не даёт удалить ни бинарь, ни каталог установки. Здесь же
 	// — убрать автозапуск трея (иначе поднимется на следующем логоне) и пустую ветку

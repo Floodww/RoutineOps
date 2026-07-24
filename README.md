@@ -11,7 +11,8 @@
 
 RoutineOps — self-hosted MDM/RMM для парка Windows-, macOS- и Linux-устройств: агенты держат
 постоянный gRPC/mTLS-канал с вашим сервером и работают через интернет без VPN.
-Версия — файл [`VERSION`](./VERSION).
+Версия продукта (сервер+веб) — файл [`VERSION`](./VERSION); версия агента — файл
+[`AGENT_VERSION`](./AGENT_VERSION) (агент версионируется и выпускается отдельно).
 
 <img width="2862" height="1628" alt="image" src="https://github.com/user-attachments/assets/a434096b-1196-43ec-9aed-f9ff17644402" />
 

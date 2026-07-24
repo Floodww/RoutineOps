@@ -376,10 +376,18 @@ export default function DeviceDetail() {
               >
                 Вывести из эксплуатации
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem destructive disabled={deleting} onSelect={() => setConfirmDelete(true)}>
-                Удалить из инвентаря
-              </DropdownMenuItem>
+              {/* Только для decommissioned: delete на живом устройстве воскрешает его
+                  скелетом (агент апсертит строку heartbeat'ом в gateway) и сиротеет.
+                  Сначала «Вывести из эксплуатации» снимает агента, потом чистим запись.
+                  Never-connected удаляют в EnrollmentQueue — там свой гард по last_seen. */}
+              {device.status === "decommissioned" && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem destructive disabled={deleting} onSelect={() => setConfirmDelete(true)}>
+                    Удалить из инвентаря
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
           )}
@@ -543,6 +551,10 @@ export default function DeviceDetail() {
         </h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-3">
+            <div>
+              <p className="text-xs text-soft mb-0.5">Пользователь за консолью</p>
+              <p className="text-sm text-foreground">{device.console_user || "—"}</p>
+            </div>
             <div>
               <p className="text-xs text-soft mb-0.5">Device ID (cert CN)</p>
               <p className="text-sm font-mono text-foreground">{device.cert_cn || "—"}</p>

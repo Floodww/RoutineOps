@@ -923,6 +923,18 @@ func (db *DB) GetDeviceStatusByFingerprint(ctx context.Context, fingerprint stri
 	return status, nil
 }
 
+// IsFingerprintRevoked — отозван ли серт (устройство удалили из инвентаря). Connect
+// режет отозванный отпечаток в ветке неизвестного fingerprint, чтобы удалённое
+// устройство не воскресало через ADR-1 регистрацию из cert CN. Реэнролл берёт новый
+// серт → новый fingerprint → не отозван. См. миграцию 034 и DeleteDevice.
+func (db *DB) IsFingerprintRevoked(ctx context.Context, fingerprint string) (bool, error) {
+	var exists bool
+	err := db.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM revoked_fingerprints WHERE fingerprint = $1)`, fingerprint,
+	).Scan(&exists)
+	return exists, err
+}
+
 func (db *DB) UpdateDeviceStatus(ctx context.Context, deviceID, status string) error {
 	_, err := db.pool.Exec(ctx,
 		`UPDATE devices SET status = $2 WHERE id = $1`, deviceID, status)
@@ -941,7 +953,35 @@ var ErrDeviceHasEscrow = errors.New("device has recovery-key escrow records")
 // ⚠️ Живой агент воскресит устройство следующим heartbeat (upsert по cert-fingerprint) —
 // удаление имеет смысл только для списанных/переустановленных машин.
 func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err error) {
-	tag, err := db.pool.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Тумбстоун серта ДО удаления, в ОДНОЙ транзакции с ним. Серт на машине остаётся
+	// валидным; без отзыва агент по нему переподключится и Connect заведёт устройство
+	// заново (ADR-1 регистрация из cert CN не отличает новое от воскресшего). Транзакция
+	// критична: если DELETE упрётся в escrow-констрейнт, отзыв откатится вместе с ним —
+	// иначе отрезали бы живое устройство, которое так и не удалилось (см. миграцию 034).
+	var fp string
+	if err = tx.QueryRow(ctx,
+		`SELECT COALESCE(certificate_fingerprint, '') FROM devices WHERE id = $1`, id,
+	).Scan(&fp); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil // устройства нет — нечего удалять (→ 404)
+		}
+		return false, err
+	}
+	if fp != "" {
+		if _, err = tx.Exec(ctx,
+			`INSERT INTO revoked_fingerprints (fingerprint, device_id) VALUES ($1, $2)
+			 ON CONFLICT (fingerprint) DO NOTHING`, fp, id); err != nil {
+			return false, err
+		}
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		// Только escrow-констрейнт (ON DELETE RESTRICT) значит «у устройства есть эскроу».
@@ -952,6 +992,9 @@ func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err erro
 			pgErr.ConstraintName == "recovery_key_escrow_device_id_fkey" {
 			return false, ErrDeviceHasEscrow
 		}
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil

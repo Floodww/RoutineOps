@@ -140,17 +140,29 @@ func Uninstall() error {
 	// и /usr/local/bin/RoutineOps-agent остался бы неудаляемым и обычным `rm`. Снимаем флаг и с
 	// plist, и с бинаря. Best-effort: реальную причину покажет само удаление.
 	_ = tamper.Unlock(path, InstallLayout().BinPath)
+	// ПОРЯДОК КРИТИЧЕН. При decommission Uninstall вызывает САМ демон, а launchctl
+	// bootout шлёт ему SIGKILL — любой код ПОСЛЕ bootout уже не выполнится. Поэтому
+	// bootout — самая последняя операция, а receipt и plist убираем ДО него; иначе
+	// снос обрывался на середине (бинарь/plist/receipt оставались), а сервер получал
+	// SUCCESS. На интерактивном `agent uninstall` вызывающий — отдельный процесс,
+	// bootout его не трогает, порядок безвреден.
 	if os.Geteuid() == 0 {
-		_ = exec.Command("launchctl", "bootout", "system/"+Name).Run()
-		_ = exec.Command("launchctl", "unload", "-w", path).Run()
 		// Receipt .pkg: без forget `pkgutil --pkgs` числит агента установленным и
 		// после сноса — аналог ARP-записи Windows, которую там снимает msiexec /x.
 		// Best-effort: при ручной установке бинарём receipt-а нет («No receipt») —
 		// это норма, не сбой снятия службы.
 		_ = exec.Command("pkgutil", "--forget", pkgReceiptIdentifier).Run()
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("удаление plist %s: %w", path, err)
+	rmErr := os.Remove(path)
+	if os.Geteuid() == 0 {
+		// bootout по МЕТКЕ (файл plist уже удалён — ему он не нужен): снимает job из
+		// launchd и завершает демон. Устаревший `launchctl unload -w <plist>` тут
+		// неприменим — он требует файл, который мы только что удалили; bootout есть
+		// на всех поддерживаемых macOS (10.11+).
+		_ = exec.Command("launchctl", "bootout", "system/"+Name).Run()
+	}
+	if rmErr != nil && !os.IsNotExist(rmErr) {
+		return fmt.Errorf("удаление plist %s: %w", path, rmErr)
 	}
 	return nil
 }

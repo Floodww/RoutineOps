@@ -90,6 +90,52 @@ func TestRun_CallsPurgeKeystoreHookAndContinuesOnError(t *testing.T) {
 	}
 }
 
+// Инвариант ПОРЯДКА снятия службы, зависящий от платформы. На macOS launchctl
+// bootout (внутри StopService) шлёт SIGKILL самому процессу-демону, выполняющему
+// снос, поэтому службу обязано снимать ПОСЛЕ удаления бинаря; на Windows/Linux
+// снятие безопасно РАНО (до удаления файлов) и делается там (см. stopServiceEarly).
+//
+// Тест НЕ скипается по GOOS: на linux/windows-CI он сторожит, что рефактор
+// stopServiceEarly/scheduleSelfDelete не переставил снятие на этих платформах, а
+// счётчик вызовов ловит частичную darwin-регрессию (снятие И рано, И поздно) на
+// ЛЮБОЙ ОС. Живьём darwin-ветку («снятие после бинаря») исполняет только go test
+// на маке — macOS-раннера в CI нет (заведение macOS-джобы — задача мейнтейнера).
+func TestRun_StopServiceOrderingPerPlatform(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "agent-bin")
+	if err := os.WriteFile(bin, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	var binPresentEver bool // sticky: бинарь существовал ХОТЬ НА ОДНОМ вызове StopService
+	err := Run(Plan{BinPath: bin}, Hooks{
+		StopService: func() error {
+			calls++
+			if _, statErr := os.Stat(bin); statErr == nil {
+				binPresentEver = true
+			}
+			return nil
+		},
+	}, quietLog())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Ровно один вызов на всех платформах: два вызова (ранний + поздний) означали бы
+	// частичную darwin-регрессию, которую перезапись «последнего» флага замаскировала.
+	if calls != 1 {
+		t.Fatalf("StopService вызван %d раз, ожидался ровно 1", calls)
+	}
+	if runtime.GOOS == "darwin" {
+		if binPresentEver {
+			t.Error("darwin: StopService вызван при ЖИВОМ бинаре — ранний launchctl bootout снёс бы сам процесс сноса, teardown оборвался бы (полевой блокер v2.4.9)")
+		}
+	} else {
+		if !binPresentEver {
+			t.Errorf("%s: StopService вызван уже ПОСЛЕ удаления бинаря — рефактор изменил прежний (ранний) порядок снятия службы", runtime.GOOS)
+		}
+	}
+}
+
 // removeDirSafe обязан отказаться удалять корень ФС и системные каталоги.
 func TestRemoveDirSafe_RejectsDangerous(t *testing.T) {
 	dangerous := []string{string(filepath.Separator), ""}

@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package decommission
 
@@ -7,11 +7,23 @@ import (
 	"os"
 )
 
-// scheduleSelfDelete на unix удаляет бинарь сразу: unlink работающего
-// исполняемого файла легален (inode живёт, пока процесс держит открытый образ, и
-// освобождается на выходе). leftover-каталоги на unix пусты — RemoveAll там не
-// упирается в открытые хэндлы, как на Windows, поэтому отдельного делетера не надо.
-func scheduleSelfDelete(binPath string, leftover []string, log *slog.Logger) error {
+// stopServiceEarly на Linux и прочих unix (кроме darwin): systemctl disable --now
+// НЕ убивает процесс синхронно (SIGTERM с grace-периодом), teardown успевает
+// завершиться — поэтому службу снимаем здесь, до удаления файлов, как и раньше.
+func stopServiceEarly(fn func() error, log *slog.Logger) {
+	if fn == nil {
+		return
+	}
+	if err := fn(); err != nil {
+		log.Warn("decommission: снятие службы не удалось — продолжаю снос", slog.Any("error", err))
+	}
+}
+
+// scheduleSelfDelete на unix удаляет остаточные каталоги и бинарь синхронно:
+// unlink работающего исполняемого файла легален (inode живёт, пока процесс держит
+// открытый образ). stopService здесь уже вызван в stopServiceEarly — параметр не
+// используется (сигнатура единая для всех платформ).
+func scheduleSelfDelete(binPath string, leftover []string, _ func() error, log *slog.Logger) error {
 	for _, d := range safeLeftover(leftover, log) {
 		if err := os.RemoveAll(d); err != nil {
 			log.Warn("decommission: не удалить остаточный каталог", slog.String("path", d), slog.Any("error", err))

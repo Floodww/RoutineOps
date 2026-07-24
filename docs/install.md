@@ -336,7 +336,7 @@ NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{en
 docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
   golang:1.26-alpine sh -c '
-    V=$(cat VERSION)
+    V=$(cat AGENT_VERSION)   # версия АГЕНТА (отдельно от продукта/сервера)
     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X main.version=${V}" \
       -o /tmp/agent_linux_arm64 ./cmd/agent

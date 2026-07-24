@@ -108,8 +108,8 @@ per-deployer ключом `release_ed25519.pem` (его создаёт `install.
 **Вручную** (ключ по умолчанию `RELEASE_KEY=~/release_ed25519.pem`):
 
 ```sh
-make build-win VERSION=$(cat VERSION)
-make publish-release BINARY=bin/agent_windows_amd64.exe OS=windows ARCH=amd64 VERSION=v$(cat VERSION)
+make build-win VERSION=$(cat AGENT_VERSION)
+make publish-release BINARY=bin/agent_windows_amd64.exe OS=windows ARCH=amd64 VERSION=v$(cat AGENT_VERSION)
 # эквивалент: go run ./cmd/publish-release -binary … -version … -os … -arch … -key …
 ```
 

@@ -71,6 +71,19 @@ func buildDecommissionPlan(cfg *config.Config) decommission.Plan {
 		lay.EnrollEnvPath, lay.BootstrapCAPath,
 	}
 
+	// release_pubkey оседает РЯДОМ с CA. Служба читает/пишет его в CertDir — это уже
+	// releasePubKeyPath(cfg) выше. Но enroll из пакета шёл с -ca <bootstrap CA>, и
+	// ВТОРАЯ копия осела рядом с bootstrap-CA (напр. /etc/routineops/release_pubkey).
+	// Сам ca.crt оттуда сносит BootstrapCAPath, а сосед оставался бы — это пин-
+	// материал проверки подписей релизов: при реэнролле машины на ДРУГОЙ сервер
+	// releaseKeyCandidates взял бы первым путь рядом с новым CA, подхватил старый
+	// ключ, и self-update молча отклонял бы подписи нового сервера (fail-closed, но
+	// вслепую). Пустой BootstrapCAPath (Windows) НЕ трогаем: filepath.Dir("") дал бы
+	// относительный "release_pubkey".
+	if lay.BootstrapCAPath != "" {
+		files = append(files, filepath.Join(filepath.Dir(lay.BootstrapCAPath), releaseKeyFile))
+	}
+
 	dirs := dedupNonEmpty([]string{
 		cfg.OutboxDir,
 		cfg.FilevaultEscrowDir,

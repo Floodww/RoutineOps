@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -47,5 +48,15 @@ func TestBuildDecommissionPlan_CoversEnrollArtifactsAndLogs(t *testing.T) {
 	}
 	if lay.LogDir != "" && !slices.Contains(plan.Dirs, lay.LogDir) {
 		t.Errorf("plan.Dirs не содержит LogDir %q — логи пережили бы снос", lay.LogDir)
+	}
+
+	// release_pubkey, осевший рядом с bootstrap-CA при enroll из пакета (-ca
+	// <bootstrap CA>), обязан попасть в план: иначе пин-ключ проверки подписей
+	// релизов переживёт снос и сломает self-update при реэнролле на другой сервер.
+	if lay.BootstrapCAPath != "" {
+		sibling := filepath.Join(filepath.Dir(lay.BootstrapCAPath), releaseKeyFile)
+		if !slices.Contains(plan.Files, sibling) {
+			t.Errorf("plan.Files не содержит release_pubkey рядом с bootstrap-CA (%q) — пин-ключ пережил бы снос", sibling)
+		}
 	}
 }

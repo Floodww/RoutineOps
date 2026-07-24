@@ -31,9 +31,10 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
-// version — semver релиза, вшивается через ldflags (-X main.version=$(cat VERSION))
-// на сборке образа (Dockerfile ARG VERSION). Пусто/"dev" в локальной сборке.
-// Единственный источник — файл VERSION в корне (тот же, что сравнивает self-update).
+// version — semver ПРОДУКТА (сервер+веб), вшивается через ldflags (-X main.version)
+// на сборке образа (Dockerfile ARG VERSION). Пусто/"dev" в локальной сборке. Источник —
+// файл VERSION в корне. Агент версионируется ОТДЕЛЬНО (файл AGENT_VERSION); self-update
+// сравнивает именно её, а не эту.
 var version = "dev"
 
 func main() {

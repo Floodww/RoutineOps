@@ -15,18 +15,28 @@ package keystore
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 
-// mdmCopyIdentity ищет идентичность по метке (kSecAttrLabel) и возвращает её
-// сертификат и приватный ключ. kc != NULL ограничивает поиск одним keychain
-// (для изолированных тестов); NULL — список поиска по умолчанию.
+// mdmCopyIdentity ищет идентичность, чей сертификат несёт CN РОВНО label, и
+// возвращает её сертификат и приватный ключ. kc != NULL ограничивает поиск одним
+// keychain (для изолированных тестов); NULL — список поиска по умолчанию.
+//
+// Фильтр kSecAttrLabel в запросе kSecClassIdentity на legacy file-keychain
+// (System.keychain — наша боевая цель, см. ProvisionTarget) ИГНОРИРУЕТСЯ:
+// проверено живьём — запрос с любой меткой отдаёт первую попавшуюся идентичность
+// хранилища. На System.keychain парка живут и чужие идентичности (VPN, Wi-Fi,
+// сторонний MDM) — полагаться на порядок нельзя. Поэтому перечисляем ВСЕ
+// идентичности и сверяем CN сертификата на точное равенство сами — зеркало
+// certSubjectCN в purge_windows.go.
 static OSStatus mdmCopyIdentity(const char *label, SecKeychainRef kc,
                                 SecCertificateRef *outCert, SecKeyRef *outKey) {
     CFStringRef cflabel = CFStringCreateWithCString(kCFAllocatorDefault, label, kCFStringEncodingUTF8);
+    if (!cflabel) {
+        return errSecParam; // метка не декодируется как UTF-8 — сверять нечем
+    }
     CFMutableDictionaryRef q = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(q, kSecClass, kSecClassIdentity);
-    CFDictionarySetValue(q, kSecAttrLabel, cflabel);
     CFDictionarySetValue(q, kSecReturnRef, kCFBooleanTrue);
-    CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
+    CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitAll);
 
     CFArrayRef list = NULL;
     if (kc) {
@@ -35,15 +45,37 @@ static OSStatus mdmCopyIdentity(const char *label, SecKeychainRef kc,
         CFDictionarySetValue(q, kSecMatchSearchList, list);
     }
 
-    SecIdentityRef ident = NULL;
-    OSStatus st = SecItemCopyMatching(q, (CFTypeRef *)&ident);
-    if (st == errSecSuccess && ident) {
-        st = SecIdentityCopyCertificate(ident, outCert);
-        if (st == errSecSuccess) {
+    CFArrayRef found = NULL;
+    OSStatus st = SecItemCopyMatching(q, (CFTypeRef *)&found);
+    if (st == errSecSuccess && found) {
+        st = errSecItemNotFound; // нет ТОЧНОГО совпадения CN — «не найдено»
+        CFIndex n = CFArrayGetCount(found);
+        for (CFIndex i = 0; i < n; i++) {
+            SecIdentityRef ident = (SecIdentityRef)CFArrayGetValueAtIndex(found, i);
+            SecCertificateRef cert = NULL;
+            if (SecIdentityCopyCertificate(ident, &cert) != errSecSuccess || !cert) {
+                continue;
+            }
+            CFStringRef cn = NULL;
+            bool match = false;
+            if (SecCertificateCopyCommonName(cert, &cn) == errSecSuccess && cn) {
+                match = (CFStringCompare(cn, cflabel, 0) == kCFCompareEqualTo);
+                CFRelease(cn);
+            }
+            if (!match) {
+                CFRelease(cert);
+                continue;
+            }
             st = SecIdentityCopyPrivateKey(ident, outKey);
+            if (st == errSecSuccess) {
+                *outCert = cert; // ретейн от SecIdentityCopyCertificate уезжает вызывающему
+            } else {
+                CFRelease(cert);
+            }
+            break;
         }
+        CFRelease(found);
     }
-    if (ident) CFRelease(ident);
     if (list) CFRelease(list);
     CFRelease(q);
     CFRelease(cflabel);

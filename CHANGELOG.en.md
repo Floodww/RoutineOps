@@ -8,7 +8,101 @@ not reconstructed retroactively.
 Format: one section per release, grouped by area, listing changes an operator would
 notice. Entries marked **[Enterprise]** cover capabilities absent from the free edition.
 
-The version number is shared by the server, the web interface and the agent.
+The product (server + web) and the agent are versioned separately: the product uses
+the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one side
+(e.g. an agent fix does not move the server version, and vice versa).
+
+---
+
+## 2.5.0 — 24 July 2026
+
+A server-and-web release: panel and server changes accumulated since 2.4.8 —
+decommissioning from the device page, pagination, config-as-code, API tokens — plus
+exact identity matching in the macOS keystore.
+
+### Devices
+
+- Decommission a device straight from its page: a button gated by typing the
+  hostname; the server queues a full agent self-removal and flips the status to
+  "decommissioned" once the agent confirms.
+- "Console user" on the device page — who is at the machine now (Windows:
+  `DOMAIN\user`; macOS/Linux — the active session login).
+- Device and audit-log lists are paginated (`X-Total-Count` header); audit-log
+  filters are evaluated on the server.
+
+### Security
+
+- Deleting a device from the inventory revokes its certificate: a deleted device with
+  a live agent no longer "resurrects" as an empty record on its next connection.
+  "Delete from inventory" on the device page is now available only for
+  already-decommissioned devices.
+- macOS keystore: the agent's identity is resolved by an exact certificate-name
+  match. Previously, on a shared System keychain (holding third-party VPN/Wi-Fi
+  identities), the agent could pick up a certificate that was not its own; key
+  removal on teardown is now targeted as well.
+
+### Management
+
+- Issue and revoke API tokens from the panel (role, lifetime; the token is shown
+  once). Previously tokens were issued only by a manual API call.
+- Config-as-code: export and apply scripts, policies and groups via YAML and the
+  `routineops` CLI. A resource's identity is its name (script and policy names are
+  now unique).
+- Bulk enrollment tokens: revocation and listing; a "not connected" section in the
+  enrollment queue.
+
+### Compatibility
+
+- Database migrations are applied automatically on server upgrade.
+- The product (server+web) and the agent are now versioned separately (`VERSION` and
+  `AGENT_VERSION` files) — a release may move only one component.
+
+---
+
+## 2.4.9 — 24 July 2026
+
+An agent release: decommissioning is now carried through to the end on macOS and
+Linux — a decommissioned device is left with no files, no keys and no way back
+into the fleet.
+
+> This release covers the agent only. Server and web changes accumulated since
+> 2.4.8 (including the decommission button on the device page) will ship with
+> 2.5.0.
+
+### Devices
+
+- Decommissioning on macOS is now complete. Previously the removal aborted right
+  at the start: deregistering the service instantly terminated the agent process
+  that was performing the removal — a "decommissioned" machine kept the agent
+  binary, keys, data, autostart entries and the installer record, while the
+  console reported success. The service is now deregistered as the last step,
+  after the files are gone; Windows and Linux behaviour is unchanged.
+- The macOS installer record (.pkg receipt) no longer survives decommissioning:
+  the package is forgotten by the system along with the other traces of the
+  installation.
+- Decommissioning on Linux also revokes the installation itself: the enrollment
+  file with its multi-use token and the bootstrap certificate are removed, and
+  the package is deregistered from dpkg/rpm. Previously reinstalling the package
+  with standard system tools silently brought a decommissioned machine back into
+  the fleet.
+- The agent's key material is also removed when the system key store is in use:
+  the certificate and private key pair is purged from the macOS Keychain and
+  from the Windows certificate store (together with the private CNG key).
+  Previously it stayed in the system indefinitely in this mode. On Windows the
+  certificate name is matched exactly before anything is deleted, so unrelated
+  entries are not touched.
+
+### Compatibility
+
+- Upgrading the agent from 2.4.8 requires no manual steps.
+- The server side is not rolled out by this release: production servers stay on
+  2.4.8, and the accumulated server and web changes will ship with 2.5.0. Note
+  that the v2.4.9 tag is cut from the shared development branch and does
+  physically contain those changes together with migration 033 (unique script
+  and policy names; duplicates get renamed). The standard `update.sh` upgrades
+  the server as a whole and would apply it — to upgrade agents only, publish the
+  agent artifacts (publish-release / the releases directory) without rebuilding
+  the server.
 
 ---
 

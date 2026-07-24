@@ -79,3 +79,28 @@ func TestConnect_DecommissionedDevice(t *testing.T) {
 		t.Errorf("got %v, want PermissionDenied для decommissioned", code)
 	}
 }
+
+// Удаление устройства отзывает его серт (тумбстоун, миграция 034). Агент по всё ещё
+// валидному серту переподключается — Connect режет отозванный fingerprint и НЕ заводит
+// устройство заново. Регрессия на воскрешение через hard-delete + ADR-1 регистрацию.
+// Отличие от нового устройства: у того fingerprint неизвестен, но НЕ отозван → проходит.
+func TestConnect_RevokedFingerprintRejectedNoResurrection(t *testing.T) {
+	db := newDB(t)
+	gw := newGW(t, db)
+
+	ctx, fp := makeCertCtx(t, "device-deleted-revoked")
+	registerDevice(t, db, "device-deleted-revoked", fp)
+	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	if _, err := db.DeleteDevice(context.Background(), devID); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+
+	stream := &mockStream{ctx: ctx}
+	if code := status.Code(gw.Connect(stream)); code != codes.NotFound {
+		t.Errorf("got %v, want NotFound для отозванного серта", code)
+	}
+	// Воскрешения нет: устройство по этому серту в БД не появилось заново.
+	if id, _ := db.GetDeviceIDByFingerprint(context.Background(), fp); id != "" {
+		t.Errorf("воскрешение: устройство %q заведено заново по отозванному серту", id)
+	}
+}

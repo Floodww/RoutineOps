@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom"
-import { LayoutDashboard, Monitor, Bell, Shield, LogOut, LogIn, KeyRound, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck } from "lucide-react"
+import { LayoutDashboard, Monitor, Bell, Shield, LogOut, LogIn, KeyRound, KeySquare, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck } from "lucide-react"
 import { logout } from "@/lib/auth"
 import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import { useMe } from "@/lib/useMe"
@@ -120,6 +120,7 @@ export default function Layout() {
         { to: "/profile", label: "Профиль", icon: UserCircle, badge: 0, adminOnly: false },
         { to: "/users", label: "Пользователи", icon: Users, badge: 0, adminOnly: true },
         { to: "/license", label: "Лицензия", icon: BadgeCheck, badge: 0, adminOnly: true },
+        { to: "/api-tokens", label: "API-токены", icon: KeySquare, badge: 0, adminOnly: true },
       ],
     },
   ]

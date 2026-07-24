@@ -63,11 +63,13 @@ func Run(plan Plan, hooks Hooks, log *slog.Logger) error {
 	if hooks.DisarmTamper != nil {
 		hooks.DisarmTamper()
 	}
-	if hooks.StopService != nil {
-		if err := hooks.StopService(); err != nil {
-			log.Warn("decommission: снятие службы не удалось — продолжаю снос", slog.Any("error", err))
-		}
-	}
+	// Снятие службы. На Windows/Linux безопасно ЗДЕСЬ, до удаления файлов: SCM-стоп
+	// кооперативен, systemd шлёт SIGTERM с grace-периодом — процесс успевает
+	// доснести. На macOS launchctl bootout шлёт SIGKILL самому процессу-демону,
+	// который И выполняет снос: сделай снятие тут — teardown оборвётся на середине,
+	// а сервер уже получил SUCCESS. Поэтому на darwin stopServiceEarly — no-op, а
+	// службу снимает scheduleSelfDelete САМЫМ ПОСЛЕДНИМ шагом (см. selfdelete_darwin).
+	stopServiceEarly(hooks.StopService, log)
 	// Идентичность в хранилище ОС — пока процесс ещё привилегирован и до удаления
 	// файлов/бинаря. Best-effort: остаточный ключевой материал на списанном железе —
 	// вопрос гигиены, доступа он не даёт (сервер режет decommissioned на границе).
@@ -95,7 +97,10 @@ func Run(plan Plan, hooks Hooks, log *slog.Logger) error {
 
 	log.Warn("decommission: агент удаляет себя по команде сервера",
 		slog.String("bin", plan.BinPath), slog.Int("leftover_dirs", len(leftover)))
-	return scheduleSelfDelete(plan.BinPath, leftover, log)
+	// hooks.StopService прокидываем в scheduleSelfDelete: на macOS он вызывается там
+	// ПОСЛЕДНИМ (bootout убивает нас), на Windows/Linux уже отработал в
+	// stopServiceEarly и здесь игнорируется.
+	return scheduleSelfDelete(plan.BinPath, leftover, hooks.StopService, log)
 }
 
 // removeFile удаляет один файл. Отсутствие — не ошибка (агент мог не создать его).

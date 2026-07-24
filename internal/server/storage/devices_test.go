@@ -87,6 +87,29 @@ func TestDeleteDevice_NotFound(t *testing.T) {
 	}
 }
 
+// Удаление устройства отзывает его серт (тумбстоун): иначе агент по всё ещё валидному
+// серту воскресил бы устройство на следующем Connect. Реэнролл берёт новый серт и под
+// тумбстоун не попадает. См. миграцию 034 и Connect.
+func TestDeleteDevice_RevokesFingerprint(t *testing.T) {
+	db := newDB(t)
+	fp := fmt.Sprintf("fp-revoke-%s", uniq(t))
+	if err := db.UpsertDeviceHeartbeat(context.Background(),
+		storageHeartbeatData(fp, "agent-revoke", "agent-revoke", "1.2.3.4")); err != nil {
+		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
+	}
+	id, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
+
+	if revoked, _ := db.IsFingerprintRevoked(context.Background(), fp); revoked {
+		t.Fatal("fingerprint отозван ДО удаления — не должен")
+	}
+	if _, err := db.DeleteDevice(context.Background(), id); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if revoked, err := db.IsFingerprintRevoked(context.Background(), fp); err != nil || !revoked {
+		t.Errorf("fingerprint не отозван ПОСЛЕ удаления (revoked=%v err=%v)", revoked, err)
+	}
+}
+
 func TestUpsertDeviceHeartbeat_CreatesThenUpdates(t *testing.T) {
 	db := newDB(t)
 	fp := fmt.Sprintf("fp-%s", uniq(t))

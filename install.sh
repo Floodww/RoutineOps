@@ -222,7 +222,7 @@ fi
 # отдаём ТОЛЬКО нужное (DATABASE_DSN для publish-release + RELEASE_PUBKEY), не весь
 # .env.prod (JWT/пароли билд-контейнеру не нужны). publish-release подписывает
 # манифест и делает UPSERT в agent_releases (идемпотентно при повторе).
-echo "Сборка + публикация агентов v${VERSION} (подпись per-deployer ключом)..."
+echo "Сборка + публикация агентов v$(cat AGENT_VERSION) (подпись per-deployer ключом)..."
 mkdir -p releases
 PG=$($DC -f docker-compose.prod.yml ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
@@ -230,7 +230,7 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" -e RELEASE_PUBKEY="$RELEASE_PUBKEY" \
   golang:1.26-alpine sh -c '
     set -e
-    V=$(cat VERSION)
+    V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
     WMAJ=$(echo "$V" | cut -d. -f1); WMIN=$(echo "$V" | cut -d. -f2); WPAT=$(echo "$V" | cut -d. -f3)
     # darwin здесь НЕТ: macOS-агенту нужен cgo (Cocoa-замок + Keychain), а
     # `CGO_ENABLED=0 GOOS=darwin` молча собирает заглушки по тегам `!darwin || !cgo`.

@@ -269,10 +269,10 @@ sha256_of() { # формат `<hash>  <файл>`, совместим с `sha256
 mkdir -p "$REPO_ROOT/build/darwin"
 cp "$BIN_SRC" "$REPO_ROOT/build/darwin/agent_darwin_${REL_ARCH}"
 ( cd "$REPO_ROOT/build/darwin" && sha256_of "agent_darwin_${REL_ARCH}" > "agent_darwin_${REL_ARCH}.sha256" )
-# Версия, ВШИТАЯ в этот бинарь (-X main.version). Деплойер публикует prebuilt под
-# СВОИМ $(cat VERSION); если мейнтейнер забыл пересобрать артефакт после бампа,
-# агент вечно качал бы «новую» версию и продолжал рапортовать старую — петля
-# обновления каждые 6ч. update.sh/install.sh сверяют этот файл с VERSION.
+# Версия, ВШИТАЯ в этот бинарь (-X main.version) — версия АГЕНТА. Деплойер публикует
+# prebuilt под СВОИМ $(cat AGENT_VERSION); если мейнтейнер забыл пересобрать артефакт
+# после бампа, агент вечно качал бы «новую» версию и продолжал рапортовать старую — петля
+# обновления каждые 6ч. update.sh/install.sh сверяют этот файл с AGENT_VERSION.
 echo "v$VERSION" > "$REPO_ROOT/build/darwin/agent_darwin_${REL_ARCH}.version"
 cp "$OUT_PKG" "$REPO_ROOT/build/pkg/RoutineOps-agent.pkg"
 

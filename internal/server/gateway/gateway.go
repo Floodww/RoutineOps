@@ -63,9 +63,22 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 		return status.Errorf(codes.PermissionDenied, "device is %s", devStatus)
 	}
 	if devStatus == "" {
-		// Отпечаток неизвестен в БД: устройство переустановлено, а enroll не сохранил
-		// новый fingerprint (БАГ 4) — heartbeat создаст дубль, и lock уедет в призрак.
-		// С фиксом БАГ 4 быть не должно; оставляем сигнал на случай старых записей.
+		// Fingerprint неизвестен серверу. Два случая, неразличимых по самому серту:
+		//   (a) легитимная первичная регистрация — устройство заводится из cert CN на
+		//       первом Connect (ADR-1), строку создаёт heartbeat-upsert ниже;
+		//   (b) агент УДАЛЁННОГО устройства пытается воскреснуть по всё ещё валидному
+		//       серту — раньше это тоже проходило в (a) и заводило устройство-призрак.
+		// Различаем тумбстоуном: отозванный при удалении отпечаток режем, новый — пускаем.
+		// Реэнролл берёт новый серт → не отозван → регистрируется штатно (миграция 034).
+		revoked, rerr := g.db.IsFingerprintRevoked(stream.Context(), fingerprint)
+		if rerr != nil {
+			g.logger.Error("connect: revoked-check", "device_id", deviceID, "err", rerr)
+			return status.Errorf(codes.Internal, "revoked check: %v", rerr)
+		}
+		if revoked {
+			g.logger.Warn("connect rejected: revoked cert (device deleted)", "device_id", deviceID)
+			return status.Errorf(codes.NotFound, "device deleted: re-enroll required")
+		}
 		g.logger.Warn("device connected with unknown cert fingerprint", "device_id", deviceID)
 	}
 
