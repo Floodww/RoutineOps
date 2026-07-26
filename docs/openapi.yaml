@@ -1531,6 +1531,86 @@ paths:
         '204': { description: Отозван }
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
 
+  # ─────────────────── FileVault-эскроу: выгрузка (Enterprise) ───────────────────
+  # Возможность редакции Enterprise. В open-core этих роутов НЕТ ВООБЩЕ (пакет escrow
+  # не собирается) — не 501, а 404: в свободной сборке нет ни кода, ни age в графе.
+  # Сервер отдаёт ШИФРТЕКСТ: расшифровать он не может (инвариант TestServerHasNoDecrypt),
+  # открывает оператор офлайн утилитой routineops-unseal шерами приватного ключа.
+
+  /api/v1/devices/{id}/escrow:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    get:
+      tags: [Устройства]
+      summary: Заэскроенные секреты устройства (метаданные)
+      description: |
+        Роль: `it_admin`, только человек. Шифртекста в ответе НЕТ — он только в `reveal`.
+        `latest=true` — строка, которую отдаст выгрузка для своего `secret_type`.
+      x-requires-human: true
+      responses:
+        '200':
+          description: Список строк эскроу, свежие первыми
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EscrowRecord' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { description: Возможность Enterprise — в этой сборке роут отсутствует }
+
+  /api/v1/devices/{id}/escrow/reveal:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Устройства]
+      summary: Выгрузка заэскроенного секрета (шифртекст)
+      description: |
+        Роль: `it_admin`, только человек, СВЕРХ ТОГО — живой грант
+        `users.can_reveal_escrow` (ADR-F16: выдаётся out-of-band через psql, роли для
+        него нет). Проверка гранта fail-closed: ошибка БД = отказ (500, не 403 — чтобы
+        оператор не искал грант, который у него уже есть).
+
+        Отдаётся САМАЯ СВЕЖАЯ строка `(device_id, secret_type)`: re-run provisioning
+        штатно ротирует PRK/пароль, старые строки не инвалидируются, и выдача устаревшей
+        привела бы к тому, что lock-time preflight отвергнет секрет, а FileVault-лок
+        машины начнёт молча отказывать.
+
+        `recipient_fpr` строки сверяется с запиненным на КАЖДУЮ выгрузку: несовпадение
+        (ротация recipient либо подмена строки) = 409, потому что иначе оператор получит
+        файл, который нечем открыть, и узнает об этом в момент инцидента.
+
+        Выгрузка и каждый отказ пишутся в аудит (`reveal_escrow` / `reveal_escrow_denied`).
+      x-requires-human: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                secret_type:
+                  type: string
+                  enum: [prk, secondary_cred]
+                  default: prk
+      responses:
+        '200':
+          description: Шифртекст самой свежей строки
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EscrowRecord'
+                  - type: object
+                    properties:
+                      device_id:
+                        type: string
+                        format: uuid
+                        description: Нужен routineops-unseal для сверки device-binding, вложенного в конверт
+                      ciphertext_b64:
+                        type: string
+                        description: age-blob как есть, base64
+        '400': { description: Неизвестный secret_type }
+        '403': { description: Нет роли, сервисный токен либо нет гранта can_reveal_escrow }
+        '404': { description: Строки эскроу нет (или роут отсутствует — сборка не Enterprise) }
+        '409': { description: 'recipient строки не совпал с запиненным' }
+
   # ─────────────────────────── Каталог (LDAP, Enterprise) ───────────────────────────
   # Синхронизация персон из LDAP/Active Directory и авто-привязка владельцев устройств.
   # Возможность редакции Enterprise: в open-core-сборке кода каталога физически нет,
@@ -2152,6 +2232,20 @@ components:
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time, nullable: true }
         last_used_at: { type: string, format: date-time, nullable: true }
+
+    EscrowRecord:
+      type: object
+      description: Строка эскроу БЕЗ шифртекста. На устройстве их легитимно несколько одного типа — перевыпуск ротирует секрет, а старые строки остаются.
+      properties:
+        id: { type: string, format: uuid }
+        secret_type: { type: string, enum: [prk, secondary_cred] }
+        recipient_fpr: { type: string, description: 'fpr публичного age-recipient, которым запечатан blob' }
+        key_scheme: { type: string, example: age-v1 }
+        agent_version: { type: string }
+        escrowed_at: { type: string, format: date-time }
+        revealed_at: { type: string, format: date-time, description: 'Последняя выгрузка; полная история — в аудите' }
+        revealed_by: { type: string, description: 'Email того, кто выгружал' }
+        latest: { type: boolean, description: 'Эту строку отдаст reveal для своего secret_type' }
 
     DirectoryConfig:
       type: object

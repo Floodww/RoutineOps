@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown } from "lucide-react"
-import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS } from "@/lib/api"
+import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS, EscrowRecord, EscrowReveal, ESCROW_SECRET_TYPE } from "@/lib/api"
 import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -117,6 +117,9 @@ export default function DeviceDetail() {
   const [rebootReason, setRebootReason] = useState("")
   const [rebootDelay, setRebootDelay] = useState(REBOOT_DELAYS[0].value)
   const [rebooting, setRebooting] = useState(false)
+  const [escrow, setEscrow] = useState<EscrowRecord[]>([])
+  const [revealing, setRevealing] = useState(false)
+  const [revealed, setRevealed] = useState<EscrowReveal | null>(null)
 
   useEffect(() => {
     async function load() {
@@ -155,6 +158,14 @@ export default function DeviceDetail() {
   useEffect(() => {
     api.get<Script[]>("/scripts").then((r) => setScripts(r.data ?? [])).catch(() => {})
   }, [])
+
+  // Эскроу — enterprise-ручка: в свободной редакции её нет (404), у viewer'а нет прав
+  // (403). В обоих случаях раздел просто не показываем, ошибку не шумим.
+  useEffect(() => {
+    api.get<EscrowRecord[]>(`/devices/${id}/escrow`)
+      .then((r) => setEscrow(r.data ?? []))
+      .catch(() => setEscrow([]))
+  }, [id])
 
   const runnableScripts = device ? scripts.filter((s) => deviceRunsScript(device.os, s.platform)) : []
   const selectedScript = runnableScripts.find((s) => s.id === selectedScriptId) ?? null
@@ -249,6 +260,30 @@ export default function DeviceDetail() {
       })
     } finally {
       setRebooting(false)
+    }
+  }
+
+  // Выгрузка заэскроенного секрета. Сервер отдаёт ШИФРТЕКСТ — расшифровать его он не
+  // умеет и не должен; открывает оператор офлайн, утилитой routineops-unseal с шерами
+  // приватного ключа. Поэтому здесь только сохранение файла и подсказка с командой.
+  async function revealEscrow(secretType: string) {
+    setRevealing(true)
+    try {
+      const r = await api.post<EscrowReveal>(`/devices/${id}/escrow/reveal`, { secret_type: secretType })
+      setRevealed(r.data)
+      const raw = Uint8Array.from(atob(r.data.ciphertext_b64), (c) => c.charCodeAt(0))
+      const url = URL.createObjectURL(new Blob([raw], { type: "application/octet-stream" }))
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `escrow-${secretType}-${r.data.id}.age`
+      a.click()
+      URL.revokeObjectURL(url)
+      const list = await api.get<EscrowRecord[]>(`/devices/${id}/escrow`)
+      setEscrow(list.data ?? [])
+    } catch {
+      // авто-тост интерсептора (403 без гранта, 409 чужой recipient, 404 нет строки)
+    } finally {
+      setRevealing(false)
     }
   }
 
@@ -711,6 +746,45 @@ export default function DeviceDetail() {
         </div>
       </div>
 
+      {escrow.length > 0 && (
+        <div className="glass">
+          <div className="px-5 pt-4 pb-3">
+            <h2 className="text-[15px] font-semibold text-foreground">Ключи восстановления (эскроу)</h2>
+            <p className="text-xs text-muted-foreground mt-1">
+              Сервер хранит их только в зашифрованном виде и расшифровать не может.
+              Выгруженный файл открывается офлайн утилитой <span className="font-mono">routineops-unseal</span>{" "}
+              с шерами приватного ключа.
+            </p>
+          </div>
+          <div>
+            {escrow.map((e) => (
+              <div key={e.id} className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground truncate">
+                      {ESCROW_SECRET_TYPE[e.secret_type] ?? e.secret_type}
+                    </span>
+                    {e.latest && <Badge variant="outline">актуальный</Badge>}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    заэскроен {formatDistanceToNow(e.escrowed_at)}
+                    {e.agent_version && ` · агент ${e.agent_version}`}
+                    {e.revealed_at && ` · выгружал ${e.revealed_by || "—"}, ${formatDistanceToNow(e.revealed_at)}`}
+                  </div>
+                </div>
+                {/* Выгружаем только актуальную строку: устаревший ключ откроется, но
+                    машину им уже не разблокировать — PRK ротируется при перевыпуске. */}
+                {e.latest && (
+                  <Button size="sm" variant="outline" disabled={revealing} onClick={() => revealEscrow(e.secret_type)}>
+                    {revealing ? "..." : "Выгрузить"}
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {software.length > 0 && (
         <div className="glass">
           <div className="px-5 pt-4 pb-3">
@@ -930,6 +1004,33 @@ export default function DeviceDetail() {
             >
               {decommissioning ? "Отправка..." : "Вывести из эксплуатации"}
             </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Что делать с выгруженным файлом — показываем сразу после скачивания:
+          команду с нужными аргументами оператор в инциденте вспоминать не должен. */}
+      <Dialog open={!!revealed} onOpenChange={(o) => !o && setRevealed(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Ключ выгружен</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Файл сохранён. Он зашифрован — расшифруйте его офлайн, на машине с шерами
+              приватного ключа эскроу:
+            </p>
+            <pre className="text-xs font-mono bg-muted/40 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">
+{`routineops-unseal unseal \\
+  -blob escrow-${revealed?.secret_type}-${revealed?.id}.age \\
+  -expect-device ${revealed?.device_id} \\
+  -expect-type ${revealed?.secret_type} \\
+  -share share1.txt -share share2.txt`}
+            </pre>
+            <p className="text-xs text-muted-foreground">
+              Выгрузка записана в журнал аудита. Расшифрованный секрет не храните в
+              переписке и тикетах.
+            </p>
           </div>
         </DialogContent>
       </Dialog>

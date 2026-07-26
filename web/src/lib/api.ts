@@ -342,6 +342,30 @@ export interface GroupSoftwareRule {
   rule_type: "allowed" | "forbidden"
 }
 
+// Заэскроенный секрет FileVault (Enterprise). В свободной редакции ручек нет вовсе —
+// GET отвечает 404, и карточка просто не показывает раздел.
+export interface EscrowRecord {
+  id: string
+  secret_type: string   // prk | secondary_cred
+  recipient_fpr: string
+  key_scheme: string
+  agent_version?: string
+  escrowed_at: string
+  revealed_at?: string
+  revealed_by?: string  // email того, кто выгружал
+  latest: boolean       // именно эта строка отдастся на выгрузку
+}
+
+export interface EscrowReveal extends EscrowRecord {
+  device_id: string
+  ciphertext_b64: string
+}
+
+export const ESCROW_SECRET_TYPE: Record<string, string> = {
+  prk: "Ключ восстановления тома (PRK)",
+  secondary_cred: "Пароль сервисной учётной записи",
+}
+
 // Отсрочки перезагрузки. «Немедленно» — это 10 секунд, а не ноль: ноль на проводе
 // означает «дефолт агента» (минута), и посылать его как «сейчас» значило бы сделать
 // нулевое значение самым деструктивным вариантом. Ноль в списке не предлагаем вовсе —

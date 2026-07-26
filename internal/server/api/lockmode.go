@@ -69,6 +69,19 @@ func WithAdminRoutes(mount func(*Handler, chi.Router)) RouterOption {
 	}
 }
 
+// WithHumanAdminRoutes — как WithAdminRoutes, но дополнительно режет сервисные токены
+// (requireHuman). Для операций, которые ВЫДАЮТ доступ: выгрузка заэскроенного
+// recovery-ключа — это ключ от зашифрованного диска, автоматике такое не отдаём.
+// Сам requireHuman не экспортируем: снаружи он бесполезен без claimsKey.
+func WithHumanAdminRoutes(mount func(*Handler, chi.Router)) RouterOption {
+	return func(h *Handler, r chi.Router) {
+		r.Group(func(ar chi.Router) {
+			ar.Use(h.requireRole("it_admin"), requireHuman)
+			mount(h, ar)
+		})
+	}
+}
+
 // WithTelegramBotUsername отдаёт функцию, возвращающую @username бота этого деплоя
 // (getMe). Функция, а не строка: getMe ходит в сеть и на старте может ещё не ответить.
 func WithTelegramBotUsername(fn func(context.Context) string) RouterOption {

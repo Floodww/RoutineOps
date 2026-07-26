@@ -43,6 +43,18 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
   group changed in the meantime the command does not go out. No more than 50 machines at
   a time: this is the heaviest button after decommissioning, and a misclick on the wrong
   group must not take the fleet down during working hours.
+- **[Enterprise] Export of the escrowed FileVault recovery key.** The device page now
+  lists the escrowed secrets (when they were escrowed, by which agent, who exported them
+  and when), and the current one can be downloaded. The server hands it over **still
+  encrypted** — it cannot decrypt it by design; the file is opened offline with
+  `routineops-unseal` using shares of the private key, and the panel shows the exact
+  command with the right arguments: nobody should be recalling it from memory during an
+  incident. Exporting requires a separate `can_reveal_escrow` grant (issued by a database
+  administrator by hand — there is no role for it) and is closed to service tokens: this
+  is the key to an encrypted disk. Both the export and every refusal land in the audit
+  log — an attempt to obtain a recovery key is a security event even when it fails. The
+  newest record is always the one served: a re-issue rotates the key, and a stale one
+  will decrypt fine yet no longer unlock the machine.
 - **[Enterprise]** User directory (LDAP / Active Directory): a "Directory" page —
   connection (ldaps), test, scheduled and manual sync; automatic device-owner
   assignment by exact console-user SID match with a login fallback; disabled
