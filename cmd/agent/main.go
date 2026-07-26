@@ -49,6 +49,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/agent/lockui"
 	"github.com/Floodww/RoutineOps/internal/agent/outbox"
 	"github.com/Floodww/RoutineOps/internal/agent/policy"
+	"github.com/Floodww/RoutineOps/internal/agent/reboot"
 	"github.com/Floodww/RoutineOps/internal/agent/scripts"
 	"github.com/Floodww/RoutineOps/internal/agent/security"
 	"github.com/Floodww/RoutineOps/internal/agent/selfupdate"
@@ -1680,6 +1681,10 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		decommissioning.Store(true)
 		cancel()
 	})
+	// reboot: отсрочку исполняет планировщик ОС, а не таймер агента (иначе
+	// самообновление или рестарт службы тихо отменили бы перезагрузку) — поэтому
+	// здесь нет ни горутины, ни состояния, см. package reboot.
+	executor.SetRebooter(reboot.Scheduler{})
 	// Реконсиляция блокировки (pull, FetchLockStatus): переживает потерю push-
 	// команды и ребут — см. package lock, Reconciler. OnLocalUnlock тем же
 	// движением durably (через outbox) отчитывается о ЛОКАЛЬНОМ снятии блокировки

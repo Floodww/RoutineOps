@@ -244,6 +244,13 @@ func (db *DB) UpsertDeviceHeartbeat(ctx context.Context, d HeartbeatData) error 
 type SoftwareItem struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// Поля ниже — proto SoftwareItem 3–8 (миграция 036). Пусто = источник не отдал.
+	Vendor          string `json:"vendor,omitempty"`
+	InstallLocation string `json:"install_location,omitempty"`
+	Arch            string `json:"arch,omitempty"`         // в диалекте источника, не нормализуется
+	UninstallID     string `json:"uninstall_id,omitempty"` // машинный ключ цели для будущего удаления
+	UninstallMethod string `json:"uninstall_method,omitempty"`
+	Scope           string `json:"scope,omitempty"` // machine / user; user снять нечем
 }
 
 type InventoryData struct {
@@ -338,13 +345,19 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 		return fmt.Errorf("delete old software: %w", err)
 	}
 
-	for _, s := range d.Software {
-		if _, err = tx.Exec(ctx, `
-			INSERT INTO device_software (device_id, software_name, version)
-			VALUES ($1, $2, $3)
-		`, deviceID, s.Name, s.Version); err != nil {
-			return fmt.Errorf("insert software %q: %w", s.Name, err)
-		}
+	// CopyFrom, а не INSERT в цикле: с 2.6.0 в снимок попали per-user установки,
+	// и на парке в 1000+ машин это сотни строк на устройство × полная перезапись
+	// набора на каждом изменившемся инвентаре — цикл Exec'ов упирался бы в
+	// round-trip'ы, а не в БД.
+	if _, err = tx.CopyFrom(ctx,
+		pgx.Identifier{"device_software"},
+		[]string{"device_id", "software_name", "version", "vendor", "install_location", "arch", "uninstall_id", "uninstall_method", "scope"},
+		pgx.CopyFromSlice(len(d.Software), func(i int) ([]any, error) {
+			s := d.Software[i]
+			return []any{deviceID, s.Name, s.Version, s.Vendor, s.InstallLocation, s.Arch, s.UninstallID, s.UninstallMethod, s.Scope}, nil
+		}),
+	); err != nil {
+		return fmt.Errorf("insert software: %w", err)
 	}
 
 	return tx.Commit(ctx)
@@ -408,9 +421,10 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 	}
 
 	rows, err := db.pool.Query(ctx, `
-  SELECT software_name, COALESCE(version, '')
+  SELECT software_name, COALESCE(version, ''), vendor, install_location, arch,
+         uninstall_id, uninstall_method, scope
   FROM device_software WHERE device_id = $1
-  ORDER BY software_name
+  ORDER BY software_name, scope, uninstall_id
  `, id)
 	if err != nil {
 		return nil, nil, err
@@ -420,7 +434,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 	var software []SoftwareItem
 	for rows.Next() {
 		var s SoftwareItem
-		if err := rows.Scan(&s.Name, &s.Version); err != nil {
+		if err := rows.Scan(&s.Name, &s.Version, &s.Vendor, &s.InstallLocation, &s.Arch,
+			&s.UninstallID, &s.UninstallMethod, &s.Scope); err != nil {
 			return nil, nil, err
 		}
 		software = append(software, s)
@@ -461,6 +476,9 @@ type Task struct {
 	LockReason    string    `json:"lock_reason"`
 	LockUnlock    bool      `json:"lock_unlock"`
 	LockMode      string    `json:"lock_mode"` // 'overlay'|'filevault' (022); пусто трактуется как overlay
+	// Перезагрузка (037). Delay=0 означает «дефолт агента» (60 с), а не «сейчас».
+	RebootReason       string `json:"reboot_reason"`
+	RebootDelaySeconds int32  `json:"reboot_delay_seconds"`
 }
 
 // Режимы блокировки (совпадают с CHECK-домены значений lock_mode в 022 и с
@@ -656,6 +674,102 @@ func (db *DB) CreateDecommissionTask(ctx context.Context, deviceID string) (*Tas
 	return &t, err
 }
 
+// RebootMinDelaySeconds — минимальная отсрочка, которую примет агент. «Немедленно» в
+// панели присылает именно её, а НЕ ноль: ноль на проводе означает «дефолт агента»
+// (60 с), и посылать его как «сейчас» значило бы делать нулевое значение самым
+// деструктивным вариантом.
+const RebootMinDelaySeconds int32 = 10
+
+// CreateRebootTask ставит задачу перезагрузки. task_type='reboot', priority='high':
+// это control-plane, за очередью скриптов ждать не должен.
+//
+// Идемпотентность важнее, чем у остальных команд: агент ПЕРЕЖИВАЕТ перезагрузку, и
+// если отчёт не доехал до ухода машины вниз, сервер передоставит ту же задачу уже
+// после загрузки — по task_id агент её отбросит. А вот НОВЫЙ task_id для того же
+// намерения = вторая перезагрузка, и устройство уходит в цикл. Поэтому повторный
+// вызов при живой недоставленной заявке возвращает СУЩЕСТВУЮЩУЮ задачу (гонку двух
+// операторов ловит частичный уникальный индекс из 037, а не проверка-до-вставки).
+func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, delaySeconds int32) (*Task, error) {
+	if delaySeconds < 0 {
+		delaySeconds = 0 // 0 = дефолт агента; отрицательное значение бессмысленно
+	}
+	const cols = `id, device_id, script_content, platform, priority, status, created_at, task_type,
+	              lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds`
+	scan := func(row pgx.Row, t *Task) error {
+		return row.Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status,
+			&t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode,
+			&t.RebootReason, &t.RebootDelaySeconds)
+	}
+
+	var t Task
+	err := scan(db.pool.QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds)
+  VALUES ($1, '', COALESCE((SELECT os FROM devices WHERE id = $1), 'unknown'), 'high', 'pending', 'reboot', $2, $3)
+  ON CONFLICT DO NOTHING
+  RETURNING `+cols, deviceID, reason, delaySeconds), &t)
+	if err == nil {
+		return &t, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	// ON CONFLICT DO NOTHING → строк не вернулось: недоставленная заявка уже есть.
+	// Отдаём её, чтобы вызывающий не создал вторую перезагрузку под новым id.
+	err = scan(db.pool.QueryRow(ctx, `
+  SELECT `+cols+` FROM tasks
+  WHERE device_id = $1 AND task_type = 'reboot' AND status = 'pending'`, deviceID), &t)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// FanOutRebootToGroup ставит перезагрузку всем active-устройствам группы одной
+// вставкой. Платформенного фильтра нет (в отличие от скриптов): перезагрузка
+// реализована на всех трёх ОС. Устройства с уже живой недоставленной заявкой
+// пропускаются (ON CONFLICT DO NOTHING) — повторный клик по группе не создаёт
+// вторую перезагрузку тем, кто ещё не получил первую.
+func (db *DB) FanOutRebootToGroup(ctx context.Context, groupID, reason string, delaySeconds int32) ([]Task, error) {
+	if delaySeconds < 0 {
+		delaySeconds = 0
+	}
+	rows, err := db.pool.Query(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds)
+  SELECT m.device_id, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'reboot', $2, $3
+  FROM device_group_members m
+  JOIN devices d ON d.id = m.device_id
+  WHERE m.group_id = $1
+    AND d.status = 'active'
+  ON CONFLICT DO NOTHING
+  RETURNING id, device_id, task_type, reboot_reason, reboot_delay_seconds
+ `, groupID, reason, delaySeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.DeviceID, &t.TaskType, &t.RebootReason, &t.RebootDelaySeconds); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
+// CountActiveDevicesInGroup — сколько машин реально получит групповую команду.
+// Нужен ДО веера: массовая перезагрузка требует потолка и подтверждения по
+// фактическому числу, а не по размеру группы вместе со списанными.
+func (db *DB) CountActiveDevicesInGroup(ctx context.Context, groupID string) (int, error) {
+	var n int
+	err := db.pool.QueryRow(ctx, `
+  SELECT COUNT(*) FROM device_group_members m
+  JOIN devices d ON d.id = m.device_id
+  WHERE m.group_id = $1 AND d.status = 'active'`, groupID).Scan(&n)
+	return n, err
+}
+
 // MarkDeviceDecommissioned переводит устройство в терминальный статус 'decommissioned'.
 // Вызывается ТОЛЬКО после подтверждения агентом приёма decommission-задачи
 // (ReportTaskResult SUCCESS) — до этого статус держим прежним, чтобы Connect успел
@@ -738,10 +852,10 @@ func (db *DB) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	var t Task
 	err := db.pool.QueryRow(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
-         task_type, lock_hash, lock_reason, lock_unlock, lock_mode
+         task_type, lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds
 FROM tasks WHERE id = $1
  `, taskID).Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.Output, &t.ErrorLog, &t.CreatedAt,
-		&t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode)
+		&t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode, &t.RebootReason, &t.RebootDelaySeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -1327,8 +1441,11 @@ func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context) ([]SoftwarePolic
 
 // SoftwarePolicyDeviceCompliance — разрез соответствия ОДНОГО софт-правила по
 // устройствам: кто в области действия и что именно совпало в инвентаре.
-// MatchedSoftware/MatchedVersion — первое совпадение по алфавиту ("" когда
-// совпадений нет): для ответа «почему fail» достаточно одного примера.
+// MatchedSoftware/MatchedVersion — первое совпадение (machine-установки вперёд,
+// дальше по алфавиту; "" когда совпадений нет): для ответа «почему fail»
+// достаточно одного примера. MatchedScope говорит, СНИМАЕМО ли это совпадение:
+// 'user' = установка в профиль сотрудника, нарушение считается, но удалить его
+// нельзя — служба агента в чужой профиль не ходит.
 type SoftwarePolicyDeviceCompliance struct {
 	DeviceID        string `json:"device_id"`
 	Hostname        string `json:"hostname"`
@@ -1337,6 +1454,7 @@ type SoftwarePolicyDeviceCompliance struct {
 	Installed       bool   `json:"installed"`
 	MatchedSoftware string `json:"matched_software"`
 	MatchedVersion  string `json:"matched_version"`
+	MatchedScope    string `json:"matched_scope"`
 }
 
 // ListSoftwarePolicyDeviceCompliance — те же область действия и матчер, что у
@@ -1347,7 +1465,7 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID str
 	rows, err := db.pool.Query(ctx, `
 		SELECT d.id, d.hostname, COALESCE(d.os, ''), d.status,
 		       m.software_name IS NOT NULL AS installed,
-		       COALESCE(m.software_name, ''), COALESCE(m.version, '')
+		       COALESCE(m.software_name, ''), COALESCE(m.version, ''), COALESCE(m.scope, '')
 		FROM software_policy_rules r
 		JOIN devices d
 		  ON d.status <> 'pending'
@@ -1368,12 +1486,15 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID str
 		        END) = ANY (r.platforms)
 		     )
 		LEFT JOIN LATERAL (
-		    SELECT s.software_name, s.version
+		    SELECT s.software_name, s.version, s.scope
 		    FROM device_software s
 		    WHERE s.device_id = d.id
 		      AND r.software_name <> ''
 		      AND strpos(lower(s.software_name), lower(r.software_name)) > 0
-		    ORDER BY lower(s.software_name)
+		    -- machine-установки вперёд: из двух совпадений оператору полезнее то,
+		    -- которое можно снять. Если наверх всё же вышла per-user запись —
+		    -- значит machine-совпадения нет вообще, и это тоже сигнал (UI покажет).
+		    ORDER BY (s.scope = 'user'), lower(s.software_name)
 		    LIMIT 1
 		) m ON true
 		-- id::text, а не id = $1: ruleID приходит сырым из URL, мусор вместо UUID
@@ -1389,7 +1510,7 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID str
 	for rows.Next() {
 		var c SoftwarePolicyDeviceCompliance
 		if err := rows.Scan(&c.DeviceID, &c.Hostname, &c.OS, &c.Status,
-			&c.Installed, &c.MatchedSoftware, &c.MatchedVersion); err != nil {
+			&c.Installed, &c.MatchedSoftware, &c.MatchedVersion, &c.MatchedScope); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

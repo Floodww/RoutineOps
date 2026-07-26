@@ -21,6 +21,76 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// UninstallMethod — чем агент СМОЖЕТ снять это ПО, если оператор попросит.
+// Заполняет агент по факту сбора инвентаря: только он видит, есть ли тихий
+// деинсталлятор. UNSPECIFIED = удалять нечем (fail-safe, как и в остальных
+// командах: нулевое значение никогда не деструктивно). Сервер по этому полю
+// решает, показывать ли действие «удалить», но авторитетный отказ всё равно за
+// агентом в момент выполнения.
+type UninstallMethod int32
+
+const (
+	UninstallMethod_UNINSTALL_METHOD_UNSPECIFIED      UninstallMethod = 0
+	UninstallMethod_UNINSTALL_METHOD_MSI              UninstallMethod = 1 // Windows Installer: msiexec /x {ProductCode} /qn
+	UninstallMethod_UNINSTALL_METHOD_WINDOWS_QUIET    UninstallMethod = 2 // Windows: QuietUninstallString из реестра
+	UninstallMethod_UNINSTALL_METHOD_MACOS_APP_BUNDLE UninstallMethod = 3 // macOS: снос .app + pkgutil --forget
+	UninstallMethod_UNINSTALL_METHOD_DPKG             UninstallMethod = 4 // Linux: apt-get remove
+	UninstallMethod_UNINSTALL_METHOD_RPM              UninstallMethod = 5 // Linux: dnf/yum remove
+	UninstallMethod_UNINSTALL_METHOD_PACMAN           UninstallMethod = 6 // Linux: pacman -R
+	UninstallMethod_UNINSTALL_METHOD_APK              UninstallMethod = 7 // Linux: apk del
+)
+
+// Enum value maps for UninstallMethod.
+var (
+	UninstallMethod_name = map[int32]string{
+		0: "UNINSTALL_METHOD_UNSPECIFIED",
+		1: "UNINSTALL_METHOD_MSI",
+		2: "UNINSTALL_METHOD_WINDOWS_QUIET",
+		3: "UNINSTALL_METHOD_MACOS_APP_BUNDLE",
+		4: "UNINSTALL_METHOD_DPKG",
+		5: "UNINSTALL_METHOD_RPM",
+		6: "UNINSTALL_METHOD_PACMAN",
+		7: "UNINSTALL_METHOD_APK",
+	}
+	UninstallMethod_value = map[string]int32{
+		"UNINSTALL_METHOD_UNSPECIFIED":      0,
+		"UNINSTALL_METHOD_MSI":              1,
+		"UNINSTALL_METHOD_WINDOWS_QUIET":    2,
+		"UNINSTALL_METHOD_MACOS_APP_BUNDLE": 3,
+		"UNINSTALL_METHOD_DPKG":             4,
+		"UNINSTALL_METHOD_RPM":              5,
+		"UNINSTALL_METHOD_PACMAN":           6,
+		"UNINSTALL_METHOD_APK":              7,
+	}
+)
+
+func (x UninstallMethod) Enum() *UninstallMethod {
+	p := new(UninstallMethod)
+	*p = x
+	return p
+}
+
+func (x UninstallMethod) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (UninstallMethod) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (UninstallMethod) Type() protoreflect.EnumType {
+	return &file_proto_agent_proto_enumTypes[0]
+}
+
+func (x UninstallMethod) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use UninstallMethod.Descriptor instead.
+func (UninstallMethod) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_proto_rawDescGZIP(), []int{0}
+}
+
 type TaskPriority int32
 
 const (
@@ -57,11 +127,11 @@ func (x TaskPriority) String() string {
 }
 
 func (TaskPriority) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[0].Descriptor()
+	return file_proto_agent_proto_enumTypes[1].Descriptor()
 }
 
 func (TaskPriority) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[0]
+	return &file_proto_agent_proto_enumTypes[1]
 }
 
 func (x TaskPriority) Number() protoreflect.EnumNumber {
@@ -70,7 +140,7 @@ func (x TaskPriority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TaskPriority.Descriptor instead.
 func (TaskPriority) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{0}
+	return file_proto_agent_proto_rawDescGZIP(), []int{1}
 }
 
 type TaskStatus int32
@@ -106,11 +176,11 @@ func (x TaskStatus) String() string {
 }
 
 func (TaskStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[1].Descriptor()
+	return file_proto_agent_proto_enumTypes[2].Descriptor()
 }
 
 func (TaskStatus) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[1]
+	return &file_proto_agent_proto_enumTypes[2]
 }
 
 func (x TaskStatus) Number() protoreflect.EnumNumber {
@@ -119,7 +189,7 @@ func (x TaskStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TaskStatus.Descriptor instead.
 func (TaskStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{1}
+	return file_proto_agent_proto_rawDescGZIP(), []int{2}
 }
 
 type AlertType int32
@@ -158,11 +228,11 @@ func (x AlertType) String() string {
 }
 
 func (AlertType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[2].Descriptor()
+	return file_proto_agent_proto_enumTypes[3].Descriptor()
 }
 
 func (AlertType) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[2]
+	return &file_proto_agent_proto_enumTypes[3]
 }
 
 func (x AlertType) Number() protoreflect.EnumNumber {
@@ -171,7 +241,7 @@ func (x AlertType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AlertType.Descriptor instead.
 func (AlertType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{2}
+	return file_proto_agent_proto_rawDescGZIP(), []int{3}
 }
 
 type PolicyRuleType int32
@@ -207,11 +277,11 @@ func (x PolicyRuleType) String() string {
 }
 
 func (PolicyRuleType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[3].Descriptor()
+	return file_proto_agent_proto_enumTypes[4].Descriptor()
 }
 
 func (PolicyRuleType) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[3]
+	return &file_proto_agent_proto_enumTypes[4]
 }
 
 func (x PolicyRuleType) Number() protoreflect.EnumNumber {
@@ -220,7 +290,7 @@ func (x PolicyRuleType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PolicyRuleType.Descriptor instead.
 func (PolicyRuleType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{3}
+	return file_proto_agent_proto_rawDescGZIP(), []int{4}
 }
 
 type AdminAccessStatus int32
@@ -265,11 +335,11 @@ func (x AdminAccessStatus) String() string {
 }
 
 func (AdminAccessStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[4].Descriptor()
+	return file_proto_agent_proto_enumTypes[5].Descriptor()
 }
 
 func (AdminAccessStatus) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[4]
+	return &file_proto_agent_proto_enumTypes[5]
 }
 
 func (x AdminAccessStatus) Number() protoreflect.EnumNumber {
@@ -278,7 +348,7 @@ func (x AdminAccessStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AdminAccessStatus.Descriptor instead.
 func (AdminAccessStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{4}
+	return file_proto_agent_proto_rawDescGZIP(), []int{5}
 }
 
 type ScriptTrigger int32
@@ -317,11 +387,11 @@ func (x ScriptTrigger) String() string {
 }
 
 func (ScriptTrigger) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[5].Descriptor()
+	return file_proto_agent_proto_enumTypes[6].Descriptor()
 }
 
 func (ScriptTrigger) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[5]
+	return &file_proto_agent_proto_enumTypes[6]
 }
 
 func (x ScriptTrigger) Number() protoreflect.EnumNumber {
@@ -330,7 +400,7 @@ func (x ScriptTrigger) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ScriptTrigger.Descriptor instead.
 func (ScriptTrigger) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{5}
+	return file_proto_agent_proto_rawDescGZIP(), []int{6}
 }
 
 // События ОС для trigger=EVENT. Расширять только в конец (ADR-4).
@@ -370,11 +440,11 @@ func (x ScriptEventType) String() string {
 }
 
 func (ScriptEventType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[6].Descriptor()
+	return file_proto_agent_proto_enumTypes[7].Descriptor()
 }
 
 func (ScriptEventType) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[6]
+	return &file_proto_agent_proto_enumTypes[7]
 }
 
 func (x ScriptEventType) Number() protoreflect.EnumNumber {
@@ -383,7 +453,7 @@ func (x ScriptEventType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ScriptEventType.Descriptor instead.
 func (ScriptEventType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{6}
+	return file_proto_agent_proto_rawDescGZIP(), []int{7}
 }
 
 // ── FileVault recovery-key escrow (enterprise) ──
@@ -423,11 +493,11 @@ func (x RecoveryKeyType) String() string {
 }
 
 func (RecoveryKeyType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[7].Descriptor()
+	return file_proto_agent_proto_enumTypes[8].Descriptor()
 }
 
 func (RecoveryKeyType) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[7]
+	return &file_proto_agent_proto_enumTypes[8]
 }
 
 func (x RecoveryKeyType) Number() protoreflect.EnumNumber {
@@ -436,7 +506,7 @@ func (x RecoveryKeyType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RecoveryKeyType.Descriptor instead.
 func (RecoveryKeyType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{7}
+	return file_proto_agent_proto_rawDescGZIP(), []int{8}
 }
 
 type LockState int32
@@ -481,11 +551,11 @@ func (x LockState) String() string {
 }
 
 func (LockState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[8].Descriptor()
+	return file_proto_agent_proto_enumTypes[9].Descriptor()
 }
 
 func (LockState) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[8]
+	return &file_proto_agent_proto_enumTypes[9]
 }
 
 func (x LockState) Number() protoreflect.EnumNumber {
@@ -494,7 +564,7 @@ func (x LockState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LockState.Descriptor instead.
 func (LockState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{8}
+	return file_proto_agent_proto_rawDescGZIP(), []int{9}
 }
 
 // LockMode — режим блокировки. FAIL-SAFE: 0 НИКОГДА не FILEVAULT.
@@ -533,11 +603,11 @@ func (x LockMode) String() string {
 }
 
 func (LockMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_proto_enumTypes[9].Descriptor()
+	return file_proto_agent_proto_enumTypes[10].Descriptor()
 }
 
 func (LockMode) Type() protoreflect.EnumType {
-	return &file_proto_agent_proto_enumTypes[9]
+	return &file_proto_agent_proto_enumTypes[10]
 }
 
 func (x LockMode) Number() protoreflect.EnumNumber {
@@ -546,7 +616,7 @@ func (x LockMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LockMode.Descriptor instead.
 func (LockMode) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{9}
+	return file_proto_agent_proto_rawDescGZIP(), []int{10}
 }
 
 type HeartbeatRequest struct {
@@ -811,9 +881,30 @@ func (x *DeviceInfo) GetConsoleUserSid() string {
 }
 
 type SoftwareItem struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SoftwareName  string                 `protobuf:"bytes,1,opt,name=software_name,json=softwareName,proto3" json:"software_name,omitempty"`
-	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	SoftwareName string                 `protobuf:"bytes,1,opt,name=software_name,json=softwareName,proto3" json:"software_name,omitempty"`
+	Version      string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	// Поля ниже добавлены под два пункта роадмапа: удаление ПО из интерфейса
+	// (нужен машинный ключ цели — по человекочитаемому имени одноимённые продукты
+	// разных вендоров резолвятся в чужую запись) и сканирование на CVE (без
+	// вендора и архитектуры CPE/purl детерминированно не построить).
+	//
+	// ВАЖНО (инвариант хэша инвентаря, см. inventory.hashReport): каждое поле
+	// обязано быть СТАБИЛЬНЫМ между снимками, пока машина не изменилась — весь
+	// SoftwareItem входит в хэш целиком. Поэтому здесь сознательно НЕТ даты
+	// установки и времени изменения файлов: их формат разъезжается между
+	// источниками, и волатильное поле молча вернуло бы отправку инвентаря каждые
+	// 5 минут по всему парку, без ошибки и следа в логах.
+	Vendor          string          `protobuf:"bytes,3,opt,name=vendor,proto3" json:"vendor,omitempty"`                                          // издатель/мейнтейнер; "" = источник не отдал
+	InstallLocation string          `protobuf:"bytes,4,opt,name=install_location,json=installLocation,proto3" json:"install_location,omitempty"` // путь установки; для purl-fallback и адресного сноса
+	Arch            string          `protobuf:"bytes,5,opt,name=arch,proto3" json:"arch,omitempty"`                                              // x86_64 / arm64 / i386 / noarch; "" = неизвестно
+	UninstallId     string          `protobuf:"bytes,6,opt,name=uninstall_id,json=uninstallId,proto3" json:"uninstall_id,omitempty"`             // машинный ключ цели: ProductCode/имя подключа, bundle id, имя пакета
+	UninstallMethod UninstallMethod `protobuf:"varint,7,opt,name=uninstall_method,json=uninstallMethod,proto3,enum=routineops.UninstallMethod" json:"uninstall_method,omitempty"`
+	// scope — установлено на машину ("machine") или в профиль пользователя
+	// ("user"). Per-user установки видны, но снять их из-под LocalSystem/root
+	// нельзя — оператор должен это понимать, а политика запрещённого ПО обязана
+	// их учитывать (иначе установка в профиль обходит детект).
+	Scope         string `protobuf:"bytes,8,opt,name=scope,proto3" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -858,6 +949,48 @@ func (x *SoftwareItem) GetSoftwareName() string {
 func (x *SoftwareItem) GetVersion() string {
 	if x != nil {
 		return x.Version
+	}
+	return ""
+}
+
+func (x *SoftwareItem) GetVendor() string {
+	if x != nil {
+		return x.Vendor
+	}
+	return ""
+}
+
+func (x *SoftwareItem) GetInstallLocation() string {
+	if x != nil {
+		return x.InstallLocation
+	}
+	return ""
+}
+
+func (x *SoftwareItem) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *SoftwareItem) GetUninstallId() string {
+	if x != nil {
+		return x.UninstallId
+	}
+	return ""
+}
+
+func (x *SoftwareItem) GetUninstallMethod() UninstallMethod {
+	if x != nil {
+		return x.UninstallMethod
+	}
+	return UninstallMethod_UNINSTALL_METHOD_UNSPECIFIED
+}
+
+func (x *SoftwareItem) GetScope() string {
+	if x != nil {
+		return x.Scope
 	}
 	return ""
 }
@@ -967,6 +1100,7 @@ type Task struct {
 	Priority      TaskPriority           `protobuf:"varint,5,opt,name=priority,proto3,enum=routineops.TaskPriority" json:"priority,omitempty"`
 	Lock          *LockCommand           `protobuf:"bytes,6,opt,name=lock,proto3" json:"lock,omitempty"`                 // если задано — это команда блокировки устройства, а не скрипт
 	Decommission  *DecommissionCommand   `protobuf:"bytes,7,opt,name=decommission,proto3" json:"decommission,omitempty"` // если задано — полное самоудаление агента, а не скрипт/лок
+	Reboot        *RebootCommand         `protobuf:"bytes,8,opt,name=reboot,proto3" json:"reboot,omitempty"`             // если задано — перезагрузка устройства, а не скрипт/лок/снос
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1043,6 +1177,13 @@ func (x *Task) GetDecommission() *DecommissionCommand {
 	return nil
 }
 
+func (x *Task) GetReboot() *RebootCommand {
+	if x != nil {
+		return x.Reboot
+	}
+	return nil
+}
+
 // DecommissionCommand — вывод устройства из эксплуатации: агент сносит СЕБЯ
 // целиком (служба, серт+ключ+CA, конфиг, состояние, бинарь). Едет в Task
 // (переиспользует доставку/ack/идемпотентность). Порядок на агенте: агент
@@ -1107,6 +1248,85 @@ func (x *DecommissionCommand) GetReason() string {
 	return ""
 }
 
+// RebootCommand — перезагрузка устройства по команде оператора (доделать
+// установку обновлений, вывести машину из подвисшего состояния). Едет в Task
+// поверх Connect-стрима: при заданном Task.reboot агент обрабатывает
+// перезагрузку вместо запуска скрипта, переиспользуя доставку/ack/идемпотентность
+// задач.
+//
+// Идемпотентность здесь критичнее, чем у остальных команд: агент ПЕРЕЖИВАЕТ
+// перезагрузку, и если отчёт о выполнении не доехал до ухода машины вниз, сервер
+// передоставит задачу уже ПОСЛЕ загрузки. Набор выполненных task_id
+// персистентный (tasks.seen лежит в защищённом каталоге состояния и переживает
+// ребут), поэтому повторная доставка второй перезагрузки не вызывает — иначе
+// устройство уходило бы в цикл ребутов, пока сервер не получит отчёт.
+type RebootCommand struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // id заявки (идемпотентность/аудит; сервер приравнивает к task_id)
+	Reason    string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`                        // текст сотруднику в предупреждении ОС + аудит
+	// delay_seconds — отсрочка, за которую сотрудник успевает сохранить работу.
+	// 0 (поле не задано) = ДЕФОЛТ АГЕНТА, а НЕ «сейчас»: нулевое значение никогда
+	// не должно быть самым деструктивным вариантом. Отрицательные и абсурдно
+	// большие значения агент приводит к границам сам (см. internal/agent/reboot).
+	// Гранулярность зависит от планировщика ОС: Windows принимает секунды, macOS
+	// и Linux — целые минуты, поэтому там отсрочка округляется ВВЕРХ (в сторону
+	// большего предупреждения, не меньшего).
+	DelaySeconds  int32 `protobuf:"varint,3,opt,name=delay_seconds,json=delaySeconds,proto3" json:"delay_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebootCommand) Reset() {
+	*x = RebootCommand{}
+	mi := &file_proto_agent_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebootCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebootCommand) ProtoMessage() {}
+
+func (x *RebootCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebootCommand.ProtoReflect.Descriptor instead.
+func (*RebootCommand) Descriptor() ([]byte, []int) {
+	return file_proto_agent_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RebootCommand) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RebootCommand) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *RebootCommand) GetDelaySeconds() int32 {
+	if x != nil {
+		return x.DelaySeconds
+	}
+	return 0
+}
+
 // LockCommand — блокировка/разблокировка машины сотрудника (нарушение ИБ/увольнение:
 // запереть ноут, пока не сдаст). Едет в Task поверх Connect-стрима: при заданном
 // Task.lock агент обрабатывает блокировку вместо запуска скрипта (переиспользуя
@@ -1129,7 +1349,7 @@ type LockCommand struct {
 
 func (x *LockCommand) Reset() {
 	*x = LockCommand{}
-	mi := &file_proto_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1361,7 @@ func (x *LockCommand) String() string {
 func (*LockCommand) ProtoMessage() {}
 
 func (x *LockCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1374,7 @@ func (x *LockCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LockCommand.ProtoReflect.Descriptor instead.
 func (*LockCommand) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{7}
+	return file_proto_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *LockCommand) GetRequestId() string {
@@ -1212,7 +1432,7 @@ type TaskResult struct {
 
 func (x *TaskResult) Reset() {
 	*x = TaskResult{}
-	mi := &file_proto_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1224,7 +1444,7 @@ func (x *TaskResult) String() string {
 func (*TaskResult) ProtoMessage() {}
 
 func (x *TaskResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1237,7 +1457,7 @@ func (x *TaskResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
 func (*TaskResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{8}
+	return file_proto_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TaskResult) GetTaskId() string {
@@ -1277,7 +1497,7 @@ type TaskResultAck struct {
 
 func (x *TaskResultAck) Reset() {
 	*x = TaskResultAck{}
-	mi := &file_proto_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1289,7 +1509,7 @@ func (x *TaskResultAck) String() string {
 func (*TaskResultAck) ProtoMessage() {}
 
 func (x *TaskResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1302,7 +1522,7 @@ func (x *TaskResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResultAck.ProtoReflect.Descriptor instead.
 func (*TaskResultAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{9}
+	return file_proto_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TaskResultAck) GetReceived() bool {
@@ -1326,7 +1546,7 @@ type TaskReceivedAck struct {
 
 func (x *TaskReceivedAck) Reset() {
 	*x = TaskReceivedAck{}
-	mi := &file_proto_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1338,7 +1558,7 @@ func (x *TaskReceivedAck) String() string {
 func (*TaskReceivedAck) ProtoMessage() {}
 
 func (x *TaskReceivedAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1351,7 +1571,7 @@ func (x *TaskReceivedAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskReceivedAck.ProtoReflect.Descriptor instead.
 func (*TaskReceivedAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{10}
+	return file_proto_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *TaskReceivedAck) GetTaskId() string {
@@ -1377,7 +1597,7 @@ type TaskReceivedAckResponse struct {
 
 func (x *TaskReceivedAckResponse) Reset() {
 	*x = TaskReceivedAckResponse{}
-	mi := &file_proto_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1389,7 +1609,7 @@ func (x *TaskReceivedAckResponse) String() string {
 func (*TaskReceivedAckResponse) ProtoMessage() {}
 
 func (x *TaskReceivedAckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1402,7 +1622,7 @@ func (x *TaskReceivedAckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskReceivedAckResponse.ProtoReflect.Descriptor instead.
 func (*TaskReceivedAckResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TaskReceivedAckResponse) GetAcknowledged() bool {
@@ -1425,7 +1645,7 @@ type SecurityEvent struct {
 
 func (x *SecurityEvent) Reset() {
 	*x = SecurityEvent{}
-	mi := &file_proto_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1437,7 +1657,7 @@ func (x *SecurityEvent) String() string {
 func (*SecurityEvent) ProtoMessage() {}
 
 func (x *SecurityEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1450,7 +1670,7 @@ func (x *SecurityEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecurityEvent.ProtoReflect.Descriptor instead.
 func (*SecurityEvent) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SecurityEvent) GetAlertType() AlertType {
@@ -1490,7 +1710,7 @@ type SecurityEventAck struct {
 
 func (x *SecurityEventAck) Reset() {
 	*x = SecurityEventAck{}
-	mi := &file_proto_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1502,7 +1722,7 @@ func (x *SecurityEventAck) String() string {
 func (*SecurityEventAck) ProtoMessage() {}
 
 func (x *SecurityEventAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1515,7 +1735,7 @@ func (x *SecurityEventAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecurityEventAck.ProtoReflect.Descriptor instead.
 func (*SecurityEventAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SecurityEventAck) GetReceived() bool {
@@ -1535,7 +1755,7 @@ type SoftwarePolicyRule struct {
 
 func (x *SoftwarePolicyRule) Reset() {
 	*x = SoftwarePolicyRule{}
-	mi := &file_proto_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1547,7 +1767,7 @@ func (x *SoftwarePolicyRule) String() string {
 func (*SoftwarePolicyRule) ProtoMessage() {}
 
 func (x *SoftwarePolicyRule) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1560,7 +1780,7 @@ func (x *SoftwarePolicyRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SoftwarePolicyRule.ProtoReflect.Descriptor instead.
 func (*SoftwarePolicyRule) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SoftwarePolicyRule) GetSoftwareName() string {
@@ -1590,7 +1810,7 @@ type FetchPolicyRequest struct {
 
 func (x *FetchPolicyRequest) Reset() {
 	*x = FetchPolicyRequest{}
-	mi := &file_proto_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1602,7 +1822,7 @@ func (x *FetchPolicyRequest) String() string {
 func (*FetchPolicyRequest) ProtoMessage() {}
 
 func (x *FetchPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1615,7 +1835,7 @@ func (x *FetchPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchPolicyRequest.ProtoReflect.Descriptor instead.
 func (*FetchPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FetchPolicyRequest) GetKnownVersion() int64 {
@@ -1637,7 +1857,7 @@ type FetchPolicyResponse struct {
 
 func (x *FetchPolicyResponse) Reset() {
 	*x = FetchPolicyResponse{}
-	mi := &file_proto_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1649,7 +1869,7 @@ func (x *FetchPolicyResponse) String() string {
 func (*FetchPolicyResponse) ProtoMessage() {}
 
 func (x *FetchPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1662,7 +1882,7 @@ func (x *FetchPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchPolicyResponse.ProtoReflect.Descriptor instead.
 func (*FetchPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *FetchPolicyResponse) GetRules() []*SoftwarePolicyRule {
@@ -1697,7 +1917,7 @@ type RequestAdminAccessRequest struct {
 
 func (x *RequestAdminAccessRequest) Reset() {
 	*x = RequestAdminAccessRequest{}
-	mi := &file_proto_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1709,7 +1929,7 @@ func (x *RequestAdminAccessRequest) String() string {
 func (*RequestAdminAccessRequest) ProtoMessage() {}
 
 func (x *RequestAdminAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1722,7 +1942,7 @@ func (x *RequestAdminAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestAdminAccessRequest.ProtoReflect.Descriptor instead.
 func (*RequestAdminAccessRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RequestAdminAccessRequest) GetReason() string {
@@ -1749,7 +1969,7 @@ type RequestAdminAccessResponse struct {
 
 func (x *RequestAdminAccessResponse) Reset() {
 	*x = RequestAdminAccessResponse{}
-	mi := &file_proto_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1761,7 +1981,7 @@ func (x *RequestAdminAccessResponse) String() string {
 func (*RequestAdminAccessResponse) ProtoMessage() {}
 
 func (x *RequestAdminAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1774,7 +1994,7 @@ func (x *RequestAdminAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestAdminAccessResponse.ProtoReflect.Descriptor instead.
 func (*RequestAdminAccessResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RequestAdminAccessResponse) GetRequestId() string {
@@ -1804,7 +2024,7 @@ type FetchAdminStatusRequest struct {
 
 func (x *FetchAdminStatusRequest) Reset() {
 	*x = FetchAdminStatusRequest{}
-	mi := &file_proto_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1816,7 +2036,7 @@ func (x *FetchAdminStatusRequest) String() string {
 func (*FetchAdminStatusRequest) ProtoMessage() {}
 
 func (x *FetchAdminStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1829,7 +2049,7 @@ func (x *FetchAdminStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchAdminStatusRequest.ProtoReflect.Descriptor instead.
 func (*FetchAdminStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{19}
+	return file_proto_agent_proto_rawDescGZIP(), []int{20}
 }
 
 type FetchAdminStatusResponse struct {
@@ -1844,7 +2064,7 @@ type FetchAdminStatusResponse struct {
 
 func (x *FetchAdminStatusResponse) Reset() {
 	*x = FetchAdminStatusResponse{}
-	mi := &file_proto_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1856,7 +2076,7 @@ func (x *FetchAdminStatusResponse) String() string {
 func (*FetchAdminStatusResponse) ProtoMessage() {}
 
 func (x *FetchAdminStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1869,7 +2089,7 @@ func (x *FetchAdminStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchAdminStatusResponse.ProtoReflect.Descriptor instead.
 func (*FetchAdminStatusResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{20}
+	return file_proto_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *FetchAdminStatusResponse) GetRequestId() string {
@@ -1914,7 +2134,7 @@ type ReportAdminAccessRequest struct {
 
 func (x *ReportAdminAccessRequest) Reset() {
 	*x = ReportAdminAccessRequest{}
-	mi := &file_proto_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1926,7 +2146,7 @@ func (x *ReportAdminAccessRequest) String() string {
 func (*ReportAdminAccessRequest) ProtoMessage() {}
 
 func (x *ReportAdminAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1939,7 +2159,7 @@ func (x *ReportAdminAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAdminAccessRequest.ProtoReflect.Descriptor instead.
 func (*ReportAdminAccessRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{21}
+	return file_proto_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ReportAdminAccessRequest) GetRequestId() string {
@@ -1979,7 +2199,7 @@ type ReportAdminAccessResponse struct {
 
 func (x *ReportAdminAccessResponse) Reset() {
 	*x = ReportAdminAccessResponse{}
-	mi := &file_proto_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1991,7 +2211,7 @@ func (x *ReportAdminAccessResponse) String() string {
 func (*ReportAdminAccessResponse) ProtoMessage() {}
 
 func (x *ReportAdminAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2004,7 +2224,7 @@ func (x *ReportAdminAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAdminAccessResponse.ProtoReflect.Descriptor instead.
 func (*ReportAdminAccessResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{22}
+	return file_proto_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReportAdminAccessResponse) GetReceived() bool {
@@ -2031,7 +2251,7 @@ type ScriptPolicy struct {
 
 func (x *ScriptPolicy) Reset() {
 	*x = ScriptPolicy{}
-	mi := &file_proto_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2043,7 +2263,7 @@ func (x *ScriptPolicy) String() string {
 func (*ScriptPolicy) ProtoMessage() {}
 
 func (x *ScriptPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2056,7 +2276,7 @@ func (x *ScriptPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptPolicy.ProtoReflect.Descriptor instead.
 func (*ScriptPolicy) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{23}
+	return file_proto_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ScriptPolicy) GetPolicyId() string {
@@ -2134,7 +2354,7 @@ type FetchScriptPoliciesRequest struct {
 
 func (x *FetchScriptPoliciesRequest) Reset() {
 	*x = FetchScriptPoliciesRequest{}
-	mi := &file_proto_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2146,7 +2366,7 @@ func (x *FetchScriptPoliciesRequest) String() string {
 func (*FetchScriptPoliciesRequest) ProtoMessage() {}
 
 func (x *FetchScriptPoliciesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2159,7 +2379,7 @@ func (x *FetchScriptPoliciesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchScriptPoliciesRequest.ProtoReflect.Descriptor instead.
 func (*FetchScriptPoliciesRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{24}
+	return file_proto_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *FetchScriptPoliciesRequest) GetKnownVersion() int64 {
@@ -2180,7 +2400,7 @@ type FetchScriptPoliciesResponse struct {
 
 func (x *FetchScriptPoliciesResponse) Reset() {
 	*x = FetchScriptPoliciesResponse{}
-	mi := &file_proto_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2192,7 +2412,7 @@ func (x *FetchScriptPoliciesResponse) String() string {
 func (*FetchScriptPoliciesResponse) ProtoMessage() {}
 
 func (x *FetchScriptPoliciesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2205,7 +2425,7 @@ func (x *FetchScriptPoliciesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchScriptPoliciesResponse.ProtoReflect.Descriptor instead.
 func (*FetchScriptPoliciesResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{25}
+	return file_proto_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *FetchScriptPoliciesResponse) GetPolicies() []*ScriptPolicy {
@@ -2246,7 +2466,7 @@ type ScriptResult struct {
 
 func (x *ScriptResult) Reset() {
 	*x = ScriptResult{}
-	mi := &file_proto_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2258,7 +2478,7 @@ func (x *ScriptResult) String() string {
 func (*ScriptResult) ProtoMessage() {}
 
 func (x *ScriptResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2271,7 +2491,7 @@ func (x *ScriptResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptResult.ProtoReflect.Descriptor instead.
 func (*ScriptResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{26}
+	return file_proto_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ScriptResult) GetPolicyId() string {
@@ -2339,7 +2559,7 @@ type ScriptResultAck struct {
 
 func (x *ScriptResultAck) Reset() {
 	*x = ScriptResultAck{}
-	mi := &file_proto_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2351,7 +2571,7 @@ func (x *ScriptResultAck) String() string {
 func (*ScriptResultAck) ProtoMessage() {}
 
 func (x *ScriptResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2364,7 +2584,7 @@ func (x *ScriptResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptResultAck.ProtoReflect.Descriptor instead.
 func (*ScriptResultAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{27}
+	return file_proto_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ScriptResultAck) GetReceived() bool {
@@ -2397,7 +2617,7 @@ type EscrowRecoveryKeyRequest struct {
 
 func (x *EscrowRecoveryKeyRequest) Reset() {
 	*x = EscrowRecoveryKeyRequest{}
-	mi := &file_proto_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2409,7 +2629,7 @@ func (x *EscrowRecoveryKeyRequest) String() string {
 func (*EscrowRecoveryKeyRequest) ProtoMessage() {}
 
 func (x *EscrowRecoveryKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2422,7 +2642,7 @@ func (x *EscrowRecoveryKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EscrowRecoveryKeyRequest.ProtoReflect.Descriptor instead.
 func (*EscrowRecoveryKeyRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{28}
+	return file_proto_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *EscrowRecoveryKeyRequest) GetRequestId() string {
@@ -2470,7 +2690,7 @@ type EscrowRecoveryKeyResponse struct {
 
 func (x *EscrowRecoveryKeyResponse) Reset() {
 	*x = EscrowRecoveryKeyResponse{}
-	mi := &file_proto_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2482,7 +2702,7 @@ func (x *EscrowRecoveryKeyResponse) String() string {
 func (*EscrowRecoveryKeyResponse) ProtoMessage() {}
 
 func (x *EscrowRecoveryKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2495,7 +2715,7 @@ func (x *EscrowRecoveryKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EscrowRecoveryKeyResponse.ProtoReflect.Descriptor instead.
 func (*EscrowRecoveryKeyResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{29}
+	return file_proto_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *EscrowRecoveryKeyResponse) GetStored() bool {
@@ -2525,7 +2745,7 @@ type ReportLockStatusRequest struct {
 
 func (x *ReportLockStatusRequest) Reset() {
 	*x = ReportLockStatusRequest{}
-	mi := &file_proto_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2537,7 +2757,7 @@ func (x *ReportLockStatusRequest) String() string {
 func (*ReportLockStatusRequest) ProtoMessage() {}
 
 func (x *ReportLockStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2550,7 +2770,7 @@ func (x *ReportLockStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportLockStatusRequest.ProtoReflect.Descriptor instead.
 func (*ReportLockStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{30}
+	return file_proto_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ReportLockStatusRequest) GetRequestId() string {
@@ -2590,7 +2810,7 @@ type ReportLockStatusResponse struct {
 
 func (x *ReportLockStatusResponse) Reset() {
 	*x = ReportLockStatusResponse{}
-	mi := &file_proto_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2602,7 +2822,7 @@ func (x *ReportLockStatusResponse) String() string {
 func (*ReportLockStatusResponse) ProtoMessage() {}
 
 func (x *ReportLockStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2615,7 +2835,7 @@ func (x *ReportLockStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportLockStatusResponse.ProtoReflect.Descriptor instead.
 func (*ReportLockStatusResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{31}
+	return file_proto_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReportLockStatusResponse) GetReceived() bool {
@@ -2639,7 +2859,7 @@ type FetchLockStatusRequest struct {
 
 func (x *FetchLockStatusRequest) Reset() {
 	*x = FetchLockStatusRequest{}
-	mi := &file_proto_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2651,7 +2871,7 @@ func (x *FetchLockStatusRequest) String() string {
 func (*FetchLockStatusRequest) ProtoMessage() {}
 
 func (x *FetchLockStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2664,7 +2884,7 @@ func (x *FetchLockStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchLockStatusRequest.ProtoReflect.Descriptor instead.
 func (*FetchLockStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{32}
+	return file_proto_agent_proto_rawDescGZIP(), []int{33}
 }
 
 type FetchLockStatusResponse struct {
@@ -2685,7 +2905,7 @@ type FetchLockStatusResponse struct {
 
 func (x *FetchLockStatusResponse) Reset() {
 	*x = FetchLockStatusResponse{}
-	mi := &file_proto_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2697,7 +2917,7 @@ func (x *FetchLockStatusResponse) String() string {
 func (*FetchLockStatusResponse) ProtoMessage() {}
 
 func (x *FetchLockStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2710,7 +2930,7 @@ func (x *FetchLockStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchLockStatusResponse.ProtoReflect.Descriptor instead.
 func (*FetchLockStatusResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_proto_rawDescGZIP(), []int{33}
+	return file_proto_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *FetchLockStatusResponse) GetLocked() bool {
@@ -2784,27 +3004,39 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x03tpm\x18\x13 \x01(\tR\x03tpm\x12\x1f\n" +
 	"\vsecure_boot\x18\x14 \x01(\tR\n" +
 	"secureBoot\x12(\n" +
-	"\x10console_user_sid\x18\x15 \x01(\tR\x0econsoleUserSidJ\x04\b\x01\x10\x02R\tdevice_id\"M\n" +
+	"\x10console_user_sid\x18\x15 \x01(\tR\x0econsoleUserSidJ\x04\b\x01\x10\x02R\tdevice_id\"\xa5\x02\n" +
 	"\fSoftwareItem\x12#\n" +
 	"\rsoftware_name\x18\x01 \x01(\tR\fsoftwareName\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\tR\aversion\"\x91\x01\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x16\n" +
+	"\x06vendor\x18\x03 \x01(\tR\x06vendor\x12)\n" +
+	"\x10install_location\x18\x04 \x01(\tR\x0finstallLocation\x12\x12\n" +
+	"\x04arch\x18\x05 \x01(\tR\x04arch\x12!\n" +
+	"\funinstall_id\x18\x06 \x01(\tR\vuninstallId\x12F\n" +
+	"\x10uninstall_method\x18\a \x01(\x0e2\x1b.routineops.UninstallMethodR\x0funinstallMethod\x12\x14\n" +
+	"\x05scope\x18\b \x01(\tR\x05scope\"\x91\x01\n" +
 	"\x0fInventoryReport\x127\n" +
 	"\vdevice_info\x18\x02 \x01(\v2\x16.routineops.DeviceInfoR\n" +
 	"deviceInfo\x124\n" +
 	"\bsoftware\x18\x03 \x03(\v2\x18.routineops.SoftwareItemR\bsoftwareJ\x04\b\x01\x10\x02R\tdevice_id\"*\n" +
 	"\fInventoryAck\x12\x1a\n" +
-	"\breceived\x18\x01 \x01(\bR\breceived\"\x9b\x02\n" +
+	"\breceived\x18\x01 \x01(\bR\breceived\"\xce\x02\n" +
 	"\x04Task\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12%\n" +
 	"\x0escript_content\x18\x03 \x01(\tR\rscriptContent\x12\x1a\n" +
 	"\bplatform\x18\x04 \x01(\tR\bplatform\x124\n" +
 	"\bpriority\x18\x05 \x01(\x0e2\x18.routineops.TaskPriorityR\bpriority\x12+\n" +
 	"\x04lock\x18\x06 \x01(\v2\x17.routineops.LockCommandR\x04lock\x12C\n" +
-	"\fdecommission\x18\a \x01(\v2\x1f.routineops.DecommissionCommandR\fdecommissionJ\x04\b\x02\x10\x03R\tdevice_id\"L\n" +
+	"\fdecommission\x18\a \x01(\v2\x1f.routineops.DecommissionCommandR\fdecommission\x121\n" +
+	"\x06reboot\x18\b \x01(\v2\x19.routineops.RebootCommandR\x06rebootJ\x04\b\x02\x10\x03R\tdevice_id\"L\n" +
 	"\x13DecommissionCommand\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xea\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"k\n" +
+	"\rRebootCommand\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12#\n" +
+	"\rdelay_seconds\x18\x03 \x01(\x05R\fdelaySeconds\"\xea\x01\n" +
 	"\vLockCommand\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x16\n" +
@@ -2927,7 +3159,16 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\rpassword_hash\x18\x02 \x01(\tR\fpasswordHash\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x121\n" +
 	"\tlock_mode\x18\x04 \x01(\x0e2\x14.routineops.LockModeR\blockMode\x124\n" +
-	"\x16filevault_target_users\x18\x05 \x03(\tR\x14filevaultTargetUsers*v\n" +
+	"\x16filevault_target_users\x18\x05 \x03(\tR\x14filevaultTargetUsers*\x84\x02\n" +
+	"\x0fUninstallMethod\x12 \n" +
+	"\x1cUNINSTALL_METHOD_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14UNINSTALL_METHOD_MSI\x10\x01\x12\"\n" +
+	"\x1eUNINSTALL_METHOD_WINDOWS_QUIET\x10\x02\x12%\n" +
+	"!UNINSTALL_METHOD_MACOS_APP_BUNDLE\x10\x03\x12\x19\n" +
+	"\x15UNINSTALL_METHOD_DPKG\x10\x04\x12\x18\n" +
+	"\x14UNINSTALL_METHOD_RPM\x10\x05\x12\x1b\n" +
+	"\x17UNINSTALL_METHOD_PACMAN\x10\x06\x12\x18\n" +
+	"\x14UNINSTALL_METHOD_APK\x10\a*v\n" +
 	"\fTaskPriority\x12\x1d\n" +
 	"\x19TASK_PRIORITY_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11TASK_PRIORITY_LOW\x10\x01\x12\x18\n" +
@@ -3007,108 +3248,112 @@ func file_proto_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_proto_rawDescData
 }
 
-var file_proto_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
-var file_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_proto_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
+var file_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_proto_agent_proto_goTypes = []any{
-	(TaskPriority)(0),                   // 0: routineops.TaskPriority
-	(TaskStatus)(0),                     // 1: routineops.TaskStatus
-	(AlertType)(0),                      // 2: routineops.AlertType
-	(PolicyRuleType)(0),                 // 3: routineops.PolicyRuleType
-	(AdminAccessStatus)(0),              // 4: routineops.AdminAccessStatus
-	(ScriptTrigger)(0),                  // 5: routineops.ScriptTrigger
-	(ScriptEventType)(0),                // 6: routineops.ScriptEventType
-	(RecoveryKeyType)(0),                // 7: routineops.RecoveryKeyType
-	(LockState)(0),                      // 8: routineops.LockState
-	(LockMode)(0),                       // 9: routineops.LockMode
-	(*HeartbeatRequest)(nil),            // 10: routineops.HeartbeatRequest
-	(*DeviceInfo)(nil),                  // 11: routineops.DeviceInfo
-	(*SoftwareItem)(nil),                // 12: routineops.SoftwareItem
-	(*InventoryReport)(nil),             // 13: routineops.InventoryReport
-	(*InventoryAck)(nil),                // 14: routineops.InventoryAck
-	(*Task)(nil),                        // 15: routineops.Task
-	(*DecommissionCommand)(nil),         // 16: routineops.DecommissionCommand
-	(*LockCommand)(nil),                 // 17: routineops.LockCommand
-	(*TaskResult)(nil),                  // 18: routineops.TaskResult
-	(*TaskResultAck)(nil),               // 19: routineops.TaskResultAck
-	(*TaskReceivedAck)(nil),             // 20: routineops.TaskReceivedAck
-	(*TaskReceivedAckResponse)(nil),     // 21: routineops.TaskReceivedAckResponse
-	(*SecurityEvent)(nil),               // 22: routineops.SecurityEvent
-	(*SecurityEventAck)(nil),            // 23: routineops.SecurityEventAck
-	(*SoftwarePolicyRule)(nil),          // 24: routineops.SoftwarePolicyRule
-	(*FetchPolicyRequest)(nil),          // 25: routineops.FetchPolicyRequest
-	(*FetchPolicyResponse)(nil),         // 26: routineops.FetchPolicyResponse
-	(*RequestAdminAccessRequest)(nil),   // 27: routineops.RequestAdminAccessRequest
-	(*RequestAdminAccessResponse)(nil),  // 28: routineops.RequestAdminAccessResponse
-	(*FetchAdminStatusRequest)(nil),     // 29: routineops.FetchAdminStatusRequest
-	(*FetchAdminStatusResponse)(nil),    // 30: routineops.FetchAdminStatusResponse
-	(*ReportAdminAccessRequest)(nil),    // 31: routineops.ReportAdminAccessRequest
-	(*ReportAdminAccessResponse)(nil),   // 32: routineops.ReportAdminAccessResponse
-	(*ScriptPolicy)(nil),                // 33: routineops.ScriptPolicy
-	(*FetchScriptPoliciesRequest)(nil),  // 34: routineops.FetchScriptPoliciesRequest
-	(*FetchScriptPoliciesResponse)(nil), // 35: routineops.FetchScriptPoliciesResponse
-	(*ScriptResult)(nil),                // 36: routineops.ScriptResult
-	(*ScriptResultAck)(nil),             // 37: routineops.ScriptResultAck
-	(*EscrowRecoveryKeyRequest)(nil),    // 38: routineops.EscrowRecoveryKeyRequest
-	(*EscrowRecoveryKeyResponse)(nil),   // 39: routineops.EscrowRecoveryKeyResponse
-	(*ReportLockStatusRequest)(nil),     // 40: routineops.ReportLockStatusRequest
-	(*ReportLockStatusResponse)(nil),    // 41: routineops.ReportLockStatusResponse
-	(*FetchLockStatusRequest)(nil),      // 42: routineops.FetchLockStatusRequest
-	(*FetchLockStatusResponse)(nil),     // 43: routineops.FetchLockStatusResponse
+	(UninstallMethod)(0),                // 0: routineops.UninstallMethod
+	(TaskPriority)(0),                   // 1: routineops.TaskPriority
+	(TaskStatus)(0),                     // 2: routineops.TaskStatus
+	(AlertType)(0),                      // 3: routineops.AlertType
+	(PolicyRuleType)(0),                 // 4: routineops.PolicyRuleType
+	(AdminAccessStatus)(0),              // 5: routineops.AdminAccessStatus
+	(ScriptTrigger)(0),                  // 6: routineops.ScriptTrigger
+	(ScriptEventType)(0),                // 7: routineops.ScriptEventType
+	(RecoveryKeyType)(0),                // 8: routineops.RecoveryKeyType
+	(LockState)(0),                      // 9: routineops.LockState
+	(LockMode)(0),                       // 10: routineops.LockMode
+	(*HeartbeatRequest)(nil),            // 11: routineops.HeartbeatRequest
+	(*DeviceInfo)(nil),                  // 12: routineops.DeviceInfo
+	(*SoftwareItem)(nil),                // 13: routineops.SoftwareItem
+	(*InventoryReport)(nil),             // 14: routineops.InventoryReport
+	(*InventoryAck)(nil),                // 15: routineops.InventoryAck
+	(*Task)(nil),                        // 16: routineops.Task
+	(*DecommissionCommand)(nil),         // 17: routineops.DecommissionCommand
+	(*RebootCommand)(nil),               // 18: routineops.RebootCommand
+	(*LockCommand)(nil),                 // 19: routineops.LockCommand
+	(*TaskResult)(nil),                  // 20: routineops.TaskResult
+	(*TaskResultAck)(nil),               // 21: routineops.TaskResultAck
+	(*TaskReceivedAck)(nil),             // 22: routineops.TaskReceivedAck
+	(*TaskReceivedAckResponse)(nil),     // 23: routineops.TaskReceivedAckResponse
+	(*SecurityEvent)(nil),               // 24: routineops.SecurityEvent
+	(*SecurityEventAck)(nil),            // 25: routineops.SecurityEventAck
+	(*SoftwarePolicyRule)(nil),          // 26: routineops.SoftwarePolicyRule
+	(*FetchPolicyRequest)(nil),          // 27: routineops.FetchPolicyRequest
+	(*FetchPolicyResponse)(nil),         // 28: routineops.FetchPolicyResponse
+	(*RequestAdminAccessRequest)(nil),   // 29: routineops.RequestAdminAccessRequest
+	(*RequestAdminAccessResponse)(nil),  // 30: routineops.RequestAdminAccessResponse
+	(*FetchAdminStatusRequest)(nil),     // 31: routineops.FetchAdminStatusRequest
+	(*FetchAdminStatusResponse)(nil),    // 32: routineops.FetchAdminStatusResponse
+	(*ReportAdminAccessRequest)(nil),    // 33: routineops.ReportAdminAccessRequest
+	(*ReportAdminAccessResponse)(nil),   // 34: routineops.ReportAdminAccessResponse
+	(*ScriptPolicy)(nil),                // 35: routineops.ScriptPolicy
+	(*FetchScriptPoliciesRequest)(nil),  // 36: routineops.FetchScriptPoliciesRequest
+	(*FetchScriptPoliciesResponse)(nil), // 37: routineops.FetchScriptPoliciesResponse
+	(*ScriptResult)(nil),                // 38: routineops.ScriptResult
+	(*ScriptResultAck)(nil),             // 39: routineops.ScriptResultAck
+	(*EscrowRecoveryKeyRequest)(nil),    // 40: routineops.EscrowRecoveryKeyRequest
+	(*EscrowRecoveryKeyResponse)(nil),   // 41: routineops.EscrowRecoveryKeyResponse
+	(*ReportLockStatusRequest)(nil),     // 42: routineops.ReportLockStatusRequest
+	(*ReportLockStatusResponse)(nil),    // 43: routineops.ReportLockStatusResponse
+	(*FetchLockStatusRequest)(nil),      // 44: routineops.FetchLockStatusRequest
+	(*FetchLockStatusResponse)(nil),     // 45: routineops.FetchLockStatusResponse
 }
 var file_proto_agent_proto_depIdxs = []int32{
-	11, // 0: routineops.InventoryReport.device_info:type_name -> routineops.DeviceInfo
-	12, // 1: routineops.InventoryReport.software:type_name -> routineops.SoftwareItem
-	0,  // 2: routineops.Task.priority:type_name -> routineops.TaskPriority
-	17, // 3: routineops.Task.lock:type_name -> routineops.LockCommand
-	16, // 4: routineops.Task.decommission:type_name -> routineops.DecommissionCommand
-	9,  // 5: routineops.LockCommand.lock_mode:type_name -> routineops.LockMode
-	1,  // 6: routineops.TaskResult.status:type_name -> routineops.TaskStatus
-	2,  // 7: routineops.SecurityEvent.alert_type:type_name -> routineops.AlertType
-	3,  // 8: routineops.SoftwarePolicyRule.rule_type:type_name -> routineops.PolicyRuleType
-	24, // 9: routineops.FetchPolicyResponse.rules:type_name -> routineops.SoftwarePolicyRule
-	4,  // 10: routineops.RequestAdminAccessResponse.status:type_name -> routineops.AdminAccessStatus
-	4,  // 11: routineops.FetchAdminStatusResponse.status:type_name -> routineops.AdminAccessStatus
-	4,  // 12: routineops.ReportAdminAccessRequest.status:type_name -> routineops.AdminAccessStatus
-	5,  // 13: routineops.ScriptPolicy.trigger:type_name -> routineops.ScriptTrigger
-	6,  // 14: routineops.ScriptPolicy.event_trigger:type_name -> routineops.ScriptEventType
-	33, // 15: routineops.FetchScriptPoliciesResponse.policies:type_name -> routineops.ScriptPolicy
-	5,  // 16: routineops.ScriptResult.trigger:type_name -> routineops.ScriptTrigger
-	7,  // 17: routineops.EscrowRecoveryKeyRequest.key_type:type_name -> routineops.RecoveryKeyType
-	8,  // 18: routineops.ReportLockStatusRequest.state:type_name -> routineops.LockState
-	9,  // 19: routineops.FetchLockStatusResponse.lock_mode:type_name -> routineops.LockMode
-	10, // 20: routineops.AgentService.Connect:input_type -> routineops.HeartbeatRequest
-	20, // 21: routineops.AgentService.AckTaskReceived:input_type -> routineops.TaskReceivedAck
-	13, // 22: routineops.AgentService.ReportInventory:input_type -> routineops.InventoryReport
-	18, // 23: routineops.AgentService.ReportTaskResult:input_type -> routineops.TaskResult
-	22, // 24: routineops.AgentService.ReportSecurityEvent:input_type -> routineops.SecurityEvent
-	25, // 25: routineops.AgentService.FetchPolicy:input_type -> routineops.FetchPolicyRequest
-	27, // 26: routineops.AgentService.RequestAdminAccess:input_type -> routineops.RequestAdminAccessRequest
-	29, // 27: routineops.AgentService.FetchAdminStatus:input_type -> routineops.FetchAdminStatusRequest
-	31, // 28: routineops.AgentService.ReportAdminAccess:input_type -> routineops.ReportAdminAccessRequest
-	34, // 29: routineops.AgentService.FetchScriptPolicies:input_type -> routineops.FetchScriptPoliciesRequest
-	36, // 30: routineops.AgentService.ReportScriptResult:input_type -> routineops.ScriptResult
-	40, // 31: routineops.AgentService.ReportLockStatus:input_type -> routineops.ReportLockStatusRequest
-	42, // 32: routineops.AgentService.FetchLockStatus:input_type -> routineops.FetchLockStatusRequest
-	38, // 33: routineops.AgentService.EscrowRecoveryKey:input_type -> routineops.EscrowRecoveryKeyRequest
-	15, // 34: routineops.AgentService.Connect:output_type -> routineops.Task
-	21, // 35: routineops.AgentService.AckTaskReceived:output_type -> routineops.TaskReceivedAckResponse
-	14, // 36: routineops.AgentService.ReportInventory:output_type -> routineops.InventoryAck
-	19, // 37: routineops.AgentService.ReportTaskResult:output_type -> routineops.TaskResultAck
-	23, // 38: routineops.AgentService.ReportSecurityEvent:output_type -> routineops.SecurityEventAck
-	26, // 39: routineops.AgentService.FetchPolicy:output_type -> routineops.FetchPolicyResponse
-	28, // 40: routineops.AgentService.RequestAdminAccess:output_type -> routineops.RequestAdminAccessResponse
-	30, // 41: routineops.AgentService.FetchAdminStatus:output_type -> routineops.FetchAdminStatusResponse
-	32, // 42: routineops.AgentService.ReportAdminAccess:output_type -> routineops.ReportAdminAccessResponse
-	35, // 43: routineops.AgentService.FetchScriptPolicies:output_type -> routineops.FetchScriptPoliciesResponse
-	37, // 44: routineops.AgentService.ReportScriptResult:output_type -> routineops.ScriptResultAck
-	41, // 45: routineops.AgentService.ReportLockStatus:output_type -> routineops.ReportLockStatusResponse
-	43, // 46: routineops.AgentService.FetchLockStatus:output_type -> routineops.FetchLockStatusResponse
-	39, // 47: routineops.AgentService.EscrowRecoveryKey:output_type -> routineops.EscrowRecoveryKeyResponse
-	34, // [34:48] is the sub-list for method output_type
-	20, // [20:34] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	0,  // 0: routineops.SoftwareItem.uninstall_method:type_name -> routineops.UninstallMethod
+	12, // 1: routineops.InventoryReport.device_info:type_name -> routineops.DeviceInfo
+	13, // 2: routineops.InventoryReport.software:type_name -> routineops.SoftwareItem
+	1,  // 3: routineops.Task.priority:type_name -> routineops.TaskPriority
+	19, // 4: routineops.Task.lock:type_name -> routineops.LockCommand
+	17, // 5: routineops.Task.decommission:type_name -> routineops.DecommissionCommand
+	18, // 6: routineops.Task.reboot:type_name -> routineops.RebootCommand
+	10, // 7: routineops.LockCommand.lock_mode:type_name -> routineops.LockMode
+	2,  // 8: routineops.TaskResult.status:type_name -> routineops.TaskStatus
+	3,  // 9: routineops.SecurityEvent.alert_type:type_name -> routineops.AlertType
+	4,  // 10: routineops.SoftwarePolicyRule.rule_type:type_name -> routineops.PolicyRuleType
+	26, // 11: routineops.FetchPolicyResponse.rules:type_name -> routineops.SoftwarePolicyRule
+	5,  // 12: routineops.RequestAdminAccessResponse.status:type_name -> routineops.AdminAccessStatus
+	5,  // 13: routineops.FetchAdminStatusResponse.status:type_name -> routineops.AdminAccessStatus
+	5,  // 14: routineops.ReportAdminAccessRequest.status:type_name -> routineops.AdminAccessStatus
+	6,  // 15: routineops.ScriptPolicy.trigger:type_name -> routineops.ScriptTrigger
+	7,  // 16: routineops.ScriptPolicy.event_trigger:type_name -> routineops.ScriptEventType
+	35, // 17: routineops.FetchScriptPoliciesResponse.policies:type_name -> routineops.ScriptPolicy
+	6,  // 18: routineops.ScriptResult.trigger:type_name -> routineops.ScriptTrigger
+	8,  // 19: routineops.EscrowRecoveryKeyRequest.key_type:type_name -> routineops.RecoveryKeyType
+	9,  // 20: routineops.ReportLockStatusRequest.state:type_name -> routineops.LockState
+	10, // 21: routineops.FetchLockStatusResponse.lock_mode:type_name -> routineops.LockMode
+	11, // 22: routineops.AgentService.Connect:input_type -> routineops.HeartbeatRequest
+	22, // 23: routineops.AgentService.AckTaskReceived:input_type -> routineops.TaskReceivedAck
+	14, // 24: routineops.AgentService.ReportInventory:input_type -> routineops.InventoryReport
+	20, // 25: routineops.AgentService.ReportTaskResult:input_type -> routineops.TaskResult
+	24, // 26: routineops.AgentService.ReportSecurityEvent:input_type -> routineops.SecurityEvent
+	27, // 27: routineops.AgentService.FetchPolicy:input_type -> routineops.FetchPolicyRequest
+	29, // 28: routineops.AgentService.RequestAdminAccess:input_type -> routineops.RequestAdminAccessRequest
+	31, // 29: routineops.AgentService.FetchAdminStatus:input_type -> routineops.FetchAdminStatusRequest
+	33, // 30: routineops.AgentService.ReportAdminAccess:input_type -> routineops.ReportAdminAccessRequest
+	36, // 31: routineops.AgentService.FetchScriptPolicies:input_type -> routineops.FetchScriptPoliciesRequest
+	38, // 32: routineops.AgentService.ReportScriptResult:input_type -> routineops.ScriptResult
+	42, // 33: routineops.AgentService.ReportLockStatus:input_type -> routineops.ReportLockStatusRequest
+	44, // 34: routineops.AgentService.FetchLockStatus:input_type -> routineops.FetchLockStatusRequest
+	40, // 35: routineops.AgentService.EscrowRecoveryKey:input_type -> routineops.EscrowRecoveryKeyRequest
+	16, // 36: routineops.AgentService.Connect:output_type -> routineops.Task
+	23, // 37: routineops.AgentService.AckTaskReceived:output_type -> routineops.TaskReceivedAckResponse
+	15, // 38: routineops.AgentService.ReportInventory:output_type -> routineops.InventoryAck
+	21, // 39: routineops.AgentService.ReportTaskResult:output_type -> routineops.TaskResultAck
+	25, // 40: routineops.AgentService.ReportSecurityEvent:output_type -> routineops.SecurityEventAck
+	28, // 41: routineops.AgentService.FetchPolicy:output_type -> routineops.FetchPolicyResponse
+	30, // 42: routineops.AgentService.RequestAdminAccess:output_type -> routineops.RequestAdminAccessResponse
+	32, // 43: routineops.AgentService.FetchAdminStatus:output_type -> routineops.FetchAdminStatusResponse
+	34, // 44: routineops.AgentService.ReportAdminAccess:output_type -> routineops.ReportAdminAccessResponse
+	37, // 45: routineops.AgentService.FetchScriptPolicies:output_type -> routineops.FetchScriptPoliciesResponse
+	39, // 46: routineops.AgentService.ReportScriptResult:output_type -> routineops.ScriptResultAck
+	43, // 47: routineops.AgentService.ReportLockStatus:output_type -> routineops.ReportLockStatusResponse
+	45, // 48: routineops.AgentService.FetchLockStatus:output_type -> routineops.FetchLockStatusResponse
+	41, // 49: routineops.AgentService.EscrowRecoveryKey:output_type -> routineops.EscrowRecoveryKeyResponse
+	36, // [36:50] is the sub-list for method output_type
+	22, // [22:36] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_proto_init() }
@@ -3121,8 +3366,8 @@ func file_proto_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_proto_rawDesc), len(file_proto_agent_proto_rawDesc)),
-			NumEnums:      10,
-			NumMessages:   34,
+			NumEnums:      11,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

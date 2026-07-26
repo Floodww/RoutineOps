@@ -43,6 +43,8 @@ const ACTION_LABELS: Record<string, string> = {
   reject_pending_bulk:   "отклонил очередь энроллмента",
   create_bulk_token:     "выпустил массовый токен",
   decommission_device:   "вывел устройство из эксплуатации",
+  reboot_device:         "перезагрузил устройство",
+  reboot_group:          "перезагрузил группу устройств",
   create_api_token:      "выпустил API-токен",
   revoke_api_token:      "отозвал API-токен",
   reenroll_device:       "перерегистрировал устройство",
@@ -96,6 +98,7 @@ const ACTION_CATEGORY: Record<string, EventCategory> = {
   create_bulk_token: "security", approve_device: "security", approve_pending_bulk: "security",
   create_api_token: "security", revoke_api_token: "security",
   reject_device: "device", reject_pending_bulk: "device", decommission_device: "device",
+  reboot_device: "device", reboot_group: "device",
   // Запуск скрипта — исполнение кода на устройстве/парке, не правка контента.
   run_script: "device", run_script_on_group: "device",
   create_device_group: "device", update_device_group: "device", delete_device_group: "device",

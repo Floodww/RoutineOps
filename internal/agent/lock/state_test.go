@@ -1,6 +1,7 @@
 package lock
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -55,114 +56,185 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
-// Служба замечает оффлайн-разблок (лок-экран очистил файл) → колбэк + синхронизация.
-func TestDetectOfflineUnlock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lock.json")
+// forgeUnlocked пишет в файл состояния «разблокировано» НАПРЯМУЮ, как это делает
+// атакующий: обычным os.WriteFile, минуя любые API пакета (каталог lock.json на
+// Windows намеренно user-writable — см. EnsureUserWritableDir). marker — значение
+// last_unlocked_hash, которое атакующий может и оставить пустым, и скопировать из
+// соседнего поля hash того же файла.
+func forgeUnlocked(t *testing.T, path, marker string) {
+	t.Helper()
+	b, err := json.Marshal(State{Locked: false, LastUnlockedHash: marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertTamperReasserted — общий контракт tamper-пути: память осталась
+// заблокированной, файл пере-утверждён тем же локом, снятие НЕ задурабилено и
+// серверу не отчитано.
+func assertTamperReasserted(t *testing.T, m *Manager, path, durable, wantHash string) {
+	t.Helper()
+	if !m.Locked() || m.CurrentHash() != wantHash {
+		t.Fatalf("лок должен остаться в силе: locked=%v hash=%q", m.Locked(), m.CurrentHash())
+	}
+	st, err := ReadState(path)
+	if err != nil || !st.Locked || st.Hash != wantHash {
+		t.Fatalf("на диске ожидали пере-утверждённый locked, got %+v (err=%v)", st, err)
+	}
+	if got := m.LastUnlockedHash(); got != "" {
+		t.Fatalf("LastUnlockedHash=%q — подделка файла не должна давать durable-подавление пере-запирания", got)
+	}
+	if durable != "" {
+		if _, err := os.Stat(durable); !os.IsNotExist(err) {
+			t.Fatalf("durable-файл снятия создан по подделке файла состояния (err=%v)", err)
+		}
+	}
+}
+
+// Находка 1.3: обычный пользователь (без прав, служба НЕ остановлена) пишет одну
+// строку {"locked":false} в user-writable lock.json. Пароль при этом нигде не
+// сверялся, поэтому снятием это быть не может — демон обязан пере-утвердить лок и
+// НЕ писать durable-маркер подавления (иначе подделка переживала бы ребут и
+// выключала kill-switch бессрочно).
+func TestDetectOfflineUnlock_ForgedEmptyMarkerIsTamper(t *testing.T) {
 	fl := &fakeLocker{}
-	m := New(path, fl, quietLog())
-	if err := m.Lock("r1", bcryptHash(t, "pw"), "увольнение"); err != nil {
+	m, durable := newMgrDurable(t, fl)
+	hash := bcryptHash(t, "pw")
+	if err := m.Lock("r1", hash, "увольнение"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ClearState(path); err != nil { // имитируем разблок лок-экраном
+	forgeUnlocked(t, m.path, "")
+	m.detectOfflineUnlock()
+
+	assertTamperReasserted(t, m, m.path, durable, hash)
+	if !fl.shown {
+		t.Fatal("замок опущен по подделке файла состояния")
+	}
+	if fl.reasserts() == 0 {
+		t.Fatal("оверлей не поднят принудительно — он мог закрыться сам, прочитав подделку")
+	}
+}
+
+// Тот же вектор, но атакующий копирует hash активного лока из соседнего поля того
+// же файла в last_unlocked_hash. Ровно этот случай прежняя проверка
+// («маркер совпал с текущим hash» = легитимно) пропускала как настоящее снятие:
+// bcrypt-хеш не секрет и лежит рядом, так что «доказательство» подделывается
+// вместе с самим снятием.
+func TestDetectOfflineUnlock_ForgedWithCopiedHashIsTamper(t *testing.T) {
+	fl := &fakeLocker{}
+	m, durable := newMgrDurable(t, fl)
+	hash := bcryptHash(t, "pw")
+	if err := m.Lock("r1", hash, "увольнение"); err != nil {
 		t.Fatal(err)
 	}
-	var got string
-	m.detectOfflineUnlock(func(reqID, hash string) { got = reqID })
 
-	if got != "r1" {
-		t.Fatalf("onOfflineUnlock ожидали с r1, got %q", got)
+	// Атакующий читает файл и копирует hash в маркер — как сделал бы руками.
+	st, err := ReadState(m.path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if m.Locked() {
-		t.Fatal("после оффлайн-разблока Manager должен быть разблокирован")
-	}
-	if fl.shown {
-		t.Fatal("замок должен быть скрыт после оффлайн-разблока")
+	forgeUnlocked(t, m.path, st.Hash)
+	m.detectOfflineUnlock()
+
+	assertTamperReasserted(t, m, m.path, durable, hash)
+	if !fl.shown {
+		t.Fatal("замок опущен по подделке с скопированным hash")
 	}
 }
 
 // Пока файл всё ещё заблокирован — detectOfflineUnlock ничего не делает.
 func TestDetectOfflineUnlock_StillLocked(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lock.json")
-	m := New(path, &fakeLocker{}, quietLog())
+	fl := &fakeLocker{}
+	m := New(filepath.Join(t.TempDir(), "lock.json"), fl, quietLog())
 	if err := m.Lock("r1", bcryptHash(t, "pw"), "reason"); err != nil {
 		t.Fatal(err)
 	}
-	called := false
-	m.detectOfflineUnlock(func(string, string) { called = true })
-	if called || !m.Locked() {
-		t.Fatalf("пока заблокировано, колбэк не дёргаем: called=%v locked=%v", called, m.Locked())
-	}
-}
-
-// MarkUnlocked (Windows-оверлей) кладёт в файл hash сверенного лока: снятие
-// ТЕКУЩЕГО лока легитимно — детект синхронизирует память, зовёт колбэк и
-// durable-сохраняет LastUnlockedHash (реконсиляция не пере-запрёт по
-// устаревшему desired).
-func TestDetectOfflineUnlock_MarkedWithCurrentHash(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lock.json")
-	fl := &fakeLocker{}
-	m := New(path, fl, quietLog())
-	hash := bcryptHash(t, "pw")
-	if err := m.Lock("r1", hash, "увольнение"); err != nil {
-		t.Fatal(err)
-	}
-	if err := MarkUnlocked(path, hash); err != nil {
-		t.Fatal(err)
-	}
-
-	var gotReq, gotHash string
-	m.detectOfflineUnlock(func(reqID, h string) { gotReq, gotHash = reqID, h })
-
-	if gotReq != "r1" || gotHash != hash {
-		t.Fatalf("колбэк ожидали с (r1, hash), got (%q, %q)", gotReq, gotHash)
-	}
-	if m.Locked() {
-		t.Fatal("после легитимного снятия Manager должен быть разблокирован")
-	}
-	if got := m.LastUnlockedHash(); got != hash {
-		t.Fatalf("LastUnlockedHash=%q, ожидали hash снятого лока", got)
-	}
-	st, err := ReadState(path)
-	if err != nil || st.Locked || st.LastUnlockedHash != hash {
-		t.Fatalf("на диске ожидали {unlocked, last=hash}, got %+v (err=%v)", st, err)
+	m.detectOfflineUnlock()
+	if !m.Locked() || fl.reasserts() != 0 {
+		t.Fatalf("согласованное состояние не должно ничего трогать: locked=%v reasserts=%d", m.Locked(), fl.reasserts())
 	}
 }
 
 // Гонка со сменой лока: оверлей, живший под старым H1, затёр файл уже ПОСЛЕ
-// применения нового лока H2. Маркер в файле (H1) не совпадает с текущим (H2) —
-// снятие НЕлегитимно: замок не опускается, колбэк не зовётся, файл
-// пере-утверждается текущим locked-состоянием (до фикса демон затирал и память,
-// и диск «разблокированным», а в худшем варианте durable-запоминал
-// LastUnlockedHash=H2 — kill-switch выключался насовсем).
+// применения нового лока H2. Маркер (H1) не совпадает с текущим (H2) —
+// пере-утверждаем H2. Ветка была введена вместе с MarkUnlocked и сохраняется как
+// частный случай общего правила: файлу не верим ни при каком содержимом.
 func TestDetectOfflineUnlock_StaleMarkerReassertsLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lock.json")
 	fl := &fakeLocker{}
-	m := New(path, fl, quietLog())
+	m, durable := newMgrDurable(t, fl)
 	oldHash := bcryptHash(t, "old-pw")
 	newHash := bcryptHash(t, "new-pw")
 	if err := m.Lock("r2", newHash, "эскалация ИБ"); err != nil {
 		t.Fatal(err)
 	}
-	// Оверлей сверил пароль СТАРОГО лока и затёр файл своим маркером.
-	if err := MarkUnlocked(path, oldHash); err != nil {
+	forgeUnlocked(t, m.path, oldHash)
+
+	m.detectOfflineUnlock()
+
+	assertTamperReasserted(t, m, m.path, durable, newHash)
+}
+
+// Легитимный путь не должен попадать под tamper-правило: демон сам снял лок
+// (запрос с паролем от лок-экрана), память и файл согласованы и разблокированы —
+// детектор обязан выйти молча, не пере-запирая устройство обратно.
+func TestDetectOfflineUnlock_NoopAfterDaemonUnlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock.json")
+	fl := &fakeLocker{}
+	m := New(path, fl, quietLog())
+	m.SetDurableUnlockPath(filepath.Join(t.TempDir(), "lock.last_unlocked"))
+	hash := bcryptHash(t, "s3cret")
+	if err := m.Lock("r1", hash, "увольнение"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteUnlockRequest(dir, "s3cret"); err != nil {
 		t.Fatal(err)
 	}
 
-	called := false
-	m.detectOfflineUnlock(func(string, string) { called = true })
+	var reported string
+	m.processUnlockRequests(func(reqID, _ string) { reported = reqID })
+	if reported != "r1" || m.Locked() {
+		t.Fatalf("демон должен был снять лок по верному паролю: reported=%q locked=%v", reported, m.Locked())
+	}
 
-	if called {
-		t.Fatal("колбэк вызван для снятия устаревшего лока")
+	m.detectOfflineUnlock()
+
+	if m.Locked() {
+		t.Fatal("детектор пере-запер устройство после ЛЕГИТИМНОГО снятия демоном")
 	}
-	if !m.Locked() || m.CurrentHash() != newHash {
-		t.Fatalf("текущий лок H2 должен остаться: locked=%v hash=%q", m.Locked(), m.CurrentHash())
+	if got := m.LastUnlockedHash(); got != hash {
+		t.Fatalf("durable-память снятия = %q, ожидали hash снятого лока (реконсиляция иначе пере-запрёт после ребута)", got)
 	}
-	st, err := ReadState(path)
-	if err != nil || !st.Locked || st.Hash != newHash {
-		t.Fatalf("на диске ожидали пере-утверждённый locked-H2, got %+v (err=%v)", st, err)
+	if fl.reasserts() != 0 {
+		t.Fatal("оверлей поднят после легитимного снятия")
 	}
-	if got := m.LastUnlockedHash(); got != "" {
-		t.Fatalf("LastUnlockedHash=%q — устаревшее снятие не должно запоминаться (реконсиляция бы навсегда пропускала re-lock)", got)
+}
+
+// plainLocker — Locker без Reassert: tamper-путь обязан работать и с локером,
+// который принудительный подъём не поддерживает (Linux/лог-заглушка).
+type plainLocker struct{ shown bool }
+
+func (p *plainLocker) Show(string, func(string) bool) { p.shown = true }
+func (p *plainLocker) Hide()                          { p.shown = false }
+
+func TestDetectOfflineUnlock_TamperWithoutReasserter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock.json")
+	pl := &plainLocker{}
+	m := New(path, pl, quietLog())
+	hash := bcryptHash(t, "pw")
+	if err := m.Lock("r1", hash, "увольнение"); err != nil {
+		t.Fatal(err)
+	}
+
+	forgeUnlocked(t, path, "")
+	m.detectOfflineUnlock()
+
+	assertTamperReasserted(t, m, path, "", hash)
+	if !pl.shown {
+		t.Fatal("замок опущен по подделке")
 	}
 }

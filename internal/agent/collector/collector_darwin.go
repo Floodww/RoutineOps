@@ -199,21 +199,175 @@ func installedSoftware() []Software {
 	if err != nil {
 		return nil
 	}
-	var data struct {
-		Apps []struct {
-			Name    string `json:"_name"`
-			Version string `json:"version"`
-		} `json:"SPApplicationsDataType"`
+	return parseApplications(out)
+}
+
+// spApplication — подмножество полей записи SPApplicationsDataType, которое мы
+// действительно используем. Живьём (macOS 26.3, 342 записи) непусты: path и
+// arch_kind — 100%, version — 99%, signed_by — 97%, obtained_from — 100%.
+//
+// СОЗНАТЕЛЬНО НЕ БЕРЁМ lastModified (тоже 100%): это mtime бандла, он меняется от
+// любого touch'а внутри пакета и в паре с ежечасным самообновлением апдейтеров
+// вернул бы отправку инвентаря по всему мак-парку — SoftwareItem целиком входит в
+// хэш снимка (inventory.hashReport), см. инвариант стабильности у типа Software.
+// obtained_from (apple / mac_app_store / identified_developer / unknown) — это
+// КАНАЛ доставки, а не издатель, поэтому в Vendor он не годится.
+type spApplication struct {
+	Name     string   `json:"_name"`
+	Version  string   `json:"version"`
+	Path     string   `json:"path"`
+	ArchKind string   `json:"arch_kind"`
+	SignedBy []string `json:"signed_by"`
+}
+
+// parseApplications — чистый разбор выдачи `system_profiler -json
+// SPApplicationsDataType`, вынесен из installedSoftware, чтобы решения о вендоре,
+// архитектуре, способе снятия и scope проверялись табличными тестами на реальном
+// фрагменте выдачи, а не живым опросом ОС.
+func parseApplications(data []byte) []Software {
+	var payload struct {
+		Apps []spApplication `json:"SPApplicationsDataType"`
 	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil
 	}
-	sw := make([]Software, 0, len(data.Apps))
-	for _, a := range data.Apps {
+	sw := make([]Software, 0, len(payload.Apps))
+	for _, a := range payload.Apps {
 		if a.Name == "" {
 			continue
 		}
-		sw = append(sw, Software{Name: a.Name, Version: a.Version})
+		sw = append(sw, Software{
+			Name:            a.Name,
+			Version:         a.Version,
+			Vendor:          macVendor(a.SignedBy),
+			InstallLocation: a.Path,
+			Arch:            macArchByKind[a.ArchKind],
+			// UninstallID (bundle identifier) system_profiler не отдаёт вовсе, а
+			// добывать его отдельно — это `defaults read`/`mdls` на каждую запись,
+			// то есть сотни процессов на снимок при 342 приложениях. Оставляем
+			// пустым: цель снятия на macOS однозначно задаётся InstallLocation.
+			UninstallMethod: macUninstallMethod(a.Path),
+			Scope:           macScope(a.Path),
+		})
 	}
 	return sw
+}
+
+// developerIDRe вытаскивает издателя из leaf-сертификата подписи: "Developer ID
+// Application: Google LLC (EQHXZ8M8AV)" → "Google LLC". Team ID в скобках в
+// вендора не тащим — он не нужен ни для CPE/purl, ни для UI, а различал бы
+// формально одного и того же вендора.
+var developerIDRe = regexp.MustCompile(`^Developer ID Application:\s*(.+?)\s*\([0-9A-Z]{10}\)$`)
+
+// appleSoftwareSigningLeaf — leaf-сертификат, которым Apple подписывает бинарники
+// самой ОС (299 из 342 записей живьём). Он выдаётся только Apple, поэтому
+// отображение в издателя однозначно.
+const appleSoftwareSigningLeaf = "Software Signing"
+
+// macVendor определяет издателя по цепочке подписи: она берётся из самого бандла
+// и стабильна, пока приложение не переподписано (в отличие от чего-либо
+// вычисляемого на лету). Разбирается ТОЛЬКО leaf (signed_by[0]) — выше по цепочке
+// всегда стоят УЦ Apple, и они одинаковы у всех вендоров.
+//
+// Для приложений из Mac App Store leaf — "Apple Mac OS Application Signing"
+// (Apple перевыпускает подпись при выдаче), и настоящего разработчика в выдаче
+// нет. Возвращаем "" вместо соблазнительного "Apple": подставить Apple вендором
+// чужому продукту означает и неверную карточку в UI, и промах CPE при
+// CVE-сканировании. Пустое поле честно значит «источник не сказал».
+func macVendor(signedBy []string) string {
+	if len(signedBy) == 0 {
+		return ""
+	}
+	leaf := strings.TrimSpace(signedBy[0])
+	if m := developerIDRe.FindStringSubmatch(leaf); m != nil {
+		return m[1]
+	}
+	if leaf == appleSoftwareSigningLeaf {
+		return "Apple Inc."
+	}
+	return ""
+}
+
+// macArchByKind — arch_kind из system_profiler в значения поля Software.Arch.
+// Заполняем только то, что означает конкретный набор машинного кода;
+// arch_arm_i64 (универсальный бандл, 322 из 342 записей живьём) — это ОБА
+// среза сразу, поэтому отдельное "universal", а не произвольный выбор одного из
+// них: подставить arm64 значило бы отдавать разный Arch для одного и того же
+// пакета на Apple Silicon и на Intel.
+//
+// Остальные виды (arch_other, arch_web у веб-приложений Safari, arch_ios у
+// iOS/Catalyst-бандлов) остаются "" = «неизвестно»: это описание ТИПА бандла, а
+// не архитектуры, и выдумывать по нему CPE-архитектуру нельзя. Ключей нет —
+// значение "" приходит само из отсутствующего элемента map.
+var macArchByKind = map[string]string{
+	"arch_arm_i64": "universal",
+	"arch_arm":     "arm64",
+	"arch_i64":     "x86_64",
+	"arch_i32":     "i386",
+}
+
+// Каталоги, из которых удаление бандла — это действительно деинсталляция.
+const (
+	machineAppsDir = "/Applications"
+	userAppsSubdir = "Applications" // /Users/<кто-то>/Applications
+	userHomePrefix = "/Users/"
+)
+
+// macUninstallMethod: fail-safe — метод выставляется только там, где агент
+// РЕАЛЬНО снимет ПО тихо и неинтерактивно (rm -rf бандла + pkgutil --forget).
+// Всё остальное — UninstallNone, иначе оператору покажут кнопку «удалить»,
+// которая ничего не удалит.
+func macUninstallMethod(p string) UninstallMethod {
+	if isRemovableAppBundle(p) {
+		return UninstallMacAppBundle
+	}
+	return UninstallNone
+}
+
+// isRemovableAppBundle: бандл должен лежать НЕПОСРЕДСТВЕННО в /Applications или в
+// ~/Applications пользователя. Что отсекается и почему:
+//   - /System/..., /usr/..., /Library/Apple/... (XProtect, MRT, MobileDevice) —
+//     под SIP: rm вернёт EPERM даже root'у, снять их нечем;
+//   - вложенные бандлы (.../Library/Application Support/<продукт>/Helper.app,
+//     .../GoogleUpdater/<версия>/GoogleUpdater.app, шаблоны Script Editor) — это
+//     ЧАСТИ чужой установки: удаление такого бандла по отдельности сломает
+//     родительский продукт, а не деинсталлирует его;
+//   - .app в произвольных каталогах пользователя (~/Downloads/...) — не установка,
+//     а скачанный архив; «удаление ПО» там означало бы чистку чужих файлов.
+//
+// Проверяется именно прямое вложение (ровно один уровень), поэтому
+// /Applications/<Пакет>/Sub.app тоже отсекается — там снимать надо каталог
+// пакета, а не отдельный бандл.
+func isRemovableAppBundle(p string) bool {
+	slash := strings.LastIndex(p, "/")
+	if slash < 0 {
+		return false
+	}
+	dir, bundle := p[:slash], p[slash+1:]
+	if bundle == ".app" || !strings.HasSuffix(bundle, ".app") {
+		return false
+	}
+	if dir == machineAppsDir {
+		return true
+	}
+	rest, ok := strings.CutPrefix(dir, userHomePrefix)
+	if !ok {
+		return false
+	}
+	user, tail, _ := strings.Cut(rest, "/")
+	return user != "" && tail == userAppsSubdir
+}
+
+// macScope: всё под /Users — установка в профиль (ScopeUser), остальное машинное.
+// Агент работает под root и технически удалит и per-user бандл, поэтому метод
+// снятия для ~/Applications мы выставляем — но scope=user обязан доехать честно:
+// (1) оператор должен видеть, что действие затронет чужой профиль, а не машину;
+// (2) установка в профиль — типовой обход политики запрещённого ПО, её нельзя
+// показывать как машинную; (3) dedupeSoftware по этому полю выбирает машинную
+// запись вместо per-user, когда один продукт стоит и там, и там.
+func macScope(p string) string {
+	if strings.HasPrefix(p, userHomePrefix) {
+		return ScopeUser
+	}
+	return ScopeMachine
 }

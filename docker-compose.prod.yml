@@ -29,6 +29,11 @@ services:
       # пережить рестарт. Отдельно от certs (тот :ro — там приватный ключ CA) и от
       # releases (тот раздаётся наружу по /downloads/*). В open-core остаётся пустым.
       - ./license:/app/license
+      # rw-том под конфиг каталога (LDAP/AD): url, bind_dn и bind-ПАРОЛЬ живут в
+      # directory/config.json относительно WORKDIR /app, а не в БД и не в certs.
+      # Без тома `docker compose up --force-recreate` уносил подключение к каталогу
+      # вместе со старым контейнером — молча, синк просто переставал работать.
+      - ./directory:/app/directory
     env_file: .env.prod
     depends_on:
       migrate:

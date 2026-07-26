@@ -31,6 +31,10 @@ type fakeClient struct {
 	lockReports []*pb.ReportLockStatusRequest
 	ackErr      error
 	repErr      error
+	// repNotReceived — сервер принял вызов, но не подтвердил результат
+	// (TaskResultAck.Received=false): у живого сервера это внутренняя ошибка,
+	// результат подлежит повторной доставке.
+	repNotReceived bool
 }
 
 func (f *fakeClient) ReportLockStatus(_ context.Context, in *pb.ReportLockStatusRequest, _ ...grpc.CallOption) (*pb.ReportLockStatusResponse, error) {
@@ -53,11 +57,17 @@ func (f *fakeClient) AckTaskReceived(_ context.Context, in *pb.TaskReceivedAck, 
 	return &pb.TaskReceivedAckResponse{}, f.ackErr
 }
 
+// ReportTaskResult по умолчанию подтверждает приём (Received: true) — так же, как
+// живой сервер на успешном пути (gateway.go). Received: false там означает
+// СЕРВЕРНУЮ ошибку и подлежит повтору, поэтому отдавать его по умолчанию из фейка
+// значило бы тестировать несуществующий сценарий; тесты, которым нужен этот путь,
+// выставляют repNotReceived.
 func (f *fakeClient) ReportTaskResult(_ context.Context, in *pb.TaskResult, _ ...grpc.CallOption) (*pb.TaskResultAck, error) {
 	f.mu.Lock()
 	f.results = append(f.results, in)
+	notReceived := f.repNotReceived
 	f.mu.Unlock()
-	return &pb.TaskResultAck{}, f.repErr
+	return &pb.TaskResultAck{Received: !notReceived}, f.repErr
 }
 
 func (f *fakeClient) ackedIDs() []string {

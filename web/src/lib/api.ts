@@ -213,6 +213,12 @@ export interface ReenrollResponse {
 export interface Software {
   name: string
   version: string
+  vendor?: string
+  install_location?: string
+  arch?: string           // в диалекте источника: amd64 / x86_64 / noarch / universal
+  uninstall_id?: string
+  uninstall_method?: string // пусто = снять нечем
+  scope?: string            // machine / user; user снять нечем даже с правами
 }
 
 export interface DeviceDetailResponse {
@@ -336,6 +342,22 @@ export interface GroupSoftwareRule {
   rule_type: "allowed" | "forbidden"
 }
 
+// Отсрочки перезагрузки. «Немедленно» — это 10 секунд, а не ноль: ноль на проводе
+// означает «дефолт агента» (минута), и посылать его как «сейчас» значило бы сделать
+// нулевое значение самым деструктивным вариантом. Ноль в списке не предлагаем вовсе —
+// отсрочка и есть защита несохранённой работы сотрудника.
+export const REBOOT_DELAYS = [
+  { value: 60, label: "Через минуту" },
+  { value: 300, label: "Через 5 минут" },
+  { value: 900, label: "Через 15 минут" },
+  { value: 3600, label: "Через час" },
+  { value: 10, label: "Немедленно (10 секунд)" },
+]
+
+// REBOOT_GROUP_MAX_DEVICES — тот же потолок, что и на сервере (rebootGroupMaxDevices).
+// Дубль осознанный: без него оператор узнавал бы о лимите из сырого 422 в тосте.
+export const REBOOT_GROUP_MAX_DEVICES = 50
+
 export interface DeviceGroup {
   id: string
   name: string
@@ -356,6 +378,7 @@ export interface PolicyDeviceCompliance {
   installed: boolean
   matched_software: string
   matched_version: string
+  matched_scope: string // 'user' = установка в профиль, снять нельзя
 }
 
 // SoftwarePolicyCompliance — счётчики Pass/Fail софт-правила (GET /policies/compliance).

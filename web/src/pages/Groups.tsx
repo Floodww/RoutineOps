@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { Plus, Trash2, Users, Play, ShieldCheck } from "lucide-react"
-import api, { Script, ScriptPolicy, DeviceGroup, Device, GROUP_PALETTE, DEFAULT_GROUP_COLOR } from "@/lib/api"
+import { Plus, Trash2, Users, Play, ShieldCheck, RotateCw } from "lucide-react"
+import api, { Script, ScriptPolicy, DeviceGroup, Device, GROUP_PALETTE, DEFAULT_GROUP_COLOR, REBOOT_DELAYS, REBOOT_GROUP_MAX_DEVICES } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -59,6 +59,9 @@ export default function Groups() {
   })
 
   const [submitting, setSubmitting] = useState(false)
+  const [rebootGroupId, setRebootGroupId] = useState<string | null>(null)
+  const [rebootReason, setRebootReason] = useState("")
+  const [rebootDelay, setRebootDelay] = useState(REBOOT_DELAYS[0].value)
 
   async function load() {
     try {
@@ -180,6 +183,34 @@ export default function Groups() {
     }
   }
 
+  // Групповая перезагрузка — самая крупнокалиберная кнопка после вывода из
+  // эксплуатации. expected_devices = число, которое видел оператор: если группа
+  // изменилась между показом и кликом, сервер ответит 409, а не перезагрузит лишних.
+  async function handleRebootGroup() {
+    if (!rebootGroupId) return
+    setSubmitting(true)
+    try {
+      const res = await api.post<{ created: number; in_scope: number }>(
+        `/device-groups/${rebootGroupId}/reboot`,
+        { reason: rebootReason, delay_seconds: rebootDelay, expected_devices: rebootTargets.length },
+      )
+      setRebootGroupId(null)
+      toast({
+        title: res.data.created === 0
+          ? "Новых перезагрузок не создано"
+          : `Перезагрузка запланирована на ${res.data.created} устройств`,
+        description: res.data.created < res.data.in_scope
+          ? "Части машин перезагрузка уже назначена и ещё не доставлена — повторную не создаём."
+          : "Команду выполнит операционная система каждого устройства.",
+        variant: "success",
+      })
+    } catch {
+      // авто-тост интерсептора
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function handleRunScript() {
     if (!runGroupId || !runForm.script_id) return
     setSubmitting(true)
@@ -198,7 +229,15 @@ export default function Groups() {
     }
   }
 
+  // Команду получат только active-машины группы — ровно их сервер и считает.
+  // Списанные/заблокированные/неодобренные Connect не примет, обещать их в UI нельзя.
+  function activeMembers(g: DeviceGroup): Device[] {
+    return devices.filter((d) => g.device_ids.includes(d.id) && d.status === "active")
+  }
+
   const managedGroup = groups.find((g) => g.id === manageGroupId) ?? null
+  const rebootGroup = groups.find((g) => g.id === rebootGroupId) ?? null
+  const rebootTargets = rebootGroup ? activeMembers(rebootGroup) : []
 
   const dq = deviceQuery.trim().toLowerCase()
   const visibleDevices = dq
@@ -269,6 +308,16 @@ export default function Groups() {
                 >
                   <Play className="h-3.5 w-3.5 mr-1" strokeWidth={2} />
                   Прогнать скрипт
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs px-2"
+                  onClick={() => { setRebootGroupId(g.id); setRebootReason(""); setRebootDelay(REBOOT_DELAYS[0].value) }}
+                  disabled={activeMembers(g).length === 0}
+                >
+                  <RotateCw className="h-3.5 w-3.5 mr-1" strokeWidth={2} />
+                  Перезагрузить
                 </Button>
               </div>
             </div>
@@ -482,6 +531,57 @@ export default function Groups() {
             </p>
             <Button className="w-full" onClick={handleRunScript} disabled={submitting || !runForm.script_id}>
               {submitting ? "Запуск..." : "Запустить"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Перезагрузка группы */}
+      <Dialog open={!!rebootGroupId} onOpenChange={(o) => !o && setRebootGroupId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Перезагрузить группу «{rebootGroup?.name}»</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <p className="text-sm text-foreground">
+              Будет перезагружено <span className="font-semibold">{rebootTargets.length}</span> из{" "}
+              {rebootGroup?.device_ids.length ?? 0} устройств группы — остальные не в работе.
+            </p>
+            {rebootTargets.length > REBOOT_GROUP_MAX_DEVICES ? (
+              <p className="text-sm text-destructive">
+                За один раз можно перезагрузить не больше {REBOOT_GROUP_MAX_DEVICES} машин.
+                Разбейте окно обслуживания на группы поменьше.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Отсрочка — время, за которое сотрудники успевают сохранить работу; по её
+                истечении приложения закрываются принудительно. Отменить запланированную
+                перезагрузку из панели нельзя. На macOS и Linux сотрудник за графическим
+                сеансом предупреждения не увидит.
+              </p>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-soft">Когда</Label>
+              <Select
+                value={String(rebootDelay)}
+                onChange={(v) => setRebootDelay(Number(v))}
+                options={REBOOT_DELAYS.map((d) => ({ value: String(d.value), label: d.label }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-soft">Причина (необязательно)</Label>
+              <Input
+                placeholder="Окно обслуживания, установка обновлений..."
+                value={rebootReason}
+                onChange={(e) => setRebootReason(e.target.value)}
+              />
+            </div>
+            <Button
+              className="w-full"
+              onClick={handleRebootGroup}
+              disabled={submitting || rebootTargets.length === 0 || rebootTargets.length > REBOOT_GROUP_MAX_DEVICES}
+            >
+              {submitting ? "Отправка..." : `Перезагрузить ${rebootTargets.length} устройств`}
             </Button>
           </div>
         </DialogContent>

@@ -16,6 +16,12 @@ WV_MIN := $(word 2,$(subst ., ,$(WINVER)))
 WV_PAT := $(word 3,$(subst ., ,$(WINVER)))
 GOVERSIONINFO := go run github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0
 
+# Версия protoc, которой сгенерирован лежащий в репозитории контракт (см. шапку
+# proto/agent.pb.go). Гейт в цели `proto` не даст перегенерировать другой версией:
+# иначе строка версии в шапке скачет между машинами и даёт конфликт на пустом месте.
+# Плагины пинятся отдельно: protoc-gen-go v1.36.11, protoc-gen-go-grpc v1.6.2.
+PROTOC_VERSION := 7.35.0
+
 .DEFAULT_GOAL := help
 
 # Пусто = УНИВЕРСАЛЬНЫЙ агент: release-ключ приезжает в ответе на enroll (модель
@@ -69,6 +75,19 @@ fmt: ## Отформатировать весь Go-код (gofmt). Прогон�
 	gofmt -w .
 
 proto: ## Перегенерировать Go-код из proto (ОБЩИЙ файл — менять согласованно, ADR-4)
+	@# Версии зафиксированы намеренно. Шапка сгенерированных файлов содержит версию
+	@# компилятора, поэтому у двух разработчиков с разными protoc КАЖДАЯ перегенерация
+	@# дёргала строку туда-сюда: шумный дифф в общем контракте и ложные конфликты.
+	@# Кодоген через buf сюда не годится: корень модуля в buf.yaml = proto/, и дескриптор
+	@# получил бы имя agent.proto вместо proto/agent.proto (переименование файла в
+	@# реестре + 300 строк churn), а CI-джоба `buf breaking` прибита к subdir=proto.
+	@have=$$(protoc --version | awk '{print $$2}'); \
+	if [ "$$have" != "$(PROTOC_VERSION)" ]; then \
+	  echo "protoc $$have, а контракт генерируется $(PROTOC_VERSION)."; \
+	  echo "Поставьте нужную версию: https://github.com/protocolbuffers/protobuf/releases/tag/v$(PROTOC_VERSION)"; \
+	  echo "(перегенерация чужой версией меняет шапку файлов и создаёт конфликт на ровном месте)"; \
+	  exit 1; \
+	fi
 	protoc --go_out=. --go_opt=paths=source_relative \
 	       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
 	       proto/agent.proto

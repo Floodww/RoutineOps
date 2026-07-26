@@ -44,10 +44,87 @@ type DeviceInfo struct {
 	SecureBoot   string // Secure Boot включён: "true"/"false"/"" — Windows
 }
 
+// UninstallMethod — способ снятия ПО, который агент РЕАЛЬНО может применить на
+// этой машине. Пустая строка — снять нечем; это же и значение по умолчанию, то
+// есть забытое поле никогда не выглядит как «удалять можно» (fail-safe).
+// В proto отображается в enum UninstallMethod (см. inventory.build).
+type UninstallMethod string
+
+const (
+	UninstallNone         UninstallMethod = ""
+	UninstallMSI          UninstallMethod = "msi"              // msiexec /x {ProductCode} /qn
+	UninstallWindowsQuiet UninstallMethod = "windows_quiet"    // QuietUninstallString из реестра
+	UninstallMacAppBundle UninstallMethod = "macos_app_bundle" // снос .app + pkgutil --forget
+	UninstallDpkg         UninstallMethod = "dpkg"
+	UninstallRPM          UninstallMethod = "rpm"
+	UninstallPacman       UninstallMethod = "pacman"
+	UninstallAPK          UninstallMethod = "apk"
+)
+
+// Scope — куда установлено ПО: на машину или в профиль конкретного пользователя.
+// Per-user установки снять из-под службы (LocalSystem/root) нельзя, но видеть их
+// обязательно: иначе установка в профиль обходит политику запрещённого ПО.
+const (
+	ScopeMachine = "machine"
+	ScopeUser    = "user"
+)
+
 // Software — установленное приложение.
+//
+// Поля сверх Name/Version нужны двум пунктам роадмапа: удалению ПО из интерфейса
+// (машинный ключ цели — по человекочитаемому имени одноимённые продукты разных
+// вендоров резолвятся в чужую запись) и сканированию на CVE (без вендора и
+// архитектуры CPE/purl детерминированно не построить).
+//
+// ИНВАРИАНТ: каждое поле обязано быть СТАБИЛЬНЫМ между снимками, пока машина
+// реально не изменилась — SoftwareItem входит в хэш инвентаря целиком
+// (inventory.hashReport). Волатильное поле молча вернёт отправку каждые 5 минут
+// по всему парку, без ошибки и следа в логах. Именно поэтому здесь нет даты
+// установки и времени изменения файлов.
 type Software struct {
-	Name    string
-	Version string
+	Name            string
+	Version         string
+	Vendor          string // издатель (Windows Publisher, dpkg Maintainer, rpm VENDOR, macOS signed_by)
+	InstallLocation string // путь установки; "" = источник не отдал
+	// Arch — архитектура САМОГО пакета, "" = источник не даёт честного ответа.
+	// Значения намеренно НЕ приводятся к единому словарю: каждый источник отдаёт
+	// свой (dpkg — amd64/arm64/all, rpm — x86_64/aarch64/noarch, pacman —
+	// x86_64/any, Windows — x86_64/i386 по ветке реестра, macOS — universal для
+	// мультиарх-бандла). Придумывать общий словарь на агенте значило бы терять
+	// информацию и получать разные ответы от агентов разных версий на одной
+	// машине; нормализация — задача потребителя (сервер, CPE/purl-матчинг).
+	// Отдельно про "universal" на macOS: универсальный бандл реально содержит
+	// оба среза, и выбрать один означало бы соврать про артефакт и отдавать
+	// разный Arch на Apple Silicon и Intel для одного и того же приложения.
+	Arch            string
+	UninstallID     string // ProductCode/имя подключа реестра, bundle id, имя пакета
+	UninstallMethod UninstallMethod
+	Scope           string // ScopeMachine (по умолчанию) или ScopeUser
+}
+
+// dedupeSoftware убирает дубли по паре (имя, версия), оставляя машинную установку
+// вместо per-user: один и тот же продукт видно и в машинной ветке, и в профилях
+// нескольких пользователей, а сервер складывает список в device_software без
+// уникального ограничения — дубли доехали бы до карточки устройства как
+// повторяющиеся строки. Порядок остальных записей сохраняется (детерминизм
+// снимка обеспечивает сортировка в hashReport, но лишний шум в UI не нужен).
+func dedupeSoftware(in []Software) []Software {
+	type key struct{ name, version string }
+	idx := make(map[key]int, len(in))
+	out := make([]Software, 0, len(in))
+	for _, s := range in {
+		k := key{s.Name, s.Version}
+		if i, ok := idx[k]; ok {
+			// Машинная установка вытесняет per-user: её агент хотя бы способен снять.
+			if out[i].Scope == ScopeUser && s.Scope != ScopeUser {
+				out[i] = s
+			}
+			continue
+		}
+		idx[k] = len(out)
+		out = append(out, s)
+	}
+	return out
 }
 
 // Collect собирает железо/ОС/IP. Без списка ПО (он тяжелее — см. InstalledSoftware).
@@ -75,9 +152,10 @@ func Collect() DeviceInfo {
 	}
 }
 
-// InstalledSoftware возвращает список установленного ПО (платформенно).
+// InstalledSoftware возвращает список установленного ПО (платформенно), без
+// дублей по паре (имя, версия) — см. dedupeSoftware.
 func InstalledSoftware() []Software {
-	return installedSoftware()
+	return dedupeSoftware(installedSoftware())
 }
 
 func LocalIP() string {

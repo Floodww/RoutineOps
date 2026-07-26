@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown } from "lucide-react"
-import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS } from "@/lib/api"
+import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS } from "@/lib/api"
 import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -18,6 +18,7 @@ import { useMe } from "@/lib/useMe"
 
 type TaskForm = { script: string; platform: string; priority: string }
 type TaskMode = "library" | "manual"
+
 
 const statusBadge = (status: Device["status"]) => {
   const { label, variant } = DEVICE_STATUS[status] ?? { label: status, variant: "outline" as const }
@@ -112,6 +113,10 @@ export default function DeviceDetail() {
   const [decomReason, setDecomReason] = useState("")
   const [decomTyped, setDecomTyped] = useState("")
   const [decommissioning, setDecommissioning] = useState(false)
+  const [rebootOpen, setRebootOpen] = useState(false)
+  const [rebootReason, setRebootReason] = useState("")
+  const [rebootDelay, setRebootDelay] = useState(REBOOT_DELAYS[0].value)
+  const [rebooting, setRebooting] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -214,6 +219,36 @@ export default function DeviceDetail() {
       })
     } finally {
       setDecommissioning(false)
+    }
+  }
+
+  // Перезагрузка. Успех означает «ЗАПЛАНИРОВАНА» — агент отчитывается сразу, как
+  // планировщик ОС принял команду, а не после того, как машина поднялась. Повторный
+  // клик по той же машине попадает в ту же задачу (сервер не выдаёт новый task_id),
+  // поэтому дополнительной защиты от двойного клика здесь не нужно.
+  async function sendReboot() {
+    if (!device) return
+    setRebooting(true)
+    try {
+      await api.post(`/devices/${id}/reboot`, { reason: rebootReason, delay_seconds: rebootDelay })
+      setRebootOpen(false)
+      toast({
+        title: "Перезагрузка запланирована",
+        description: "Команду выполнит операционная система устройства. Если машина сейчас не на связи — после подключения.",
+        variant: "success",
+      })
+      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(t.data ?? [])
+    } catch (e) {
+      const status = (e as { response?: { status?: number } }).response?.status
+      toast({
+        title: status === 409
+          ? "Устройство не в рабочем состоянии — перезагрузка недоступна"
+          : "Не удалось поставить задачу перезагрузки",
+        variant: "destructive",
+      })
+    } finally {
+      setRebooting(false)
     }
   }
 
@@ -366,6 +401,15 @@ export default function DeviceDetail() {
                 onSelect={() => device.status === "active" ? setConfirmBlock(true) : toggleBlock()}
               >
                 {device.status === "active" ? "Заблокировать доступ" : "Разблокировать доступ"}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Перезагрузка только для active: остальные состояния сервер отбивает 409
+                  (Connect их не примет, задача висела бы pending). */}
+              <DropdownMenuItem
+                disabled={rebooting || device.status !== "active"}
+                onSelect={() => { setRebootReason(""); setRebootDelay(REBOOT_DELAYS[0].value); setRebootOpen(true) }}
+              >
+                Перезагрузить
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {/* Гасим только уже списанные — сервер на них отвечает 409 (handler.go:1155).
@@ -674,11 +718,30 @@ export default function DeviceDetail() {
           </div>
           <div>
             {software.map((s) => (
+              // Ключ составной: одно и то же имя приезжает дважды — установка на
+              // машину и установка в профиль пользователя это разные записи.
               <div
-                key={s.name}
+                key={`${s.name}|${s.scope ?? ""}|${s.uninstall_id ?? ""}`}
                 className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl"
               >
-                <span className="text-sm font-medium text-foreground truncate">{s.name}</span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground truncate">{s.name}</span>
+                    {s.scope === "user" && (
+                      <span
+                        className="flex-shrink-0 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-500"
+                        title="Установлено в профиль пользователя. Правила запрещённого ПО на такие установки действуют, но удалить их нельзя: чужой профиль недоступен службе агента."
+                      >
+                        в профиле пользователя
+                      </span>
+                    )}
+                  </div>
+                  {(s.vendor || s.arch) && (
+                    <div className="text-xs text-muted-foreground truncate">
+                      {[s.vendor, s.arch].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
+                </div>
                 <span className="text-xs text-muted-foreground flex-shrink-0">{s.version}</span>
               </div>
             ))}
@@ -866,6 +929,50 @@ export default function DeviceDetail() {
               disabled={decommissioning || !decommissionArmed(device.hostname, decomTyped)}
             >
               {decommissioning ? "Отправка..." : "Вывести из эксплуатации"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Перезагрузка */}
+      <Dialog open={rebootOpen} onOpenChange={setRebootOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Перезагрузить {device.hostname}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Отсрочка — это время, за которое сотрудник успевает сохранить работу. По её
+              истечении приложения закрываются принудительно, отменить запланированную
+              перезагрузку из панели нельзя.
+              {/* device.os — сырая строка от агента, не ScriptPlatform: сверяем подстрокой. */}
+              {!/win/i.test(device.os) && (
+                <> На macOS и Linux сотрудник за графическим сеансом предупреждения не увидит —
+                предупредите его сами.</>
+              )}
+            </p>
+            <div className="space-y-1.5">
+              <Label>Когда</Label>
+              <Select
+                value={String(rebootDelay)}
+                onChange={(v) => setRebootDelay(Number(v))}
+                options={REBOOT_DELAYS.map((d) => ({ value: String(d.value), label: d.label }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="reboot-reason">Причина (необязательно)</Label>
+              <Input
+                id="reboot-reason"
+                placeholder="Установка обновлений безопасности..."
+                value={rebootReason}
+                onChange={(e) => setRebootReason(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                На Windows этот текст сотрудник увидит в системном предупреждении.
+              </p>
+            </div>
+            <Button className="w-full" onClick={sendReboot} disabled={rebooting}>
+              {rebooting ? "Отправка..." : "Запланировать перезагрузку"}
             </Button>
           </div>
         </DialogContent>

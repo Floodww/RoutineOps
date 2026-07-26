@@ -110,6 +110,11 @@ type Executor struct {
 	// teardown — service/tamper/файлы — живёт в cmd/agent, ему известны пути).
 	// nil = команда decommission отклоняется (сборка/окружение без обвязки).
 	onDecommission func(requestID, reason string)
+
+	// rebooter планирует перезагрузку устройства средствами ОС.
+	// nil = команда reboot отклоняется с ОШИБКОЙ (см. handleReboot), а не тихо
+	// игнорируется: иначе оператор видел бы «выполнено» на неперезагруженной машине.
+	rebooter Rebooter
 }
 
 // LockApplier применяет команды блокировки/разблокировки устройства (реализуется
@@ -143,6 +148,24 @@ func (e *Executor) SetFileVaultRevoker(r FileVaultRevoker) { e.revoker = r }
 // (по умолчанию) → команда decommission отклоняется, а не выполняется тихо.
 // Вызывать до старта приёма задач.
 func (e *Executor) SetDecommissioner(f func(requestID, reason string)) { e.onDecommission = f }
+
+// Rebooter планирует перезагрузку устройства через планировщик ОС. Реализуется
+// reboot.Scheduler; вынесен интерфейсом по тому же паттерну, что LockApplier —
+// чтобы executor не зависел от пакета reboot и тестировался фейком (реальную
+// перезагрузку в тесте не вызвать).
+//
+// Возврат без ошибки означает «команда ПРИНЯТА планировщиком», а не «машина уже
+// перезагрузилась». Первое значение — ФАКТИЧЕСКАЯ отсрочка: она может отличаться
+// от запрошенной (границы, округление до минут на macOS/Linux), и отчитываться
+// серверу надо именно ей, иначе в аудите останется время, которого не было.
+type Rebooter interface {
+	Schedule(ctx context.Context, delay time.Duration, reason string) (time.Duration, error)
+}
+
+// SetRebooter подключает планировщик перезагрузки. nil (по умолчанию) → команда
+// reboot отчитывается ОШИБКОЙ, а не тихо игнорируется. Вызывать до старта приёма
+// задач.
+func (e *Executor) SetRebooter(r Rebooter) { e.rebooter = r }
 
 // NewExecutor creates an executor. statePath — файл для персистентной идемпотентности
 // (""=только память). enqueue — durable-очередь доставки результатов (outbox);
@@ -282,9 +305,9 @@ func (e *Executor) handle(task *pb.Task) {
 	//      но не выполненной, и передоставка after-restart её бы отсекла (потеря);
 	//  (б) connect тоже после слота — тысячи ждущих слот горутин иначе держали бы
 	//      открытые gRPC-соединения (исчерпание FD/памяти при bulk-push).
-	// lock/decommission (control-plane) семафором НЕ гейтим: не форк-бомба и не
-	// должны ждать за скриптами.
-	if task.GetLock() == nil && task.GetDecommission() == nil {
+	// lock/decommission/reboot (control-plane) семафором НЕ гейтим: не форк-бомба и
+	// не должны ждать за скриптами.
+	if task.GetLock() == nil && task.GetDecommission() == nil && task.GetReboot() == nil {
 		select {
 		case e.sem <- struct{}{}:
 			defer func() { <-e.sem }()
@@ -333,6 +356,12 @@ func (e *Executor) handle(task *pb.Task) {
 	// Команда полного самоудаления приезжает в Task.decommission.
 	if dc := task.GetDecommission(); dc != nil {
 		e.handleDecommission(client, id, dc)
+		return
+	}
+
+	// Команда перезагрузки приезжает в Task.reboot.
+	if rc := task.GetReboot(); rc != nil {
+		e.handleReboot(client, id, rc)
 		return
 	}
 
@@ -526,6 +555,89 @@ func (e *Executor) handleDecommission(client pb.AgentServiceClient, taskID strin
 
 	// Сигналим рабочему циклу: остановиться и выполнить teardown (cmd/agent).
 	e.onDecommission(reqID, dc.GetReason())
+}
+
+// handleReboot планирует перезагрузку устройства и отчитывается о задаче.
+//
+// Порядок: СНАЧАЛА планируем в ОС, ПОТОМ отчитываемся. Обратный порядок был бы
+// ложью — отчитались успехом, а планировщик отказал (нет привилегии, уже
+// запланирована другая перезагрузка), и машина никуда не идёт. Отказ планировщика
+// поэтому уезжает как ERROR: оператор видит причину в панели, а не «выполнено» на
+// неперезагруженной машине.
+//
+// Отчёт шлём сначала ПРЯМЫМ вызовом, а не через outbox: машина уйдёт вниз через
+// секунды-минуты, и очередь может не успеть провернуть отправку. Не доехало —
+// кладём в durable-очередь, она переживёт перезагрузку и доставит после загрузки
+// (в отличие от decommission, агент здесь возвращается к жизни, поэтому такой
+// фолбэк осмысленен).
+//
+// Второй перезагрузки от повторной доставки не будет: seen-набор персистентный и
+// переживает ребут (см. proto RebootCommand) — иначе устройство циклилось бы в
+// перезагрузках, пока сервер не получит отчёт.
+func (e *Executor) handleReboot(client pb.AgentServiceClient, taskID string, rc *pb.RebootCommand) {
+	reqID := rc.GetRequestId()
+	if reqID == "" {
+		reqID = taskID
+	}
+	if e.rebooter == nil {
+		// Misbuild/неподдерживаемая ОС. Отчитываемся ОШИБКОЙ, а не молчим: иначе
+		// строка задачи навсегда зависнет в 'acked' до серверного sweep, и причина
+		// нигде не появится.
+		e.log.Error("reboot: команда получена, но планировщик не сконфигурирован",
+			slog.String("task_id", taskID), slog.String("request_id", reqID))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:   taskID,
+			Status:   pb.TaskStatus_TASK_STATUS_ERROR,
+			ErrorLog: "перезагрузка недоступна на этом агенте (сборка/ОС не поддерживает)",
+		})
+		return
+	}
+
+	e.log.Warn("reboot: получена команда перезагрузки устройства",
+		slog.String("task_id", taskID), slog.String("request_id", reqID),
+		slog.Int("requested_delay_sec", int(rc.GetDelaySeconds())),
+		slog.String("reason", rc.GetReason()))
+
+	ctx, cancel := context.WithTimeout(e.execCtx, callTimeout)
+	delay, err := e.rebooter.Schedule(ctx, time.Duration(rc.GetDelaySeconds())*time.Second, rc.GetReason())
+	cancel()
+	if err != nil {
+		e.log.Error("reboot: планировщик ОС отказал — перезагрузки НЕ будет",
+			slog.String("task_id", taskID), slog.Any("error", err))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:   taskID,
+			Status:   pb.TaskStatus_TASK_STATUS_ERROR,
+			ErrorLog: err.Error(),
+		})
+		return
+	}
+
+	// В Output кладём ФАКТИЧЕСКУЮ отсрочку (после округления до минут на
+	// macOS/Linux), а не запрошенную: оператор и аудит должны видеть то время,
+	// которое реально задано планировщику.
+	result := &pb.TaskResult{
+		TaskId: taskID,
+		Status: pb.TaskStatus_TASK_STATUS_SUCCESS,
+		Output: fmt.Sprintf("перезагрузка запланирована через %s", delay),
+	}
+	e.log.Warn("reboot: перезагрузка запланирована",
+		slog.String("task_id", taskID), slog.Duration("delay", delay))
+	e.reportBeforeReboot(client, result)
+}
+
+// reportBeforeReboot доставляет результат так, чтобы он не потерялся вместе с
+// уходящей вниз машиной: сначала прямой вызов, при неудаче — durable-очередь,
+// которая переживёт перезагрузку.
+func (e *Executor) reportBeforeReboot(client pb.AgentServiceClient, result *pb.TaskResult) {
+	ctx, cancel := context.WithTimeout(e.execCtx, callTimeout)
+	ack, err := client.ReportTaskResult(ctx, result)
+	cancel()
+	if err == nil && ack.GetReceived() {
+		return
+	}
+	e.log.Warn("reboot: прямой отчёт не доставлен — кладу в durable-очередь, доедет после загрузки",
+		slog.String("task_id", result.GetTaskId()), slog.Any("error", err))
+	e.deliver(client, result)
 }
 
 func (e *Executor) ack(client pb.AgentServiceClient, id string) {

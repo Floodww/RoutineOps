@@ -144,7 +144,18 @@ export default function PolicyDetail() {
                   <TableCell className="px-4 py-3 text-xs text-muted-foreground">{r.os || "—"}</TableCell>
                   <TableCell className="px-4 py-3 text-xs font-mono text-soft">
                     {r.installed
-                      ? <>{r.matched_software}{r.matched_version && <span className="text-muted-foreground"> {r.matched_version}</span>}</>
+                      ? <>
+                          {r.matched_software}
+                          {r.matched_version && <span className="text-muted-foreground"> {r.matched_version}</span>}
+                          {r.matched_scope === "user" && (
+                            <span
+                              className="ml-2 font-sans text-[11px] text-amber-600 dark:text-amber-500"
+                              title="Установлено в профиль пользователя: нарушение засчитано, но удалить нельзя — служба агента в чужой профиль не ходит."
+                            >
+                              в профиле пользователя
+                            </span>
+                          )}
+                        </>
                       : <span className="text-muted-foreground font-sans">—</span>}
                   </TableCell>
                   <TableCell className="px-4 py-3">

@@ -441,6 +441,93 @@ paths:
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/devices/{id}/reboot:
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Устройства]
+      summary: Перезагрузка устройства
+      description: |
+        Роль: `it_admin`. Устройство должно быть `active` (иначе 409): остальные
+        состояния Connect не примет, и задача висела бы недоставленной.
+
+        Успешный ответ означает «перезагрузка ЗАПЛАНИРОВАНА»: агент отчитывается
+        сразу после того, как планировщик ОС принял команду, а не после того, как
+        машина поднялась. Отмены запланированной перезагрузки нет.
+
+        Повторный вызов при недоставленной заявке возвращает ТУ ЖЕ задачу. Новый
+        `task_id` для того же намерения означал бы вторую перезагрузку: агент
+        дедуплицирует durably по `task_id` и переживает перезагрузку, поэтому чужой
+        id для него — новая команда, и устройство уходит в цикл.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: На Windows показывается сотруднику в системном предупреждении; всегда попадает в аудит.
+                delay_seconds:
+                  type: integer
+                  description: >
+                    Отсрочка. `0` (или поле не задано) = ДЕФОЛТ АГЕНТА (60 с), а НЕ
+                    «сейчас»: нулевое значение никогда не должно быть самым
+                    деструктивным вариантом. Значение от 1 до 9 поднимается до 10 —
+                    меньшего агент не примет. На macOS и Linux отсрочка округляется
+                    вверх до целых минут (секундной гранулярности в планировщике нет).
+      responses:
+        '200':
+          description: Задача поставлена (или возвращена уже существующая)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string, format: uuid }
+                  delay_seconds: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Устройство не в состоянии `active` }
+
+  /api/v1/device-groups/{id}/reboot:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Группы устройств]
+      summary: Перезагрузка всех устройств группы
+      description: |
+        Роль: `it_admin`. Команда уходит только `active`-устройствам группы.
+        Потолок — 50 машин за раз (422 сверх него): одним кликом иначе можно уронить
+        парк в рабочее время. `expected_devices` — число машин, которое панель
+        показала оператору; расхождение с фактом даёт 409, потому что подтверждали
+        не тот масштаб.
+
+        `created` может быть меньше `in_scope`: устройствам с уже недоставленной
+        заявкой вторую не заводим.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+                delay_seconds: { type: integer, description: 'Как у одиночной перезагрузки; 0 = дефолт агента (60 с)' }
+                expected_devices: { type: integer, description: 'Подтверждённое оператором число active-машин группы' }
+      responses:
+        '201':
+          description: Веер поставлен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  in_scope: { type: integer }
+                  delay_seconds: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Состав группы изменился с момента подтверждения }
+        '422': { description: В группе больше 50 active-устройств }
+
   # ─────────────────────────── Энроллмент ───────────────────────────
   /api/v1/enroll:
     post:
@@ -2027,6 +2114,15 @@ components:
         installed: { type: boolean }
         matched_software: { type: string }
         matched_version: { type: string }
+        matched_scope:
+          type: string
+          description: >
+            Scope найденного совпадения: `machine` (установлено на машину, снимаемо)
+            или `user` (установлено в профиль сотрудника — нарушение засчитано, но
+            удалить нельзя: служба агента в чужой профиль не ходит). Пусто, если
+            совпадений нет или агент старее 2.6.0. Из двух совпадений в примере
+            показывается machine — оператору полезнее то, с которым можно что-то сделать.
+          enum: ['', machine, user]
 
     DeviceGroup:
       type: object

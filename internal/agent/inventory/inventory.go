@@ -165,6 +165,24 @@ func hashReport(r *pb.InventoryReport) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// uninstallMethodByName — способ снятия ПО из сборщика в proto-enum. Неизвестное
+// значение отображается в UNSPECIFIED, а не в «какой-нибудь» метод: нулевое
+// значение означает «удалять нечем», и это единственный безопасный исход при
+// рассинхроне сборщика с контрактом.
+var uninstallMethodByName = map[collector.UninstallMethod]pb.UninstallMethod{
+	collector.UninstallMSI:          pb.UninstallMethod_UNINSTALL_METHOD_MSI,
+	collector.UninstallWindowsQuiet: pb.UninstallMethod_UNINSTALL_METHOD_WINDOWS_QUIET,
+	collector.UninstallMacAppBundle: pb.UninstallMethod_UNINSTALL_METHOD_MACOS_APP_BUNDLE,
+	collector.UninstallDpkg:         pb.UninstallMethod_UNINSTALL_METHOD_DPKG,
+	collector.UninstallRPM:          pb.UninstallMethod_UNINSTALL_METHOD_RPM,
+	collector.UninstallPacman:       pb.UninstallMethod_UNINSTALL_METHOD_PACMAN,
+	collector.UninstallAPK:          pb.UninstallMethod_UNINSTALL_METHOD_APK,
+}
+
+func uninstallMethod(m collector.UninstallMethod) pb.UninstallMethod {
+	return uninstallMethodByName[m] // отсутствующий ключ → UNSPECIFIED (нулевое значение)
+}
+
 // build собирает proto.InventoryReport. device_id не заполняется — сервер берёт
 // его из mTLS-сертификата (ADR-1). agentVersion — версия бинаря (ldflags).
 // console_user и console_user_sid приходят из пакета admin (ConsoleIdentity)
@@ -177,7 +195,16 @@ func build(agentVersion string) *pb.InventoryReport {
 
 	items := make([]*pb.SoftwareItem, 0, len(sw))
 	for _, s := range sw {
-		items = append(items, &pb.SoftwareItem{SoftwareName: s.Name, Version: s.Version})
+		items = append(items, &pb.SoftwareItem{
+			SoftwareName:    s.Name,
+			Version:         s.Version,
+			Vendor:          s.Vendor,
+			InstallLocation: s.InstallLocation,
+			Arch:            s.Arch,
+			UninstallId:     s.UninstallID,
+			UninstallMethod: uninstallMethod(s.UninstallMethod),
+			Scope:           s.Scope,
+		})
 	}
 	return &pb.InventoryReport{
 		DeviceInfo: &pb.DeviceInfo{

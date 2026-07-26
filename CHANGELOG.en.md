@@ -20,12 +20,82 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 - Device owner on the device page: manual assignment to a panel user
   (`PUT /devices/{id}/owner`); a manual owner takes precedence over the automatic one.
+- **Remote device reboot.** An operator can reboot a machine from the panel — to finish
+  installing updates, for instance, or to bring a stuck device back. The employee gets a
+  grace period (one minute by default) to save their work; once it expires the reboot is
+  forced — otherwise a single window with an unsaved file would silently cancel the
+  operator's command and leave the device unchanged without a trace. On Windows the
+  employee sees a system warning carrying the stated reason; on macOS and Linux the
+  warning only reaches terminal sessions, not the graphical one (a tray notification is
+  a separate step). The grace period is counted by the operating system, not by the
+  agent: a timer inside the agent would vanish when it self-updates or the service
+  restarts, and the reboot would silently not happen while the task reported "done". If
+  the OS scheduler refuses the command (no privilege, another reboot already scheduled),
+  the task fails with the reason rather than reporting a false success. In the panel this
+  is the "Reboot" item on the device page: pick a grace period and a reason, which on
+  Windows ends up in the warning the employee sees. "Immediately" in the list means ten
+  seconds, not zero — the grace period *is* the protection for unsaved work, so it cannot
+  be set to zero. Clicking again on the same machine lands in the same task and never
+  causes a second reboot. The panel says "scheduled", not "rebooted": the machine goes
+  down on the operating system's timer, and the confirmation arrives before that moment.
+- **Group-wide reboot** for maintenance windows. Only machines that are in service are
+  rebooted; the panel shows their count and confirms exactly that number, and if the
+  group changed in the meantime the command does not go out. No more than 50 machines at
+  a time: this is the heaviest button after decommissioning, and a misclick on the wrong
+  group must not take the fleet down during working hours.
 - **[Enterprise]** User directory (LDAP / Active Directory): a "Directory" page —
   connection (ldaps), test, scheduled and manual sync; automatic device-owner
   assignment by exact console-user SID match with a login fallback; disabled
   accounts never match; the binding survives account renames (canonical key —
   objectGUID). The free edition ships without the directory code entirely
   (`/directory/*` → 501).
+
+### Inventory
+
+- **Windows: software installed into a user profile is now visible.** Only the
+  machine-wide part of the registry was read before, so applications that install into
+  a profile (browsers, messengers) never reached the inventory at all — and the
+  forbidden-software policy did not see them either, meaning a per-user install bypassed
+  the ban. Such entries are now listed and marked as per-user. The service cannot remove
+  them (the install lives in someone else's profile), which is stated honestly: no
+  "remove" action is offered for them.
+- **Service noise removed from the software list.** Entries the installer itself marks
+  as hidden from "Programs and Features" (runtimes, driver packages) and updates that
+  declare themselves children of a product (patches, language packs) are no longer shown
+  as separate software. The parent product stays in the list. If a forbidden-software
+  rule was written against such a service entry, it will stop matching — point the rule
+  at the product itself.
+- **More data is collected per application:** publisher, install path, architecture, a
+  machine-readable removal identifier and a machine-vs-profile marker. This is the
+  groundwork for removing software from the interface and for vulnerability scanning: a
+  single human-readable name cannot tell apart same-named products from different
+  vendors. Install date is deliberately not collected — its format diverges between
+  sources, and an unstable value would make the whole fleet re-send its inventory every
+  five minutes. Publisher and architecture are shown on the device page; architecture
+  appears exactly as the source reports it (`amd64` from one package manager, `x86_64`
+  from another) — collapsing it into a single vocabulary would drop data needed for
+  future vulnerability scanning.
+- **A per-profile install now counts as a policy violation.** In a forbidden-software
+  rule breakdown such machines land in "Fail", and the match is tagged "installed in
+  user profile": there is nothing to remove it with, but the operator must know about
+  it — that is precisely how the ban was being bypassed. When forbidden software is
+  found both machine-wide and in a profile, the example shows the machine-wide install:
+  that one can actually be acted upon.
+- After the agents update, the fleet re-sends its full inventory once (the snapshot
+  composition changed); after that, sending resumes happening only on real changes.
+
+### Security
+
+- **Windows device lock: password-free release closed** (a known limitation of the
+  2.4.6 release). The lock screen no longer marks the device unlocked itself — it
+  hands the typed password to the service, which re-checks it and releases the lock
+  authoritatively, exactly as macOS already does. Any "unlocked" that appears in the
+  state file behind the service's back is now treated as tampering: the lock is
+  written back, the screen is raised again, and no re-lock suppression is recorded —
+  so a reboot no longer leaves the device open. For the employee a single change is
+  visible: after the correct password the screen closes once the service confirms
+  (a fraction of a second), and if the service is stopped it says so instead of
+  releasing silently.
 
 ---
 

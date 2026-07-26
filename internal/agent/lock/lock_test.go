@@ -13,14 +13,16 @@ import (
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // fakeLocker записывает вызовы Show/Hide и хранит последний verify-колбэк, чтобы
-// тест мог сымитировать ввод пароля сотрудником.
+// тест мог сымитировать ввод пароля сотрудником. Реализует и reasserter — так
+// тесты видят принудительный подъём оверлея на tamper-пути.
 type fakeLocker struct {
-	mu     sync.Mutex
-	shown  bool
-	shows  int
-	hides  int
-	reason string
-	verify func(string) bool
+	mu         sync.Mutex
+	shown      bool
+	shows      int
+	hides      int
+	reasserted int
+	reason     string
+	verify     func(string) bool
 }
 
 func (f *fakeLocker) Show(reason string, verify func(string) bool) {
@@ -37,6 +39,21 @@ func (f *fakeLocker) Hide() {
 	defer f.mu.Unlock()
 	f.shown = false
 	f.hides++
+}
+
+// Reassert — реализация reasserter: демон просит поднять оверлей немедленно.
+func (f *fakeLocker) Reassert() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reasserted++
+}
+
+// reasserts — сколько раз просили принудительный подъём (потокобезопасно: на
+// tamper-пути Reassert может звать фоновая горутина Manager.Run).
+func (f *fakeLocker) reasserts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reasserted
 }
 
 func bcryptHash(t *testing.T, pw string) string {

@@ -32,6 +32,8 @@ const ACTION_LABELS: Record<string, string> = {
   reject_pending_bulk:   "Отклонил очередь энроллмента",
   create_bulk_token:     "Выпустил массовый токен",
   decommission_device:   "Вывел устройство из эксплуатации",
+  reboot_device:         "Перезагрузил устройство",
+  reboot_group:          "Перезагрузил группу устройств",
   create_api_token:      "Выпустил API-токен",
   revoke_api_token:      "Отозвал API-токен",
 }

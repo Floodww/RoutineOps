@@ -138,6 +138,17 @@ func (h *Handler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 			Reason:    "устройство выведено из эксплуатации администратором",
 		}
 	}
+	if task.TaskType == "reboot" {
+		// request_id = task.ID: агент дедуплицирует перезагрузки durably по этому id и
+		// переживает саму перезагрузку. Передоставка ТОГО ЖЕ id безопасна (второй раз
+		// машина не уйдёт вниз), поэтому здесь ничего не гасим — важно лишь никогда не
+		// выдавать новый id для того же намерения (см. storage.CreateRebootTask).
+		pbTask.Reboot = &pb.RebootCommand{
+			RequestId:    task.ID,
+			Reason:       task.RebootReason,
+			DelaySeconds: task.RebootDelaySeconds,
+		}
+	}
 	sent := h.registry.Send(cn, pbTask)
 	if !sent {
 		return fmt.Errorf("send to device %s failed, will retry", cn)

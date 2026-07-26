@@ -211,6 +211,10 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Delete("/devices/{id}", h.deleteDevice)
 			r.Post("/devices/{id}/lock", h.lockDevice)
 			r.Post("/devices/{id}/unlock", h.unlockDevice)
+			// Перезагрузка: обратима и ничего не выпускает, поэтому requireHuman нет —
+			// «перезагрузить после установки обновлений» законно и для автоматики.
+			// Групповая ограничена потолком и сверкой числа машин (см. rebootGroup).
+			r.Post("/devices/{id}/reboot", h.rebootDevice)
 			// requireHuman: вывод из эксплуатации необратим и деструктивен — агент сносит
 			// серт/службу/состояние, устройство уходит в терминальный decommissioned.
 			// Автоматике/сервисному токену такое запрещаем (🔴 правило requireHuman).
@@ -256,6 +260,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Post("/device-groups/{id}/software-policies", h.assignSoftwarePolicyToGroup)
 			r.Delete("/device-groups/{id}/software-policies/{ruleId}", h.unassignSoftwarePolicyFromGroup)
 			r.Post("/device-groups/{id}/run-script", h.runScriptOnGroup)
+			r.Post("/device-groups/{id}/reboot", h.rebootGroup)
 			// requireHuman: приглашение выпускает УЧЁТНЫЕ ДАННЫЕ ЧЕЛОВЕКА с любой ролью,
 			// включая it_admin, а accept-invite не требует авторизации. Без гарда утёкший
 			// токен заводил себе живого админа: при выключенном SMTP хендлер отдаёт сырой
@@ -1215,6 +1220,162 @@ func (h *Handler) decommissionDevice(w http.ResponseWriter, r *http.Request) {
 	h.audit(r.Context(), claims.UserID, claims.Email, "decommission_device", "device", id,
 		map[string]string{"task_id": task.ID, "reason": req.Reason})
 	writeJSON(w, http.StatusOK, map[string]string{"task_id": task.ID})
+}
+
+// rebootGroupMaxDevices — потолок на одну групповую перезагрузку. Это самая
+// крупнокалиберная кнопка после вывода из эксплуатации: одним кликом можно уронить
+// парк в рабочее время. Потолок не «оптимальное число», а страховка от промаха по
+// группе — окно обслуживания на 200 машин разбивается на группы поменьше осознанно.
+const rebootGroupMaxDevices = 50
+
+// rebootRequest — тело обеих ручек перезагрузки.
+//
+// DelaySeconds = 0 означает «дефолт агента» (60 с), а НЕ «сейчас»: нулевое значение
+// не должно быть самым деструктивным вариантом. «Перезагрузить немедленно» в панели
+// присылает минимум, который агент примет (storage.RebootMinDelaySeconds).
+type rebootRequest struct {
+	Reason       string `json:"reason"`
+	DelaySeconds int32  `json:"delay_seconds"`
+	// ExpectedDevices — только для группы: сколько машин показала панель оператору.
+	// Несовпадение с фактом = группа изменилась между показом и кликом, и оператор
+	// подтверждал не тот масштаб → 409, а не тихая перезагрузка лишних машин.
+	ExpectedDevices *int `json:"expected_devices"`
+}
+
+// normalizeRebootDelay приводит отсрочку к тому, что агент реально примет.
+// Отрицательное → 0 (дефолт агента). 0 < d < минимума → минимум: оператор просил
+// «побыстрее», и молча растянуть это до минуты значило бы соврать в UI.
+func normalizeRebootDelay(d int32) int32 {
+	if d <= 0 {
+		return 0
+	}
+	if d < storage.RebootMinDelaySeconds {
+		return storage.RebootMinDelaySeconds
+	}
+	return d
+}
+
+// rebootDevice ставит задачу перезагрузки одной машины. Роль it_admin (см. маршрут);
+// requireHuman НЕ ставим: перезагрузка ничего не выпускает и не повышает прав, а
+// «перезагрузить после установки обновлений» — законный сценарий для автоматики.
+//
+// SUCCESS от агента означает «перезагрузка ЗАПЛАНИРОВАНА планировщиком ОС», а не
+// «машина перезагрузилась»: агент отчитывается сразу после того, как команда принята,
+// и кладёт фактическую отсрочку в output (на macOS/Linux она округлена вверх до
+// минут — секундной гранулярности там нет). Поэтому задача закрывается ДО ухода
+// машины вниз, и свип застрявших acked-задач не мешает даже часовой отсрочке.
+func (h *Handler) rebootDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req rebootRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // тело необязательно: дефолтная отсрочка без причины
+
+	st, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if st == "" {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	// Списанное/заблокированное устройство Connect не примет — задача бы висела
+	// pending до свипа, а оператор считал бы команду отданной.
+	if st != "active" {
+		http.Error(w, "device is not active: "+st, http.StatusConflict)
+		return
+	}
+
+	delay := normalizeRebootDelay(req.DelaySeconds)
+	task, err := h.db.CreateRebootTask(r.Context(), id, req.Reason, delay)
+	if err != nil {
+		slog.Error("create reboot task", "device_id", id, "err", err)
+		http.Error(w, "failed to create reboot task", http.StatusInternalServerError)
+		return
+	}
+	// Задача уже в БД. Ошибку enqueue не превращаем в 500: pending-задачу подберёт
+	// реконсайлер, а 500 спровоцировал бы ретрай оператора (и он бы решил, что
+	// команда не отдана, хотя она отдана).
+	if err := worker.Enqueue(h.asynqClient, task.ID); err != nil {
+		slog.Error("enqueue reboot task (доставит реконсайлер)", "task_id", task.ID, "err", err)
+	}
+
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "reboot_device", "device", id,
+		map[string]string{
+			"task_id":       task.ID,
+			"reason":        req.Reason,
+			"delay_seconds": strconv.Itoa(int(task.RebootDelaySeconds)),
+		})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":       task.ID,
+		"delay_seconds": task.RebootDelaySeconds,
+	})
+}
+
+// rebootGroup — перезагрузка всей группы. Потолок + сверка ожидаемого числа машин:
+// между тем, как панель показала «12 устройств», и кликом группа могла вырасти.
+func (h *Handler) rebootGroup(w http.ResponseWriter, r *http.Request) {
+	groupID := chi.URLParam(r, "id")
+	var req rebootRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	exists, err := h.db.DeviceGroupExists(r.Context(), groupID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+
+	count, err := h.db.CountActiveDevicesInGroup(r.Context(), groupID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if count > rebootGroupMaxDevices {
+		http.Error(w, fmt.Sprintf("group has %d active devices, limit is %d per reboot", count, rebootGroupMaxDevices),
+			http.StatusUnprocessableEntity)
+		return
+	}
+	if req.ExpectedDevices != nil && *req.ExpectedDevices != count {
+		http.Error(w, fmt.Sprintf("group changed: %d active devices now, %d confirmed", count, *req.ExpectedDevices),
+			http.StatusConflict)
+		return
+	}
+
+	delay := normalizeRebootDelay(req.DelaySeconds)
+	tasks, err := h.db.FanOutRebootToGroup(r.Context(), groupID, req.Reason, delay)
+	if err != nil {
+		slog.Error("fan out reboot", "group_id", groupID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	for _, t := range tasks {
+		if err := worker.Enqueue(h.asynqClient, t.ID); err != nil {
+			slog.Error("enqueue group reboot (доставит реконсайлер)", "task", t.ID, "err", err)
+		}
+	}
+
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	h.audit(r.Context(), claims.UserID, claims.Email, "reboot_group", "device_group", groupID,
+		map[string]string{
+			"reason":        req.Reason,
+			"delay_seconds": strconv.Itoa(int(delay)),
+			"created":       strconv.Itoa(len(tasks)),
+			"in_scope":      strconv.Itoa(count),
+		})
+	// created < in_scope, когда у части машин уже висит недоставленная перезагрузка:
+	// им новую не заводим (новый task_id = вторая перезагрузка → цикл).
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"created":       len(tasks),
+		"in_scope":      count,
+		"delay_seconds": delay,
+	})
 }
 
 // bulkTokenDefaultTTLHours — окно раскатки по умолчанию для bulk-токена (7 дней),

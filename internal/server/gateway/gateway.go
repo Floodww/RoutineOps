@@ -217,7 +217,16 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 
 	software := make([]storage.SoftwareItem, len(req.Software))
 	for i, s := range req.Software {
-		software[i] = storage.SoftwareItem{Name: s.SoftwareName, Version: s.Version}
+		software[i] = storage.SoftwareItem{
+			Name:            s.SoftwareName,
+			Version:         s.Version,
+			Vendor:          s.Vendor,
+			InstallLocation: s.InstallLocation,
+			Arch:            s.Arch,
+			UninstallID:     s.UninstallId,
+			UninstallMethod: uninstallMethodToString(s.UninstallMethod),
+			Scope:           s.Scope,
+		}
 	}
 
 	if err := g.db.UpsertInventory(ctx, storage.InventoryData{
@@ -376,6 +385,17 @@ func (g *Gateway) FetchPolicy(ctx context.Context, req *pb.FetchPolicyRequest) (
 		rules = append(rules, &pb.SoftwarePolicyRule{SoftwareName: r.SoftwareName, RuleType: rt})
 	}
 	return &pb.FetchPolicyResponse{Rules: rules, Version: result.Version}, nil
+}
+
+// uninstallMethodToString — enum → канон БД (миграция 036). UNSPECIFIED = «снять
+// нечем» и хранится пустой строкой, а не словом "unspecified": пустое значение уже
+// означает «источник не отдал» у соседних колонок, и UI не должен различать два
+// написания одного и того же «нельзя».
+func uninstallMethodToString(m pb.UninstallMethod) string {
+	if m == pb.UninstallMethod_UNINSTALL_METHOD_UNSPECIFIED {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(m.String(), "UNINSTALL_METHOD_"))
 }
 
 func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent) (*pb.SecurityEventAck, error) {

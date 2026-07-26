@@ -54,6 +54,11 @@ func (l *SessionLocker) Hide() {
 	l.log.Warn("lock: замок снят (служба)")
 }
 
+// Reassert немедленно проверяет и при необходимости поднимает оверлей, не
+// дожидаясь тика ensureLoop (3с) — tamper-путь Manager.detectOfflineUnlock.
+// No-op, если замок не поднят или оверлей жив (идемпотентно, как ensureOverlay).
+func (l *SessionLocker) Reassert() { l.ensureOverlay() }
+
 func (l *SessionLocker) ensureLoop(ctx context.Context) {
 	l.ensureOverlay()
 	t := time.NewTicker(3 * time.Second)
