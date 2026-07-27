@@ -43,7 +43,6 @@ func TestFetchAdminStatus_PendingRequest(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-status-pending")
 	registerDevice(t, db, "device-status-pending", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(ctx, devID, owner.ID, "need access", now, now.Add(15*time.Minute))
@@ -75,7 +74,6 @@ func TestFetchAdminStatus_ApprovedRequest(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-status-approved")
 	registerDevice(t, db, "device-status-approved", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(ctx, devID, owner.ID, "approved reason", now, now.Add(15*time.Minute))
@@ -111,7 +109,6 @@ func TestFetchAdminStatus_ApprovedWithTimestamps(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-status-timestamps")
 	registerDevice(t, db, "device-status-timestamps", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(ctx, devID, owner.ID, "ts reason", now, now.Add(15*time.Minute))
@@ -147,16 +144,9 @@ func TestFetchAdminStatus_ApprovedWithTimestamps(t *testing.T) {
 func TestRequestAdminAccess_CustomRequestedAt(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
 
-	owner, err := db.CreateUser(ctx, "Owner", uniqEmail("owner_reqat"), "hash", "user")
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
 	certCtx, fingerprint := makeCertCtx(t, "device-reqat")
 	registerDevice(t, db, "device-reqat", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	customTS := time.Now().Add(-5 * time.Minute).Unix()
 	resp, err := gw.RequestAdminAccess(certCtx, &pb.RequestAdminAccessRequest{
@@ -189,7 +179,6 @@ func TestReportAdminAccess_Revoked(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-revoke")
 	registerDevice(t, db, "device-revoke", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(ctx, devID, owner.ID, "to revoke", now, now.Add(15*time.Minute))
@@ -267,18 +256,11 @@ func TestRequestAdminAccess_BotNotified(t *testing.T) {
 	db := newDB(t)
 	mock := newMockNotifier()
 	gw := newGWWithBot(t, db, mock)
-	ctx := context.Background()
 
-	owner, err := db.CreateUser(ctx, "Owner", uniqEmail("owner_notify"), "hash", "user")
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
 	certCtx, fingerprint := makeCertCtx(t, "device-admin-notify")
 	registerDevice(t, db, "device-admin-notify", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
-	_, err = gw.RequestAdminAccess(certCtx, &pb.RequestAdminAccessRequest{
+	_, err := gw.RequestAdminAccess(certCtx, &pb.RequestAdminAccessRequest{
 		Reason: "тест уведомления",
 	})
 	if err != nil {
@@ -321,16 +303,9 @@ func TestReportSecurityEvent_NoBotConfigured(t *testing.T) {
 func TestRequestAdminAccess_NoBotConfigured(t *testing.T) {
 	db := newDB(t)
 	gw := newGWWithBot(t, db, nil) // bot = nil
-	ctx := context.Background()
 
-	owner, err := db.CreateUser(ctx, "Owner", uniqEmail("owner_nobot"), "hash", "user")
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
 	certCtx, fingerprint := makeCertCtx(t, "device-admin-nobot")
 	registerDevice(t, db, "device-admin-nobot", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	resp, err := gw.RequestAdminAccess(certCtx, &pb.RequestAdminAccessRequest{
 		Reason: "тест без бота",
@@ -644,7 +619,9 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	}
 
 	resp, err := gw.ReportLockStatus(certCtx, &pb.ReportLockStatusRequest{
-		State:      pb.LockState(6), // не занят в прото, живой агент не шлёт
+		// Не занят в прото, живой агент не шлёт. Был 6, но его занял NOT_ARMED
+		// (вооружение, ADR-F24) — берём следующий свободный за SECRET_MISMATCH=7.
+		State:      pb.LockState(8),
 		OccurredAt: time.Now().Unix(),
 	})
 	if err != nil {

@@ -33,9 +33,9 @@ CREATE TABLE IF NOT EXISTS directory_persons (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_persons_sid  ON directory_persons(object_sid) WHERE object_sid IS NOT NULL;
 CREATE INDEX        IF NOT EXISTS idx_directory_persons_sam  ON directory_persons(lower(sam_account));
 
--- Авто-владелец из каталога. Отдельно от owner_id→users (Free-ручной): каталожная персона
--- НЕ панель-аккаунт. UI показывает directory-владельца, если проставлен, иначе owner_id.
--- ON DELETE SET NULL: удаление персоны из каталога не роняет устройство.
+-- Владелец устройства → персона. ON DELETE SET NULL: удаление персоны не роняет
+-- устройство. ⚠️ Комментарий про приоритет owner_id устарел: с миграции 038 владелец
+-- ОДИН и всегда персона, а owner_id удалён вместе с самим понятием «владелец-аккаунт».
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS owner_directory_id UUID
     REFERENCES directory_persons(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_owner_directory_id ON devices(owner_directory_id);

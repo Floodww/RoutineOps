@@ -92,7 +92,6 @@ func TestReportAdminAccess_ForeignDeviceIgnored(t *testing.T) {
 	_, vFP := makeCertCtx(t, "device-victim-adm")
 	registerDevice(t, db, "device-victim-adm", vFP)
 	victimID, _ := db.GetDeviceIDByFingerprint(ctx, vFP)
-	setDeviceOwner(t, victimID, owner.ID)
 
 	now := time.Now()
 	req, err := db.CreateAdminAccessRequest(ctx, victimID, owner.ID, "reason", now, now.Add(15*time.Minute))
@@ -140,7 +139,6 @@ func TestReportSecurityEvent_ForeignAdminRequestCannotPinVictim(t *testing.T) {
 	_, vFP := makeCertCtx(t, "device-victim-sec")
 	registerDevice(t, db, "device-victim-sec", vFP)
 	victimID, _ := db.GetDeviceIDByFingerprint(ctx, vFP)
-	setDeviceOwner(t, victimID, owner.ID)
 
 	now := time.Now()
 	// Заявка принадлежит ЖЕРТВЕ.

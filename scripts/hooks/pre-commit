@@ -1,0 +1,71 @@
+#!/bin/sh
+# Pre-commit гейт репозитория. Ставится `make hooks` (git config core.hooksPath).
+#
+# Здесь ТОЛЬКО быстрые проверки, которые уже ловили реальные поломки — хук,
+# который думает полминуты, обходят через --no-verify, и тогда он не гейт.
+# Долгое (race-тесты, lint, сборки, leak-guard) остаётся за CI и ручным прогоном.
+#
+# Обойти осознанно: git commit --no-verify.
+set -e
+
+# Хук наследует урезанный PATH (git запускается из GUI/IDE — там ~/go/bin нет),
+# а инструменты проекта живут именно там (CLAUDE.md: golangci-lint, buf, grpcurl
+# в ~/go/bin). Без этого гейт buf молча вырождался бы в предупреждение у того,
+# у кого buf на самом деле установлен.
+PATH="$PATH:${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+export PATH
+
+fail=0
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# ── 1. gofmt ────────────────────────────────────────────────────────────────
+# Ловилось живьём: неотформатированный revoke.go уехал в main и заблокировал
+# следующий коммит соседу. gofmt смотрит ВСЕ файлы независимо от build-тегов,
+# поэтому enterprise-код он покрывает, в отличие от `go vet` без -tags.
+gofiles=$(echo "$staged" | grep '\.go$' || true)
+if [ -n "$gofiles" ]; then
+  # Проверяем СОДЕРЖИМОЕ ИЗ ИНДЕКСА, а не из рабочего дерева: иначе `git add`
+  # кривого файла с последующей правкой на диске проходит гейт, а в коммит
+  # уезжает неотформатированное.
+  unformatted=""
+  for f in $gofiles; do
+    if [ -n "$(git show ":$f" | gofmt -d 2>/dev/null)" ]; then
+      unformatted="$unformatted $f"
+    fi
+  done
+  if [ -n "$unformatted" ]; then
+    echo "pre-commit: gofmt — не отформатировано:" >&2
+    for f in $unformatted; do echo "  $f" >&2; done
+    echo "Почините: gofmt -w$unformatted && git add$unformatted" >&2
+    fail=1
+  fi
+fi
+
+# ── 2. Контракт: .proto без перегенерации ───────────────────────────────────
+# Правка .proto без сгенерированного кода в том же коммите даёт main, в котором
+# контракт и код разъехались, — а собирается всё равно (старый pb.go валиден).
+if echo "$staged" | grep -q '^proto/.*\.proto$'; then
+  if ! echo "$staged" | grep -q '^proto/.*\.pb\.go$'; then
+    echo "pre-commit: proto/*.proto изменён, а сгенерированный код — нет." >&2
+    echo "Почините: PATH=\$PATH:\$HOME/go/bin make proto && git add proto/" >&2
+    echo "(protoc пинится PROTOC_VERSION в Makefile — чужая версия двигает шапку)" >&2
+    fail=1
+  fi
+
+  # ── 3. buf breaking, если buf есть ────────────────────────────────────────
+  # Не обязателен: buf стоит не у всех. Но CI-джоба этого гейта была PR-only,
+  # а пушим мы прямо в main — то есть какое-то время контракт не проверял никто.
+  if command -v buf >/dev/null 2>&1; then
+    if ! buf breaking --against ".git#ref=HEAD,subdir=proto" >/dev/null 2>&1; then
+      echo "pre-commit: buf breaking — ломающее изменение контракта (ADR-4):" >&2
+      buf breaking --against ".git#ref=HEAD,subdir=proto" 2>&1 | sed 's/^/  /' >&2
+      fail=1
+    fi
+  else
+    echo "pre-commit: buf не найден — контракт на совместимость НЕ проверен." >&2
+    echo "  Поставить: go install github.com/bufbuild/buf/cmd/buf@latest" >&2
+  fi
+fi
+
+exit $fail

@@ -395,7 +395,7 @@ func TestMTLS_ReportSecurityEvent_HappyPath(t *testing.T) {
 }
 
 // countScriptResults считает строки script_results по run_id (прямой SQL,
-// как setDeviceOwner — публичного API для этого нет).
+// публичного API для этого нет).
 func countScriptResults(t *testing.T, runID string) int {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), sharedDSN)

@@ -139,13 +139,7 @@ func TestMTLS_ReportTaskResult_HappyPath(t *testing.T) {
 func TestMTLS_RequestAdminAccess_HappyPath(t *testing.T) {
 	db := newDB(t)
 	env := startMTLSServer(t, newGW(t, db))
-	client, deviceID := env.validClient(t, db, "device-mtls-admreq")
-
-	owner, err := db.CreateUser(context.Background(), "Owner", uniqEmail("owner_mtls_adm"), "hash", "user")
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-	setDeviceOwner(t, deviceID, owner.ID)
+	client, _ := env.validClient(t, db, "device-mtls-admreq")
 
 	resp, err := client.RequestAdminAccess(callCtx(t), &pb.RequestAdminAccessRequest{Reason: "install software"})
 	if err != nil {
@@ -186,7 +180,6 @@ func TestMTLS_ReportAdminAccess_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	setDeviceOwner(t, deviceID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(context.Background(), deviceID, owner.ID, "test", now, now.Add(15*time.Minute))

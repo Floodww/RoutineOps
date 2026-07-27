@@ -14,12 +14,35 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
-## Unreleased (in main after 2.5.0)
+## 2.6.0 — 27 July 2026
+
+Product release (server + web). The agent stays at **2.5.1** — its Free-edition code has
+not changed since the previous release, so there is nothing to rebuild.
+
+⚠️ **Breaking API change.** A device owner is no longer a console account: the body of
+`PUT /devices/{id}/owner` changed (`owner_user_id` → `person_id`) and the owner fields on
+the device object were renamed (`owner_user_*`, `owner_directory_name` →
+`owner_person_*`). Integrations built on these endpoints need updating. Existing data is
+migrated automatically on upgrade — nothing is lost.
 
 ### Devices
 
-- Device owner on the device page: manual assignment to a panel user
-  (`PUT /devices/{id}/owner`); a manual owner takes precedence over the automatic one.
+- **A device owner no longer needs a console invitation.** Previously only someone with a
+  login could be an owner — to record that a laptop belongs to an employee you had to
+  invite that employee and make them set a password, even though they have no business in
+  the console. The owner is now created right on the device page: full name, e-mail
+  (optional), "Create and assign". No e-mail, no account.
+
+  Invitations stay what they always were — a way to grant access TO the console: for
+  administrators, technical support, interns.
+
+  "Owner" now has a single meaning. In Enterprise the person cards are brought in by the
+  Active Directory sync, in Free the operator creates them — the field on the device page
+  is the same one, and moving between editions breaks nothing: turn the directory on and
+  employees start arriving on their own, while manually created cards stay put and are not
+  disabled by the sync. Owners already assigned as accounts are migrated to person cards
+  automatically on upgrade.
+
 - **Remote device reboot.** An operator can reboot a machine from the panel — to finish
   installing updates, for instance, or to bring a stuck device back. The employee gets a
   grace period (one minute by default) to save their work; once it expires the reboot is
@@ -138,6 +161,20 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
   restart clears the arming — the lock will not apply until the operator arms it again;
   this is deliberate, because the alternative is keeping the administrator password on
   disk. The audit log records the fact of arming, never the secret values.
+
+  Two new lock states appear on the device page. "Awaiting arming" — the lock is issued
+  but there is no secret: the machine is untouched, and IT keeps getting a reminder until
+  it arms. "Secret does not match escrow" — the supplied key is not the one escrowed for
+  this machine: the operation stops before the first irreversible step, and the event is
+  raised as its own alert in the console, because it means the key custody has drifted
+  rather than a workflow hiccup.
+
+  An unfinished rights-removal operation ("revoke not completed") now also reaches the
+  alerts console, not just the notification and the log: it is the only state in which
+  the machine is left half-processed and will not recover on its own. Repeat reminders do
+  not create new rows. That state is no longer overwritten on the device page by later
+  "not armed" reports — previously a half-processed machine could show up as merely
+  unarmed.
 - **[Enterprise] FileVault lock: the key is matched against escrow before the
   irreversible step.** Before stripping disk-decryption rights, the agent now verifies
   that the recovery key (and service administrator password) supplied by the operator

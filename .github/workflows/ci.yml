@@ -244,12 +244,15 @@ jobs:
 
   proto-breaking:
     name: proto · buf breaking
-    # Сравниваем контракт с main и валим сборку при ломающем изменении
-    # (ADR-4: поля только аддитивно, без удаления/смены номера/типа).
-    # Остаётся PR-only в отличие от остальных джоб: на push в main baseline — это
-    # сам же push, сравнение вырождается и всегда зелёное. Пушим мы прямо в main,
-    # так что этот гейт работает только когда правка проходит через PR.
-    if: github.event_name == 'pull_request'
+    # Валит сборку при ломающем изменении контракта (ADR-4: поля только
+    # аддитивно, без удаления/смены номера/типа).
+    #
+    # Джоба была PR-only, и это делало её мёртвой: пушим мы ОБА прямо в main, а
+    # на push baseline «ветка main» — это сам же push, сравнение вырождается и
+    # всегда зелёное. Контракт вооружения (5e9d5ba) не проверил ни человек, ни
+    # CI. Теперь baseline берётся по событию: на PR — main, на push — коммит ДО
+    # пуша (github.event.before), то есть ровно то состояние контракта, которое
+    # push и меняет.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -257,19 +260,42 @@ jobs:
           fetch-depth: 0
 
       # buf читает базовый контракт из локальной ветки main — подтягиваем её.
+      # Только для PR: на push baseline адресуется по SHA, ветка не нужна.
       - name: fetch main
+        if: github.event_name == 'pull_request'
         run: git fetch origin main:main
 
       - uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ github.token }}
 
-      - name: buf breaking (против main)
+      - name: выбрать baseline
+        id: baseline
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=branch=main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Первый пуш в ветку или force-push с пересозданием истории: сравнивать
+          # не с чем. Пропускаем ЯВНО, а не сравниваем с несуществующим коммитом —
+          # иначе джоба падала бы на пустом месте и её отключили бы снова.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "baseline недоступен ($BEFORE) — сравнивать не с чем, пропуск"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ref=ref=$BEFORE" >> "$GITHUB_OUTPUT"
+
+      - name: buf breaking
+        if: steps.baseline.outputs.skip != '1'
         # subdir=proto: читать baseline с корнем модуля = proto/, как в buf.yaml
         # текущей ветки. Иначе на бутстрап-PR (main ещё без buf.yaml) baseline
         # именует файл proto/agent.proto, а текущая ветка — agent.proto, и buf
         # ложно репортит «файл удалён».
-        run: buf breaking --against ".git#branch=main,subdir=proto"
+        run: buf breaking --against ".git#${{ steps.baseline.outputs.ref }},subdir=proto"
 
   cross-build:
     name: cross-build агента

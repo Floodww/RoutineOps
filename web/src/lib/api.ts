@@ -117,12 +117,12 @@ export interface Device {
   // Кто сейчас за консолью (Windows — DOMAIN\user; darwin/linux — логин активной сессии).
   // "" / отсутствует = за консолью никого либо сервер старой версии поля не отдаёт.
   console_user?: string
-  // Владелец. Ручной (owner_user_*, Free-привязка через users) ПРИОРИТЕТНЕЕ авто из
-  // каталога (owner_directory_name, Enterprise LDAP-синк): явное намерение оператора бьёт
-  // автоматику. Отсутствуют у сервера старой версии.
-  owner_user_id?: string
-  owner_user_email?: string
-  owner_directory_name?: string
+  // Владелец — карточка человека (Person), а не аккаунт панели. В Enterprise её приносит
+  // синк AD, во Free оператор заводит руками; поле одно и то же.
+  // Отсутствуют у сервера старой версии.
+  owner_person_id?: string
+  owner_person_name?: string
+  owner_person_email?: string
   // Устройство может состоять в нескольких группах. Может отсутствовать: сервер старой
   // версии поля не отдаёт, а только что созданное pending-устройство держим локально.
   groups?: DeviceGroupRef[]
@@ -147,7 +147,10 @@ export interface DirectorySyncResult {
   matched: number
 }
 
-export interface DirectoryPerson {
+// Person — человек, за которым числятся устройства. Входа в панель у него НЕТ: аккаунты
+// (users) нужны тем, кто в неё ходит. source различает происхождение: "ldap" — принёс
+// синк каталога (правится в AD), "manual" — завёл оператор (правится здесь).
+export interface Person {
   id: string
   object_guid: string
   object_sid: string
@@ -157,7 +160,11 @@ export interface DirectoryPerson {
   email: string
   distinguished_name: string
   disabled: boolean
+  source: "ldap" | "manual"
 }
+
+/** @deprecated историческое имя Person — сущность одна, наполняется и синком, и вручную. */
+export type DirectoryPerson = Person
 
 // GROUP_PALETTE — те же 8 цветов, которыми миграция 027 бэкфилит существующие группы.
 // Читаемы и на светлой, и на тёмной теме; hex, а не токены темы, потому что цвет

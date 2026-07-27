@@ -11,6 +11,8 @@ import { useMe } from "@/lib/useMe"
 
 const alertTypeLabel: Record<string, string> = {
   lock_tamper:                    "Попытка обхода блокировки",
+  filevault_revoke_failed:        "FileVault: revoke не завершён",
+  filevault_secret_mismatch:      "FileVault: секрет не совпал с эскроу",
   forbidden_software:             "Запрещённое ПО",
   unauthorized_install:           "Неавторизованная установка",
   unauthorized_settings_change:   "Изменение настроек",
@@ -22,6 +24,12 @@ const alertTypeColor: Record<string, string> = {
   // применённый контроль. Отдельный цвет, а не оттенок красного: рядом с
   // forbidden_software два красных читались бы как один класс событий.
   lock_tamper:                  "text-fuchsia-600 dark:text-fuchsia-400",
+  // Единственный тип, где деструктив УЖЕ начался и машина полу-ревокнута: сильнее
+  // всего остального, потому и первый в порядке ниже.
+  filevault_revoke_failed:      "text-rose-700 dark:text-rose-400",
+  // Расхождение секрета с эскроу — деструктив остановлен ДО мутации, машина цела.
+  // Красный, а не fuchsia: это не противник на устройстве, а рассогласование кастодии.
+  filevault_secret_mismatch:    "text-red-600 dark:text-red-500",
   forbidden_software:           "text-red-600 dark:text-red-500",
   unauthorized_install:         "text-amber-600 dark:text-amber-500",
   unauthorized_settings_change: "text-orange-600 dark:text-orange-500",
@@ -30,10 +38,15 @@ const alertTypeColor: Record<string, string> = {
 
 // TYPE_ORDER — порядок секций. Типы вне списка (сервер хранит alert_type свободным
 // TEXT, без enum) уезжают в конец по алфавиту, а не пропадают.
-// lock_tamper первым: единственный тип, означающий живого противника на устройстве
-// прямо сейчас, — остальные это постфактум-нарушения политики.
+// Порядок по срочности вмешательства IT, а не по «серьёзности вообще»:
+// filevault_revoke_failed — деструктив УЖЕ начался, машина полу-ревокнута и сама не
+// починится; lock_tamper — живой противник на устройстве прямо сейчас;
+// filevault_secret_mismatch — деструктив остановлен ДО мутации, машина цела, но
+// кастодия ключей разъехалась. Остальное — постфактум-нарушения политики.
 const TYPE_ORDER = [
+  "filevault_revoke_failed",
   "lock_tamper",
+  "filevault_secret_mismatch",
   "forbidden_software",
   "unauthorized_install",
   "unauthorized_settings_change",

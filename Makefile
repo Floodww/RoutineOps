@@ -71,7 +71,7 @@ check-escrow-tags:
 		exit 1; \
 	fi
 
-.PHONY: help proto tidy fmt agent mockserver build certs up down logs run-mock run-agent test clean \
+.PHONY: help proto tidy fmt hooks agent mockserver build certs up down logs run-mock run-agent test clean \
         pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \
         build-win build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win check-escrow-tags
 
@@ -80,6 +80,14 @@ help: ## Список целей
 
 fmt: ## Отформатировать весь Go-код (gofmt). Прогоняйте перед пушем — это гейт CI.
 	gofmt -w .
+
+hooks: ## Включить pre-commit гейты репозитория (gofmt + перегенерация proto + buf breaking)
+	@# core.hooksPath, а НЕ копия в .git/hooks: копия протухает молча — правку хука
+	@# получают только те, кто вспомнит переустановить. Здесь хук версионируется
+	@# вместе с кодом.
+	@git config core.hooksPath scripts/hooks
+	@chmod +x scripts/hooks/pre-commit
+	@echo "Хуки включены (core.hooksPath=scripts/hooks). Обойти разово: git commit --no-verify"
 
 proto: ## Перегенерировать Go-код из proto (ОБЩИЙ файл — менять согласованно, ADR-4)
 	@# Версии зафиксированы намеренно. Шапка сгенерированных файлов содержит версию

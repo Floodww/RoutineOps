@@ -23,7 +23,15 @@ type DirectoryPerson struct {
 	Email             string `json:"email"`
 	DistinguishedName string `json:"distinguished_name"`
 	Disabled          bool   `json:"disabled"`
+	// Source — откуда строка: "ldap" (принёс синк) или "manual" (завёл оператор).
+	// UI по нему решает, можно ли карточку редактировать: каталожную правят в AD.
+	Source string `json:"source"`
 }
+
+// PersonSourceManual — карточка заведена оператором вручную (Free-путь). Отличается от
+// каталожной тем, что её МОЖНО править и удалять в панели, и тем, что синк каталога её
+// не гасит (см. MarkDirectoryPersonsStale).
+const PersonSourceManual = "manual"
 
 // UpsertDirectoryPerson — идемпотентный upsert по object_guid. Пустой SID пишется NULL
 // (частичный UNIQUE-индекс по object_sid не должен ловить пустые). synced_at → now().
@@ -123,7 +131,7 @@ func (db *DB) ListDirectoryPersons(ctx context.Context) ([]DirectoryPerson, erro
 	rows, err := db.pool.Query(ctx, `
 		SELECT id, object_guid, COALESCE(object_sid,''), COALESCE(sam_account,''),
 		       COALESCE(user_principal,''), COALESCE(display_name,''), COALESCE(email,''),
-		       COALESCE(distinguished_name,''), disabled
+		       COALESCE(distinguished_name,''), disabled, source
 		FROM directory_persons
 		ORDER BY lower(COALESCE(display_name, sam_account, object_guid))
 	`)
@@ -135,7 +143,7 @@ func (db *DB) ListDirectoryPersons(ctx context.Context) ([]DirectoryPerson, erro
 	for rows.Next() {
 		var p DirectoryPerson
 		if err := rows.Scan(&p.ID, &p.ObjectGUID, &p.ObjectSID, &p.SAMAccount, &p.UserPrincipal,
-			&p.DisplayName, &p.Email, &p.DistinguishedName, &p.Disabled); err != nil {
+			&p.DisplayName, &p.Email, &p.DistinguishedName, &p.Disabled, &p.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -149,7 +157,10 @@ func (db *DB) ListDirectoryPersons(ctx context.Context) ([]DirectoryPerson, erro
 func (db *DB) MarkDirectoryPersonsStale(ctx context.Context, syncStartedBefore int64) (int64, error) {
 	// syncStartedBefore — unix-время начала текущего синка; всё, что не тронуто им, устарело.
 	tag, err := db.pool.Exec(ctx,
-		`UPDATE directory_persons SET disabled = true WHERE synced_at < to_timestamp($1) AND NOT disabled`,
+		// source <> 'manual': ручные карточки каталог не отдаёт НИКОГДА, и без этого
+		// условия первый же синк погасил бы всех, кого оператор завёл сам.
+		`UPDATE directory_persons SET disabled = true
+		 WHERE synced_at < to_timestamp($1) AND NOT disabled AND source <> 'manual'`,
 		syncStartedBefore)
 	if err != nil {
 		return 0, err

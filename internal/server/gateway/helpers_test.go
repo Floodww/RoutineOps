@@ -23,7 +23,6 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"github.com/Floodww/RoutineOps/internal/server/testutil"
 	pb "github.com/Floodww/RoutineOps/proto"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
@@ -129,22 +128,6 @@ func registerDevice(t *testing.T, db *storage.DB, cn, fingerprint string) {
 	})
 	if err != nil {
 		t.Fatalf("registerDevice: %v", err)
-	}
-}
-
-// setDeviceOwner sets owner_id on a device via direct SQL. The devices table has no
-// public API for this — it's set by IT admins at the DB level.
-func setDeviceOwner(t *testing.T, deviceID, ownerID string) {
-	t.Helper()
-	pool, err := pgxpool.New(context.Background(), sharedDSN)
-	if err != nil {
-		t.Fatalf("setDeviceOwner pool: %v", err)
-	}
-	defer pool.Close()
-	_, err = pool.Exec(context.Background(),
-		`UPDATE devices SET owner_id = $2::uuid WHERE id = $1::uuid`, deviceID, ownerID)
-	if err != nil {
-		t.Fatalf("setDeviceOwner: %v", err)
 	}
 }
 

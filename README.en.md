@@ -16,14 +16,16 @@ no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent ver
 
 ## Features
 
-- **Inventory** — hostname, OS, CPU/RAM/disk, IP, serial number, agent version, installed software, process events, console user, device owner.
+- **Inventory** — hostname, OS, CPU/RAM/disk, IP, serial number, agent version, process events, console user, device owner. Per application: publisher, install path, architecture, removal identifier and a machine-vs-user-profile marker (on Windows per-profile installs are visible too — that is exactly how software bans were bypassed).
 - **Scripts** — one-off runs on a device or group; scheduled (cron), on-connect and event-triggered policies; script library with results.
 - **Device groups** — membership, per-group policies, run a script on a whole group.
 - **Software policies** — allowed/forbidden rules per device, group or platform.
-- **Device lock** — full-screen overlay with a password (Windows and macOS), unlock works offline.
-- **Events & alerts** — `agent_unreachable`, forbidden software, unauthorized changes; Telegram notifications.
+- **Device lock** — full-screen overlay with a password (Windows and macOS), unlock works offline. Only the service can release the lock: marking the device unlocked behind its back restores the lock and raises a security event.
+- **Remote reboot** — a single machine or a whole group (maintenance window). The employee gets a grace period to save work, counted by the OS itself; the panel says "scheduled", not "rebooted".
+- **Device owners** — a person card (full name + e-mail) is created right on the device page. An owner needs no console login and no invitation: accounts are for people who use the console.
+- **Events & alerts** — `agent_unreachable`, forbidden software, unauthorized changes, lock bypass attempts; Telegram notifications.
 - **Audit log** — all admin actions, configurable retention.
-- **RBAC** — `it_admin` and read-only `viewer` roles; email invites.
+- **RBAC** — `it_admin` and read-only `viewer` roles; email invites for people who need console access (administrators, support) — not for device owners.
 - **Agent self-update** — ed25519-signed releases, sha256 + manifest signature verification, anti-rollback.
 - **Decommission** — one button in the device page: the agent fully removes itself (files, keys, autostart, installer record). Deleting a device from inventory revokes its certificate, so it cannot "resurrect" as an empty record.
 - **Config as code** — scripts, policies and groups in YAML: `routineops export` / `apply`, fleet configuration in git.
@@ -49,6 +51,7 @@ no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent ver
 ## Documentation (Russian)
 
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) ·
+[`docs/openapi.yaml`](./docs/openapi.yaml) (REST API spec, OpenAPI 3) ·
 [`docs/install.md`](./docs/install.md) ·
 [`docs/self-hosted-deploy.md`](./docs/self-hosted-deploy.md) ·
 [`docs/enrollment.md`](./docs/enrollment.md) ·
@@ -59,7 +62,9 @@ no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent ver
 [`docs/field-troubleshooting.md`](./docs/field-troubleshooting.md) ·
 [`docs/tamper-protection.md`](./docs/tamper-protection.md) ·
 [`docs/jwt-secret-rotation.md`](./docs/jwt-secret-rotation.md) ·
-[`SECURITY.md`](./SECURITY.md) (English)
+[`SECURITY.md`](./SECURITY.md) (English) ·
+[`docs/ROADMAP.md`](./docs/ROADMAP.md) ·
+[`CHANGELOG.en.md`](./CHANGELOG.en.md) (English)
 
 ## Stack
 

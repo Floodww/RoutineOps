@@ -207,7 +207,12 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.Post("/devices", h.createPendingDevice)
 			r.Post("/devices/{id}/tasks", h.createTask)
 			r.Put("/devices/{id}/status", h.updateDeviceStatus)
-			r.Put("/devices/{id}/owner", h.setDeviceOwner) // ручная привязка владельца (Free)
+			r.Put("/devices/{id}/owner", h.setDeviceOwner) // привязка владельца-человека
+			// Карточки людей. Правим/удаляем только заведённые вручную: каталожные —
+			// в AD (409). Список лежит на /directory/persons и читается всеми ролями.
+			r.Post("/persons", h.createPerson)
+			r.Put("/persons/{id}", h.updatePerson)
+			r.Delete("/persons/{id}", h.deletePerson)
 			r.Delete("/devices/{id}", h.deleteDevice)
 			r.Post("/devices/{id}/lock", h.lockDevice)
 			r.Post("/devices/{id}/unlock", h.unlockDevice)
@@ -478,21 +483,22 @@ func (h *Handler) getDevice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// setDeviceOwner — ручная привязка владельца (Free-путь): body {owner_user_id}. Пустой id
-// снимает владельца. Авто-владелец из каталога (owner_directory_id, Enterprise LDAP-синк)
-// этой ручкой НЕ трогается — это отдельный слой.
+// setDeviceOwner привязывает устройство к КАРТОЧКЕ ЧЕЛОВЕКА (directory_persons), а не к
+// аккаунту панели: с миграции 038 у слова «владелец» один смысл. Карточка может быть
+// заведена руками (Free) или принесена синком AD (Enterprise) — для устройства это одно
+// и то же. Пустой person_id снимает владельца.
 func (h *Handler) setDeviceOwner(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req struct {
-		OwnerUserID string `json:"owner_user_id"`
+		PersonID string `json:"person_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	found, err := h.db.SetDeviceOwner(r.Context(), id, strings.TrimSpace(req.OwnerUserID))
+	found, err := h.db.SetDeviceOwnerPerson(r.Context(), id, strings.TrimSpace(req.PersonID))
 	if err != nil {
-		// неверный uuid / несуществующий пользователь ловит FK/parse — это ввод оператора, 400.
+		// неверный uuid / несуществующая карточка ловится FK/parse — ввод оператора, 400.
 		http.Error(w, "invalid owner: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -502,7 +508,7 @@ func (h *Handler) setDeviceOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
 	h.audit(r.Context(), claims.UserID, claims.Email, "set_device_owner", "device", id,
-		map[string]any{"owner_user_id": req.OwnerUserID})
+		map[string]any{"person_id": req.PersonID})
 	w.WriteHeader(http.StatusNoContent)
 }
 

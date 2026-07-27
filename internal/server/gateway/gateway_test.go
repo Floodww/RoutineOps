@@ -492,16 +492,9 @@ func TestRequestAdminAccess_WithOwner(t *testing.T) {
 	gw := newGW(t, db)
 
 	// create a user to be the owner
-	owner, err := db.CreateUser(context.Background(), "Owner", uniqEmail("owner_adm"), "hash", "user")
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
 
 	ctx, fingerprint := makeCertCtx(t, "device-adm-owner")
 	registerDevice(t, db, "device-adm-owner", fingerprint)
-
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	resp, err := gw.RequestAdminAccess(ctx, &pb.RequestAdminAccessRequest{Reason: "install software"})
 	if err != nil {
@@ -589,7 +582,6 @@ func TestReportAdminAccess_ApprovedStatus(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-reportadm-ok")
 	registerDevice(t, db, "device-reportadm-ok", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	setDeviceOwner(t, devID, owner.ID)
 
 	now := time.Now()
 	row, err := db.CreateAdminAccessRequest(context.Background(), devID, owner.ID, "test", now, now.Add(15*time.Minute))

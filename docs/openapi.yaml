@@ -378,28 +378,106 @@ paths:
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]
     put:
       tags: [Устройства]
-      summary: Ручная привязка владельца устройства
+      summary: Привязка владельца устройства
       description: |
-        Роль: `it_admin`. Привязывает устройство к пользователю панели. Пустой
-        `owner_user_id` снимает владельца. Авто-владельца из каталога
-        (`owner_directory_name`, Enterprise LDAP-синк) эта ручка не трогает — это
-        отдельный слой; при показе ручной владелец приоритетнее.
+        Роль: `it_admin`. Владелец — КАРТОЧКА ЧЕЛОВЕКА (`Person`), а не аккаунт панели:
+        аккаунты нужны тем, кто в панель ходит (админы, поддержка), а сотруднику ради
+        закреплённого за ним ноутбука вход не нужен.
+
+        Карточка может быть заведена вручную (`POST /persons`, Free) или принесена
+        синком каталога (Enterprise) — для устройства это один и тот же владелец.
+        Пустой `person_id` снимает владельца.
+
+        Назначенный здесь владелец синком НЕ затирается: авто-матч каталога заполняет
+        только устройства без владельца.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [owner_user_id]
+              required: [person_id]
               properties:
-                owner_user_id:
+                person_id:
                   type: string
-                  description: UUID пользователя панели; пустая строка снимает владельца
+                  description: UUID карточки человека; пустая строка снимает владельца
       responses:
         '204': { description: Владелец обновлён }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/persons:
+    post:
+      tags: [Устройства]
+      summary: Завести карточку человека (владельца)
+      description: |
+        Роль: `it_admin`. Заводит человека, за которым числятся устройства. Приглашение
+        НЕ отправляется и аккаунт не создаётся: вход в панель владельцу не нужен.
+
+        `display_name` обязателен — карточка без имени нечитаема в списке владельцев.
+        `email` необязателен (корпоративная почта есть не у всех), но если задан, то
+        разбирается как адрес.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name: { type: string, maxLength: 200 }
+                email: { type: string, maxLength: 320 }
+      responses:
+        '201':
+          description: Карточка заведена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Person' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/persons/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Устройства]
+      summary: Правка карточки человека
+      description: |
+        Роль: `it_admin`. Только для карточек, заведённых вручную (`source: manual`).
+        Карточку из каталога правят в AD — 409: правка здесь пережила бы ровно до
+        следующего синка, и оператор решил бы, что панель его не слушает.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name: { type: string, maxLength: 200 }
+                email: { type: string, maxLength: 320 }
+      responses:
+        '204': { description: Обновлено }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Карточка из каталога — правится в AD }
+    delete:
+      tags: [Устройства]
+      summary: Удаление карточки человека
+      description: |
+        Роль: `it_admin`. Только для карточек `source: manual`. Устройства, где карточка
+        стояла владельцем, остаются без владельца — сами машины не затрагиваются.
+      responses:
+        '204': { description: Удалено }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Карточка из каталога — удаляется в AD }
 
   /api/v1/devices/{id}/status:
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]
@@ -1860,7 +1938,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/DirectoryPerson' }
+                items: { $ref: '#/components/schemas/Person' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
   # ─────────────────────────── Аудит ───────────────────────────
@@ -2186,17 +2264,15 @@ components:
         console_user:
           type: string
           description: 'На Windows в виде `DOMAIN\user`. Пусто — за консолью никого.'
-        owner_user_id:
+        owner_person_id:
           type: string
-          description: UUID ручного владельца (пользователь панели). Пусто — не привязан.
-        owner_user_email:
+          description: UUID карточки владельца (Person). Пусто — владелец не назначен.
+        owner_person_name:
           type: string
-          description: E-mail ручного владельца (для показа).
-        owner_directory_name:
+          description: ФИО владельца (для показа).
+        owner_person_email:
           type: string
-          description: >
-            Имя авто-владельца из каталога (Enterprise LDAP-синк). При показе ручной
-            владелец приоритетнее.
+          description: Почта владельца. Пусто — не задана.
         disk_encryption:
           type: string
           enum: ['enabled', 'disabled', '']
@@ -2441,18 +2517,28 @@ components:
         disabled: { type: integer, description: Помечено отключёнными (исчезли из выдачи) }
         matched: { type: integer, description: Устройств привязано к владельцу }
 
-    DirectoryPerson:
+    Person:
       type: object
+      description: >
+        Человек, за которым числятся устройства. Входа в панель у него НЕТ — аккаунты
+        (users) нужны тем, кто в неё ходит. Во Free карточку заводит оператор, в
+        Enterprise её приносит синк каталога; поля каталога у ручных карточек пусты.
       properties:
         id: { type: string, format: uuid }
+        display_name: { type: string, description: ФИО }
+        email: { type: string }
+        source:
+          type: string
+          enum: [ldap, manual]
+          description: >
+            Откуда карточка: `ldap` — принёс синк (правится в AD), `manual` — завёл
+            оператор (правится и удаляется в панели).
         object_guid: { type: string, description: Канон привязки, стабилен при переименовании }
         object_sid: { type: string }
         sam_account: { type: string }
         user_principal: { type: string }
-        display_name: { type: string }
-        email: { type: string }
         distinguished_name: { type: string }
-        disabled: { type: boolean }
+        disabled: { type: boolean, description: Учётка отключена в каталоге либо исчезла из выдачи }
 
     AdminAccessRequest:
       type: object

@@ -38,6 +38,9 @@ type Gateway struct {
 	// escrowSvc — enterprise-шов FileVault recovery-escrow (internal/server/escrow).
 	// nil в open-core → EscrowRecoveryKey отвечает Unimplemented. См. escrow_seam.go.
 	escrowSvc EscrowService
+	// lockVault — enterprise-шов вооружения FileVault-лока (ADR-F24).
+	// nil в open-core → FetchLockSecrets отвечает Unimplemented. См. lockvault_seam.go.
+	lockVault LockSecretVault
 }
 
 func New(db *storage.DB, reg *registry.Registry, asynqClient *asynq.Client, logger *slog.Logger, bot Notifier) *Gateway {
@@ -448,6 +451,8 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 			"unauthorized_install":         "Неавторизованная установка",
 			"unauthorized_settings_change": "Изменение настроек",
 			"lock_tamper":                  "Попытка обхода блокировки",
+			"filevault_secret_mismatch":    "FileVault: секрет не совпал с эскроу",
+			"filevault_revoke_failed":      "FileVault: revoke не завершён",
 		}[alertType]
 		if alertLabel == "" {
 			alertLabel = alertType
@@ -464,15 +469,17 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
-	deviceID, ownerID, err := g.db.GetDeviceOwner(ctx, fingerprint)
+	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup device: %v", err)
 	}
 	if deviceID == "" {
 		return nil, status.Errorf(codes.NotFound, "device not found")
 	}
-	// Владелец устройства необязателен: MDM-пользователи — это ИТ-операторы, а не
-	// сотрудники, поэтому заявка оформляется и без назначенного владельца (ownerID == "").
+	// requested_by пустой ВСЕГДА: с миграции 038 владелец устройства — карточка человека
+	// (directory_persons), а не аккаунт панели, и ссылаться этому полю (FK→users) стало
+	// не на что. Заявка от этого не ломается — она и раньше оформлялась без владельца:
+	// пользователи панели это ИТ-операторы, а не сотрудники.
 
 	timeoutStr, _ := g.db.GetSystemSetting(ctx, "admin_request_timeout_minutes")
 	timeoutMin, _ := strconv.Atoi(timeoutStr)
@@ -483,7 +490,7 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 	requestedAt := g.clampAgentTime("requested_at", req.RequestedAt)
 	pendingExpiresAt := requestedAt.Add(time.Duration(timeoutMin) * time.Minute)
 
-	row, err := g.db.CreateAdminAccessRequest(ctx, deviceID, ownerID, req.Reason, requestedAt, pendingExpiresAt)
+	row, err := g.db.CreateAdminAccessRequest(ctx, deviceID, "", req.Reason, requestedAt, pendingExpiresAt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create request: %v", err)
 	}
@@ -509,7 +516,7 @@ func (g *Gateway) FetchAdminStatus(ctx context.Context, _ *pb.FetchAdminStatusRe
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
-	deviceID, _, err := g.db.GetDeviceOwner(ctx, fingerprint)
+	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup device: %v", err)
 	}
@@ -731,7 +738,16 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			g.logger.Error("audit filevault_revoke_failed", "device_id", deviceID, "err", err)
 			return nil, status.Errorf(codes.Unavailable, "audit: %v", err)
 		}
-		if g.bot != nil {
+		// Строка в alerts, а не только телеграм: половинчатый деструктив обязан висеть
+		// в панели ИБ и требовать подтверждения. Дедуп живёт ВНУТРИ CreateAlert — он же
+		// закрывает повторы, которых у этой ветки своего гашения не было.
+		//
+		// Раньше сюда падал и pre-mutation ABORT, поэтому роутить в панель было нельзя:
+		// засеяли бы её шумом с невооружённых машин. Теперь такие отчёты уезжают в 6/7,
+		// и четвёрка вернулась к своему настоящему смыслу — начавшийся деструктив.
+		if created, err := g.db.CreateAlert(ctx, deviceID, "filevault_revoke_failed", req.Details, ""); err != nil {
+			g.logger.Error("create alert filevault_revoke_failed", "device_id", deviceID, "err", err)
+		} else if created && g.bot != nil {
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🛑 <b>FileVault-лок: revoke НЕ завершён</b>\nУстройство: <code>%s</code>\nДеструктив мог примениться ЧАСТИЧНО — требуется ручной разбор IT.\nДетали: %s",
 				hostname, req.Details)
@@ -766,11 +782,93 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		}
 		g.logger.Warn("lock apply FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
+
+	case pb.LockState_LOCK_STATE_FILEVAULT_NOT_ARMED:
+		// Вооружения нет: не вооружали, истёк TTL, рестартовал сервер (vault в RAM).
+		// Машина НЕ тронута, деструктив не начинался. desired НЕ трогаем — лок выдан
+		// и остаётся выданным, не хватает только секрета.
+		//
+		// Алерт шлём, хотя это и штатный fail-closed: без него выданный FileVault-лок
+		// молча не применялся бы, а оператор считал бы машину закрытой. Флуда не будет —
+		// агент дедупит пару (request_id, state) раз в час и замолкает сразу, как
+		// оператор вооружит. Строку в alerts НЕ заводим: это шаг рабочего процесса
+		// («вооружите»), а не событие ИБ.
+		applied, err := g.db.SetDeviceLockActualStateNoDowngrade(ctx, deviceID, "filevault_not_armed")
+		if err != nil {
+			g.logger.Error("update lock actual state (not_armed)", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "update lock actual state: %v", err)
+		}
+		// Аудит пишем всегда: агент действительно это отрепортил, и факт отчёта —
+		// правда независимо от того, приняли мы его в actual_state или подавили.
+		if err := g.db.WriteAuditLog(ctx, "", "agent", "filevault_not_armed", "device", deviceID,
+			map[string]any{"details": req.Details, "occurred_at": req.OccurredAt,
+				"request_id": req.RequestId, "actual_state_applied": applied}); err != nil {
+			g.logger.Error("audit filevault_not_armed", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "audit: %v", err)
+		}
+		if !applied {
+			// Машина полу-ревокнута: правда про неё — «деструктив начинался», а не
+			// «не вооружена». Телеграм с действием «вооружите» увёл бы IT не туда.
+			g.logger.Warn("filevault NOT_ARMED подавлен: по устройству уже зафиксирован начавшийся деструктив",
+				"device_id", deviceID, "request_id", req.RequestId)
+			return &pb.ReportLockStatusResponse{Received: true}, nil
+		}
+		if g.bot != nil {
+			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
+			text := notifier.HTMLf("🔑 <b>FileVault-лок ждёт вооружения</b>\nУстройство: <code>%s</code>\nМашина НЕ тронута, лок НЕ применён: агенту нечем снять токен.\nДействие: выгрузите ключ из эскроу и вооружите лок (POST /devices/{id}/lock/arm).\nДетали: %s",
+				hostname, req.Details)
+			go g.bot.NotifyITAdmins(context.Background(), text)
+		}
+		g.logger.Warn("filevault lock NOT ARMED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
+		return &pb.ReportLockStatusResponse{Received: true}, nil
+
+	case pb.LockState_LOCK_STATE_FILEVAULT_SECRET_MISMATCH:
+		// Секрет доставлен, но НЕ совпал с заэскроенным на ЭТОМ устройстве (сверка по
+		// локальному дайджесту агента, ADR-F23). Машина не тронута — сверка стоит ДО
+		// первой мутации. desired НЕ трогаем.
+		//
+		// В отличие от NOT_ARMED это НЕ шаг процесса, а расхождение: вооружили не тем
+		// секретом либо эскроу разъехалось с тем, что реально лежит на диске. Поэтому
+		// заводим строку в alerts — событие должно быть видно в панели ИБ и требовать
+		// подтверждения, а не только мигнуть в телеге.
+		// Та же durable-защита, что у NOT_ARMED, и по той же причине: SECRET_MISMATCH —
+		// тоже pre-mutation ABORT, а агентский гард (Chain.partialReportedFor) глушит
+		// ВЕСЬ класс таких отчётов и теряется при рестарте агента.
+		applied, err := g.db.SetDeviceLockActualStateNoDowngrade(ctx, deviceID, "filevault_secret_mismatch")
+		if err != nil {
+			g.logger.Error("update lock actual state (secret_mismatch)", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "update lock actual state: %v", err)
+		}
+		if err := g.db.WriteAuditLog(ctx, "", "agent", "filevault_secret_mismatch", "device", deviceID,
+			map[string]any{"details": req.Details, "occurred_at": req.OccurredAt,
+				"request_id": req.RequestId, "actual_state_applied": applied}); err != nil {
+			g.logger.Error("audit filevault_secret_mismatch", "device_id", deviceID, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "audit: %v", err)
+		}
+		if !applied {
+			g.logger.Warn("filevault SECRET_MISMATCH подавлен: по устройству уже зафиксирован начавшийся деструктив",
+				"device_id", deviceID, "request_id", req.RequestId)
+			return &pb.ReportLockStatusResponse{Received: true}, nil
+		}
+		// Дедуп внутри CreateAlert (непринятый такой же уже висит) не даёт часовым
+		// повторам плодить строки. Ошибку не роняем наверх: аудит выше уже устойчив,
+		// а ретрай агента прислал бы всё заново и без строки алерта.
+		if created, err := g.db.CreateAlert(ctx, deviceID, "filevault_secret_mismatch", req.Details, ""); err != nil {
+			g.logger.Error("create alert filevault_secret_mismatch", "device_id", deviceID, "err", err)
+		} else if created && g.bot != nil {
+			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
+			text := notifier.HTMLf("🛑 <b>FileVault-лок: секрет не тот</b>\nУстройство: <code>%s</code>\nМашина НЕ тронута — расхождение поймано ДО деструктива.\nВооружили не тем секретом либо эскроу разъехалось.\nДействие: выгрузите АКТУАЛЬНУЮ строку эскроу и вооружите заново.\nДетали: %s",
+				hostname, req.Details)
+			go g.bot.NotifyITAdmins(context.Background(), text)
+		}
+		g.logger.Warn("filevault SECRET MISMATCH reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
+		return &pb.ReportLockStatusResponse{Received: true}, nil
 	}
 
-	// Терминальные состояния маппим ЯВНО. default (любой будущий/битый enum, напр.
-	// ещё не занятый 6) — accept-and-drop как UNSPECIFIED: НЕ трогаем desired,
-	// иначе неизвестный отчёт стёр бы hash/reason и реконсайл самоотменил бы лок.
+	// Терминальные состояния маппим ЯВНО. default (любой будущий/битый enum; 6 и 7
+	// заняты вооружением и разобраны выше) — accept-and-drop как UNSPECIFIED: НЕ
+	// трогаем desired, иначе неизвестный отчёт стёр бы hash/reason и реконсайл
+	// самоотменил бы лок.
 	var lockStatus string
 	switch req.State {
 	case pb.LockState_LOCK_STATE_LOCKED:
