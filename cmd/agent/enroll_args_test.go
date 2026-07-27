@@ -31,7 +31,7 @@ import (
 // каталогу бинаря: именно это чинит «служба не находит certs/agent.crt при
 // старте из чужого рабочего каталога».
 func TestAbsCertPath(t *testing.T) {
-	dir := filepath.FromSlash("/opt/mdm")
+	dir := filepath.Join(os.TempDir(), "opt-mdm")
 	abs := filepath.Join(dir, "agent.crt") // уже абсолютный относительно dir
 
 	cases := []struct {
@@ -81,9 +81,9 @@ func TestEnrollServiceArgs_File(t *testing.T) {
 		ServerAddr: "203.0.113.5:50051",
 		ServerName: "routineops-server",
 		CertSource: "file",
-		CertFile:   filepath.FromSlash("/opt/mdm/agent.crt"),
-		KeyFile:    filepath.FromSlash("/opt/mdm/agent.key"),
-		CAFile:     filepath.FromSlash("/opt/mdm/ca.crt"),
+		CertFile:   filepath.Join(os.TempDir(), "opt-mdm", "agent.crt"),
+		KeyFile:    filepath.Join(os.TempDir(), "opt-mdm", "agent.key"),
+		CAFile:     filepath.Join(os.TempDir(), "opt-mdm", "ca.crt"),
 	}
 	args := enrollServiceArgs(cfg, "dev-123")
 
@@ -114,7 +114,7 @@ func TestEnrollServiceArgs_Keystore(t *testing.T) {
 		ServerAddr: "203.0.113.5:50051",
 		ServerName: "routineops-server",
 		CertSource: keystore.SourceKeystore,
-		CAFile:     filepath.FromSlash("/opt/mdm/ca.crt"),
+		CAFile:     filepath.Join(os.TempDir(), "opt-mdm", "ca.crt"),
 	}
 	got := flagPairs(t, enrollServiceArgs(cfg, "dev-123"))
 	if got["-cert-source"] != "keystore" {
@@ -172,7 +172,7 @@ func TestNormalizeEnrollURL(t *testing.T) {
 // TestAppendAbsFlag: только абсолютные пути попадают в аргументы службы; пустые и
 // относительные (дефолты Windows/MSI) — отбрасываются, поведение установщика прежнее.
 func TestAppendAbsFlag(t *testing.T) {
-	abs := filepath.FromSlash("/var/lib/RoutineOps-agent/outbox")
+	abs := filepath.Join(os.TempDir(), "var-lib-routineops", "outbox")
 	got := appendAbsFlag(nil, "-outbox-dir", abs)
 	if len(got) != 2 || got[0] != "-outbox-dir" || got[1] != abs {
 		t.Fatalf("абсолютный путь не добавлен: %v", got)
@@ -189,7 +189,7 @@ func TestAppendAbsFlag(t *testing.T) {
 // cfg) служба получает -outbox-dir/-task-state/-script-dedup/-forbidden-list/
 // -lock-state — иначе run падал бы, пытаясь писать в read-only рабочий каталог (/).
 func TestEnrollServiceArgs_StatePaths(t *testing.T) {
-	data := filepath.FromSlash("/var/lib/RoutineOps-agent")
+	data := filepath.Join(os.TempDir(), "var-lib-routineops")
 	cfg := &config.Config{
 		ServerAddr:        "203.0.113.5:50051",
 		ServerName:        "routineops-server",
@@ -225,9 +225,9 @@ func TestEnrollServiceArgs_StatePaths(t *testing.T) {
 func TestEnrollServiceArgs_UpdateURL(t *testing.T) {
 	cfg := &config.Config{
 		ServerAddr: "203.0.113.5:50051", ServerName: "routineops-server", CertSource: "file",
-		CertFile:  filepath.FromSlash("/opt/mdm/agent.crt"),
-		KeyFile:   filepath.FromSlash("/opt/mdm/agent.key"),
-		CAFile:    filepath.FromSlash("/opt/mdm/ca.crt"),
+		CertFile:  filepath.Join(os.TempDir(), "opt-mdm", "agent.crt"),
+		KeyFile:   filepath.Join(os.TempDir(), "opt-mdm", "agent.key"),
+		CAFile:    filepath.Join(os.TempDir(), "opt-mdm", "ca.crt"),
 		EnrollURL: "http://routineops.example:8081/api/v1/enroll",
 	}
 	if got := flagPairs(t, enrollServiceArgs(cfg, "dev-123"))["-update-url"]; got != "http://routineops.example:8081/api/v1/agent/version" {
@@ -248,9 +248,9 @@ func TestEnrollServiceArgs_UpdateURL(t *testing.T) {
 func TestEnrollServiceArgsParse(t *testing.T) {
 	cfg := &config.Config{
 		ServerAddr: "203.0.113.5:50051", ServerName: "routineops-server", CertSource: "file",
-		CertFile:  filepath.FromSlash("/opt/mdm/agent.crt"),
-		KeyFile:   filepath.FromSlash("/opt/mdm/agent.key"),
-		CAFile:    filepath.FromSlash("/opt/mdm/ca.crt"),
+		CertFile:  filepath.Join(os.TempDir(), "opt-mdm", "agent.crt"),
+		KeyFile:   filepath.Join(os.TempDir(), "opt-mdm", "agent.key"),
+		CAFile:    filepath.Join(os.TempDir(), "opt-mdm", "ca.crt"),
 		EnrollURL: "http://routineops.example:8081/api/v1/enroll",
 	}
 	args := enrollServiceArgs(cfg, "dev-123")
@@ -274,9 +274,9 @@ func TestEnrollServiceArgs_NoStatePathsWhenRelative(t *testing.T) {
 		ServerAddr:        "203.0.113.5:50051",
 		ServerName:        "routineops-server",
 		CertSource:        "file",
-		CertFile:          filepath.FromSlash("/opt/mdm/agent.crt"),
-		KeyFile:           filepath.FromSlash("/opt/mdm/agent.key"),
-		CAFile:            filepath.FromSlash("/opt/mdm/ca.crt"),
+		CertFile:          filepath.Join(os.TempDir(), "opt-mdm", "agent.crt"),
+		KeyFile:           filepath.Join(os.TempDir(), "opt-mdm", "agent.key"),
+		CAFile:            filepath.Join(os.TempDir(), "opt-mdm", "ca.crt"),
 		OutboxDir:         "agent_outbox",
 		TaskStateFile:     "agent_tasks.seen",
 		ScriptDedupFile:   "agent_scripts.seen",

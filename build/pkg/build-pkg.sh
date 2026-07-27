@@ -256,9 +256,19 @@ fi
 # бинарям: GNU grep пишет «binary file matches» в stderr, который там гасится
 # в /dev/null. Значит проверяем здесь, у источника. -trimpath обязан вычистить
 # и /home/<user>/go/pkg/mod/..., и путь рабочей копии.
-if LC_ALL=C grep -aqE '/home/[a-z]|/Users/[a-z]' "$BIN_SRC"; then
+#
+# ⚠️ Ищем по СЫРЫМ байтам, а там Go-строки лежат встык, без разделителей. Прежний
+# шаблон '/Users/[a-z]' ловил на этом легитимную константу userHomePrefix =
+# "/Users/" (internal/agent/collector/collector_darwin.go): следом в таблице
+# строк оказывалось произвольное слово, и «путь сборки» находился на заведомо
+# чистом бинаре. Хуже, что срабатывание зависело от того, какая строка легла
+# следующей, — то есть гейт одинаково мог и падать зря, и пропустить настоящую
+# утечку. Требуем ВТОРОЙ разделитель: путь сборки это всегда /Users/<юзер>/…
+# или /home/<юзер>/go/pkg/mod/…, а склейка констант следующего '/' не даёт.
+BUILD_PATH_RE='(/home|/Users)/[A-Za-z0-9._-]{1,32}/'
+if LC_ALL=C grep -aqE "$BUILD_PATH_RE" "$BIN_SRC"; then
     echo "ОШИБКА: в бинаре остались абсолютные пути сборки — собран без -trimpath." >&2
-    LC_ALL=C grep -aoE '(/home|/Users)/[^ ]{0,40}' "$BIN_SRC" | sort -u | head -3 >&2
+    LC_ALL=C grep -aoE "$BUILD_PATH_RE[^ ]{0,40}" "$BIN_SRC" | sort -u | head -3 >&2
     exit 1
 fi
 

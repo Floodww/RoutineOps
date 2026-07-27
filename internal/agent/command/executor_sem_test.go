@@ -21,7 +21,7 @@ func TestHandle_ScriptNotSeenIfCancelledWaitingOnSemaphore(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.handle(&pb.Task{TaskId: "t-script", ScriptContent: "echo hi", Platform: "linux"})
+		e.handle(&pb.Task{TaskId: "t-script", ScriptContent: "echo hi", Platform: testPlatform()})
 		close(done)
 	}()
 

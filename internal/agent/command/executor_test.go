@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -135,7 +136,7 @@ func TestSubmit_NotAccepting_Rejected(t *testing.T) {
 	fc := &fakeClient{}
 	e, connectCalls := newTestExecutor(t, fc)
 	e.Shutdown() // accepting=false
-	e.Submit(&pb.Task{TaskId: "t-after-shutdown", Platform: "macos", ScriptContent: "echo hi"})
+	e.Submit(&pb.Task{TaskId: "t-after-shutdown", Platform: testPlatform(), ScriptContent: "echo hi"})
 	if *connectCalls != 0 {
 		t.Errorf("задача принята после Shutdown (connect вызван %d раз)", *connectCalls)
 	}
@@ -146,7 +147,7 @@ func TestHandle_NewTask_AcksAndReportsSuccess(t *testing.T) {
 	fc := &fakeClient{}
 	e, _ := newTestExecutor(t, fc)
 
-	e.Submit(&pb.Task{TaskId: "t-ok", Platform: "macos", ScriptContent: "echo hi"})
+	e.Submit(&pb.Task{TaskId: "t-ok", Platform: testPlatform(), ScriptContent: "echo hi"})
 	waitFor(t, "результат задачи", func() bool { return len(fc.resultsCopy()) == 1 })
 	e.Shutdown()
 
@@ -167,7 +168,7 @@ func TestHandle_ScriptError_ReportsError(t *testing.T) {
 	fc := &fakeClient{}
 	e, _ := newTestExecutor(t, fc)
 
-	e.Submit(&pb.Task{TaskId: "t-fail", Platform: "macos", ScriptContent: "exit 3"})
+	e.Submit(&pb.Task{TaskId: "t-fail", Platform: testPlatform(), ScriptContent: "exit 3"})
 	waitFor(t, "результат задачи", func() bool { return len(fc.resultsCopy()) == 1 })
 	e.Shutdown()
 
@@ -189,7 +190,7 @@ func TestHandle_DuplicateTask_AcksButRunsOnce(t *testing.T) {
 	fc := &fakeClient{}
 	e, _ := newTestExecutor(t, fc)
 
-	task := &pb.Task{TaskId: "t-dup", Platform: "macos", ScriptContent: "echo hi"}
+	task := &pb.Task{TaskId: "t-dup", Platform: testPlatform(), ScriptContent: "echo hi"}
 	e.Submit(task)
 	waitFor(t, "результат первой доставки", func() bool { return len(fc.resultsCopy()) == 1 })
 	// Ждать одного результата мало: он пишется ПОСРЕДИ handle, а inflight
@@ -221,7 +222,7 @@ func TestSubmit_DuplicateInflight_Dropped(t *testing.T) {
 		e.sem <- struct{}{} // забить все слоты: первая копия повиснет на семафоре
 	}
 
-	task := &pb.Task{TaskId: "t-inflight", Platform: "macos", ScriptContent: "echo hi"}
+	task := &pb.Task{TaskId: "t-inflight", Platform: testPlatform(), ScriptContent: "echo hi"}
 	e.Submit(task)
 	waitFor(t, "первая копия в inflight", func() bool {
 		e.mu.Lock()
@@ -262,7 +263,7 @@ func TestHandle_SemaphoreSlotsRecycled(t *testing.T) {
 
 	n := 2*maxConcurrentTasks + 1
 	for i := 0; i < n; i++ {
-		e.Submit(&pb.Task{TaskId: fmt.Sprintf("t-wave-%d", i), Platform: "macos", ScriptContent: "echo hi"})
+		e.Submit(&pb.Task{TaskId: fmt.Sprintf("t-wave-%d", i), Platform: testPlatform(), ScriptContent: "echo hi"})
 	}
 	waitFor(t, "результаты всей волны", func() bool { return len(fc.resultsCopy()) == n })
 	waitFor(t, "возврат всех слотов", func() bool { return len(e.sem) == 0 })
@@ -280,7 +281,7 @@ func TestShutdown_QueuedTaskBailsWithoutStart(t *testing.T) {
 		e.sem <- struct{}{} // все слоты заняты «долгими скриптами»
 	}
 
-	e.Submit(&pb.Task{TaskId: "t-queued", Platform: "macos", ScriptContent: "echo hi"})
+	e.Submit(&pb.Task{TaskId: "t-queued", Platform: testPlatform(), ScriptContent: "echo hi"})
 	waitFor(t, "задача в inflight", func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
@@ -325,7 +326,7 @@ func TestConcurrentSubmitDuringShutdown(t *testing.T) {
 			defer wg.Done()
 			e.Submit(&pb.Task{
 				TaskId:        fmt.Sprintf("t-%d", i),
-				Platform:      "macos",
+				Platform:      testPlatform(),
 				ScriptContent: "echo hi",
 			})
 		}(i)
@@ -363,7 +364,7 @@ func TestHandle_ResultEnqueuedToOutbox(t *testing.T) {
 	e := NewExecutor(nil, quietLog(), "", enq)
 	e.connect = func() (pb.AgentServiceClient, func(), error) { return fc, func() {}, nil }
 
-	e.Submit(&pb.Task{TaskId: "t-outbox", Platform: "macos", ScriptContent: "echo durable-ok"})
+	e.Submit(&pb.Task{TaskId: "t-outbox", Platform: testPlatform(), ScriptContent: "echo durable-ok"})
 	waitFor(t, "запись в outbox", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -400,7 +401,7 @@ func TestHandle_EnqueueError_FallsBackToDirectReport(t *testing.T) {
 	e := NewExecutor(nil, quietLog(), "", enq)
 	e.connect = func() (pb.AgentServiceClient, func(), error) { return fc, func() {}, nil }
 
-	e.Submit(&pb.Task{TaskId: "t-fallback", Platform: "macos", ScriptContent: "echo hi"})
+	e.Submit(&pb.Task{TaskId: "t-fallback", Platform: testPlatform(), ScriptContent: "echo hi"})
 	waitFor(t, "прямой отчёт-фолбэк", func() bool { return len(fc.resultsCopy()) == 1 })
 	e.Shutdown()
 
@@ -483,7 +484,7 @@ func TestHandle_AckAndReportErrors_AreLogged(t *testing.T) {
 	fc := &fakeClient{ackErr: errors.New("ack rpc failed"), repErr: errors.New("report rpc failed")}
 	e, _ := newTestExecutor(t, fc)
 
-	e.Submit(&pb.Task{TaskId: "t-rpcerr", Platform: "macos", ScriptContent: "echo hi"})
+	e.Submit(&pb.Task{TaskId: "t-rpcerr", Platform: testPlatform(), ScriptContent: "echo hi"})
 	waitFor(t, "ack и report несмотря на ошибки RPC", func() bool {
 		return len(fc.ackedIDs()) == 1 && len(fc.resultsCopy()) == 1
 	})
@@ -511,7 +512,7 @@ func TestHandle_ConnectError_NoAckNoSeen(t *testing.T) {
 		return fc, func() {}, nil
 	}
 
-	task := &pb.Task{TaskId: "t-retry", Platform: "macos", ScriptContent: "echo hi"}
+	task := &pb.Task{TaskId: "t-retry", Platform: testPlatform(), ScriptContent: "echo hi"}
 	e.handle(task) // connect падает
 	if len(fc.ackedIDs()) != 0 {
 		t.Fatal("ack отправлен несмотря на ошибку соединения")
@@ -581,4 +582,16 @@ func TestSubmit_DuplicateInflightSeen_Reacks(t *testing.T) {
 	if got := gl.lockCount(); got != 1 {
 		t.Errorf("после завершения Lock вызван %d раз, ожидали 1", got)
 	}
+}
+
+// testPlatform — значение Task.platform, при котором агент возьмёт интерпретатор
+// ЭТОЙ ОС (см. interpreterCmd). Захардкоженный "macos" на Windows уводил задачу
+// в bash: его там либо нет, либо это WSL-заглушка, инициализация которой
+// временами дольше пятисекундного дедлайна waitFor — тест начинал плавать
+// (в одном прогоне зелёный, в следующем красный на том же бинаре).
+func testPlatform() string {
+	if runtime.GOOS == "windows" {
+		return "windows"
+	}
+	return "macos"
 }

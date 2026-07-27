@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -14,6 +16,34 @@ import (
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
+
+// HTMLf собирает текст сообщения для send() (parse_mode=HTML), экранируя КАЖДЫЙ
+// аргумент. Разметка (<b>, <code>) живёт только в формат-строке; подставляемые
+// данные — hostname, details, reason, email — приходят от агента или от
+// пользователя и разметку нести не должны.
+//
+// Это не косметика: неэкранированный '<' в hostname или details ломает разбор на
+// стороне Bot API, сообщение не доставляется ВООБЩЕ (400 Bad Request). То есть без
+// экранирования тот, про кого алерт, глушил бы алерт про себя же одним символом в
+// подконтрольном ему поле — ровно та же дыра, что закрыта на агенте оверсайзом
+// Details (см. ALERT_TYPE_LOCK_TAMPER в proto/agent.proto).
+//
+// Числа/bool/время HTML-метасимволов не несут и проходят как есть — иначе
+// экранирование ломало бы глаголы формата вроде %d.
+func HTMLf(format string, args ...any) string {
+	esc := make([]any, len(args))
+	for i, a := range args {
+		switch v := a.(type) {
+		case string:
+			esc[i] = html.EscapeString(v)
+		case error:
+			esc[i] = html.EscapeString(v.Error())
+		default:
+			esc[i] = a
+		}
+	}
+	return fmt.Sprintf(format, esc...)
+}
 
 // telegramAPIBase — базовый URL Bot API. Поле, а не константа, чтобы тесты
 // могли подменить его на httptest-сервер.
@@ -142,8 +172,26 @@ func (b *Bot) send(chatID int64, text string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	// Bot API отвечает 200 только на реально отправленное сообщение. Без этой
+	// проверки отправка считалась успешной при ЛЮБОМ отказе телеги: 400 на битой
+	// разметке, 403 от заблокировавшего бота админа, 429 rate limit — алерт не
+	// доставлен, а в логах тишина. Тело читаем ограниченно: там описание причины
+	// (позиция в разметке, статус чата), оно нужно, чтобы отличить их друг от друга.
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return fmt.Errorf("telegram sendMessage: http %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
+	}
 	return nil
+}
+
+// reply — best-effort ответ в чат привязки. Отказ Bot API логируем (флоу привязки
+// им не ломается), но НЕ проглатываем: до проверки статуса выше эти пять вызовов
+// молчали при любой ошибке телеги.
+func (b *Bot) reply(chatID int64, text string) {
+	if err := b.send(chatID, text); err != nil {
+		b.logger.Error("telegram: reply failed", "chat_id", chatID, "err", b.redact(err))
+	}
 }
 
 // NotifyITAdmins sends a message to all IT admins with a linked Telegram account.
@@ -238,7 +286,7 @@ func (b *Bot) StartPolling(ctx context.Context) {
 				token := strings.TrimPrefix(text, "/start ")
 				b.handleStart(ctx, chatID, strings.TrimSpace(token))
 			case text == "/start":
-				b.send(chatID, "Привет! Отправьте <code>/start TOKEN</code>, где TOKEN — ваш токен привязки из панели RoutineOps (раздел Профиль).")
+				b.reply(chatID, "Привет! Отправьте <code>/start TOKEN</code>, где TOKEN — ваш токен привязки из панели RoutineOps (раздел Профиль).")
 			}
 		}
 	}
@@ -248,20 +296,20 @@ func (b *Bot) handleStart(ctx context.Context, chatID int64, token string) {
 	user, err := b.db.GetUserByLinkToken(ctx, token)
 	if err != nil {
 		b.logger.Error("telegram: lookup link token", "err", err)
-		b.send(chatID, "Ошибка сервера. Попробуйте позже.")
+		b.reply(chatID, "Ошибка сервера. Попробуйте позже.")
 		return
 	}
 	if user == nil {
-		b.send(chatID, "❌ Токен не найден или уже использован. Сгенерируйте новый в панели RoutineOps.")
+		b.reply(chatID, "❌ Токен не найден или уже использован. Сгенерируйте новый в панели RoutineOps.")
 		return
 	}
 	if err := b.db.SetUserTelegramChatID(ctx, user.ID, strconv.FormatInt(chatID, 10)); err != nil {
 		b.logger.Error("telegram: set chat_id", "err", err)
-		b.send(chatID, "Ошибка сохранения. Попробуйте ещё раз.")
+		b.reply(chatID, "Ошибка сохранения. Попробуйте ещё раз.")
 		return
 	}
 	// Invalidate the token so it can't be reused
 	_ = b.db.SetUserLinkToken(ctx, user.ID, "")
-	b.send(chatID, fmt.Sprintf("✅ Аккаунт <b>%s</b> успешно подключён.\nТеперь вы будете получать уведомления RoutineOps.", user.Email))
+	b.reply(chatID, HTMLf("✅ Аккаунт <b>%s</b> успешно подключён.\nТеперь вы будете получать уведомления RoutineOps.", user.Email))
 	b.logger.Info("telegram: account linked", "user_id", user.ID, "chat_id", chatID)
 }

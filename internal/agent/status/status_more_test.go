@@ -19,8 +19,8 @@ func TestDefaultPath(t *testing.T) {
 		t.Fatalf("ожидали .json, got %q", p)
 	}
 	if runtime.GOOS == "windows" {
-		if !strings.HasSuffix(p, filepath.Join("MDM", "status.json")) {
-			t.Fatalf("windows: ожидали ...MDM\\status.json, got %q", p)
+		if !strings.HasSuffix(p, filepath.Join("RoutineOps", "status.json")) {
+			t.Fatalf("windows: ожидали ...RoutineOps\\status.json, got %q", p)
 		}
 	} else {
 		if filepath.Base(p) != "RoutineOps-agent-status.json" {

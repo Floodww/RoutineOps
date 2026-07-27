@@ -199,6 +199,27 @@ const (
 	AlertType_ALERT_TYPE_FORBIDDEN_SOFTWARE           AlertType = 1
 	AlertType_ALERT_TYPE_UNAUTHORIZED_INSTALL         AlertType = 2
 	AlertType_ALERT_TYPE_UNAUTHORIZED_SETTINGS_CHANGE AlertType = 3
+	// Попытка снять блокировку в обход демона: непривилегированный пользователь
+	// записал «разблокировано» в user-writable файл состояния при РАБОТАЮЩЕЙ
+	// службе (находка 1.3). Событие сообщает о ПОПЫТКЕ, а не о результате: агент
+	// пере-утверждает лок и продолжает работать. Подделка при ОСТАНОВЛЕННОЙ
+	// службе этого события не даёт — обнаруживать её в тот момент некому; она
+	// всплывает при следующем старте агента как обычное пере-запирание.
+	//
+	// Details собирается агентом ТОЛЬКО из фиксированного словаря + число
+	// (см. lock.TamperKind). Класть туда содержимое подделанного файла или
+	// request_id НЕЛЬЗЯ: файл пишет ровно тот, против кого событие (он мог бы
+	// писать текст алерта о себе, а оверсайзом — глушить его через
+	// MaxRecvMsgSize), а request_id на pull-пути равен bcrypt-хешу живого пароля
+	// разблокировки. Устройство и активный лок сервер знает по mTLS-серту и
+	// devices.lock_request_id.
+	//
+	// Дедуп ОБЯЗАТЕЛЕН на стороне агента: сторож тикает раз в секунду, а
+	// security — protected-класс outbox'а, где свежая запись вытесняет
+	// старейшую protected (internal/agent/outbox: enforceLimit). Событие на
+	// каждый тик выдавило бы из очереди loss-sensitive отчёты — см.
+	// lock.Manager.SetTamperReporter.
+	AlertType_ALERT_TYPE_LOCK_TAMPER AlertType = 4
 )
 
 // Enum value maps for AlertType.
@@ -208,12 +229,14 @@ var (
 		1: "ALERT_TYPE_FORBIDDEN_SOFTWARE",
 		2: "ALERT_TYPE_UNAUTHORIZED_INSTALL",
 		3: "ALERT_TYPE_UNAUTHORIZED_SETTINGS_CHANGE",
+		4: "ALERT_TYPE_LOCK_TAMPER",
 	}
 	AlertType_value = map[string]int32{
 		"ALERT_TYPE_UNSPECIFIED":                  0,
 		"ALERT_TYPE_FORBIDDEN_SOFTWARE":           1,
 		"ALERT_TYPE_UNAUTHORIZED_INSTALL":         2,
 		"ALERT_TYPE_UNAUTHORIZED_SETTINGS_CHANGE": 3,
+		"ALERT_TYPE_LOCK_TAMPER":                  4,
 	}
 )
 
@@ -518,6 +541,12 @@ const (
 	LockState_LOCK_STATE_FILEVAULT_REVOKED       LockState = 3 // filevault: токен снят + PRK заэскроен; РЕБУТ НУЖЕН; ещё НЕ эффективен
 	LockState_LOCK_STATE_FILEVAULT_REVOKE_FAILED LockState = 4 // filevault: revoke НЕ завершён (partial/ABORT/misbuild) — деструктив мог частично примениться; требует ручного разбора IT; desired НЕ трогать
 	LockState_LOCK_STATE_LOCK_FAILED             LockState = 5 // overlay: лок НЕ применился (оверлей не поднялся / состояние не записалось); агент откатился и ретраит, машина ОСТАЁТСЯ РАБОЧЕЙ; desired НЕ трогать
+	// 6 и 7 — PRE-MUTATION отказы FileVault-вооружения: НИЧЕГО не тронуто, машина
+	// рабочая, деструктив не начинался. Переиспользовать REVOKE_FAILED=4 нельзя — он
+	// значит «деструктив мог частично примениться» и поднимал бы IT по нетронутому
+	// устройству каждый тик реконсиляции (~30с).
+	LockState_LOCK_STATE_FILEVAULT_NOT_ARMED       LockState = 6 // вооружения нет: не вооружали / TTL истёк / сервер рестартовал (vault в RAM) / инстанс не тот. Действие: вооружить заново. desired НЕ трогать
+	LockState_LOCK_STATE_FILEVAULT_SECRET_MISMATCH LockState = 7 // секрет доставлен, но НЕ совпал с заэскроенным НА ЭТОМ устройстве (сверка по ЛОКАЛЬНОМУ дайджесту, ADR-F23). АЛЕРТ: вооружили не тем или эскроу разъехалось. Действие: reveal актуальной строки эскроу. desired НЕ трогать
 )
 
 // Enum value maps for LockState.
@@ -529,14 +558,18 @@ var (
 		3: "LOCK_STATE_FILEVAULT_REVOKED",
 		4: "LOCK_STATE_FILEVAULT_REVOKE_FAILED",
 		5: "LOCK_STATE_LOCK_FAILED",
+		6: "LOCK_STATE_FILEVAULT_NOT_ARMED",
+		7: "LOCK_STATE_FILEVAULT_SECRET_MISMATCH",
 	}
 	LockState_value = map[string]int32{
-		"LOCK_STATE_UNSPECIFIED":             0,
-		"LOCK_STATE_LOCKED":                  1,
-		"LOCK_STATE_UNLOCKED":                2,
-		"LOCK_STATE_FILEVAULT_REVOKED":       3,
-		"LOCK_STATE_FILEVAULT_REVOKE_FAILED": 4,
-		"LOCK_STATE_LOCK_FAILED":             5,
+		"LOCK_STATE_UNSPECIFIED":               0,
+		"LOCK_STATE_LOCKED":                    1,
+		"LOCK_STATE_UNLOCKED":                  2,
+		"LOCK_STATE_FILEVAULT_REVOKED":         3,
+		"LOCK_STATE_FILEVAULT_REVOKE_FAILED":   4,
+		"LOCK_STATE_LOCK_FAILED":               5,
+		"LOCK_STATE_FILEVAULT_NOT_ARMED":       6,
+		"LOCK_STATE_FILEVAULT_SECRET_MISMATCH": 7,
 	}
 )
 
@@ -617,6 +650,71 @@ func (x LockMode) Number() protoreflect.EnumNumber {
 // Deprecated: Use LockMode.Descriptor instead.
 func (LockMode) EnumDescriptor() ([]byte, []int) {
 	return file_proto_agent_proto_rawDescGZIP(), []int{10}
+}
+
+// Почему статус, а не голое «armed/не armed»: сервер РАЗЛИЧАЕТ две причины отказа
+// (escrow.ErrNotArmed / escrow.ErrRequestMismatch), и различие ценно для разбора.
+// Но в LockState они схлопываются ОБЕ в NOT_ARMED, и это не небрежность:
+//   - действие оператора одинаково — вооружить живой лок;
+//   - REQUEST_MISMATCH самозаживает за один тик. Reconciler.tick перечитывает
+//     FetchLockStatus КАЖДЫЙ раз и несёт в ревок свежий password_hash
+//     (reconcile.go), поэтому устаревший request_id не может залипнуть;
+//   - отдельное состояние в панели требовало бы от IT реакции на гонку, которая
+//     рассосётся сама, — ровно та ошибка, за которую забракован REVOKE_FAILED
+//     в роли «не вооружено».
+//
+// Различие агент кладёт в details ReportLockStatus — для чтения человеком, не как
+// ось состояния.
+type ArmStatus int32
+
+const (
+	ArmStatus_ARM_STATUS_UNSPECIFIED      ArmStatus = 0 // FAIL-CLOSED: старый/незнакомый сервер => трактовать как NOT_ARMED, НИЧЕГО не мутировать
+	ArmStatus_ARM_STATUS_ARMED            ArmStatus = 1 // секреты в ответе
+	ArmStatus_ARM_STATUS_NOT_ARMED        ArmStatus = 2 // вооружения нет: не вооружали / TTL истёк / рестарт сервера (vault в RAM)
+	ArmStatus_ARM_STATUS_REQUEST_MISMATCH ArmStatus = 3 // вооружение есть, но под ДРУГОЙ lock-инстанс — гонка, проходит на следующем тике
+)
+
+// Enum value maps for ArmStatus.
+var (
+	ArmStatus_name = map[int32]string{
+		0: "ARM_STATUS_UNSPECIFIED",
+		1: "ARM_STATUS_ARMED",
+		2: "ARM_STATUS_NOT_ARMED",
+		3: "ARM_STATUS_REQUEST_MISMATCH",
+	}
+	ArmStatus_value = map[string]int32{
+		"ARM_STATUS_UNSPECIFIED":      0,
+		"ARM_STATUS_ARMED":            1,
+		"ARM_STATUS_NOT_ARMED":        2,
+		"ARM_STATUS_REQUEST_MISMATCH": 3,
+	}
+)
+
+func (x ArmStatus) Enum() *ArmStatus {
+	p := new(ArmStatus)
+	*p = x
+	return p
+}
+
+func (x ArmStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ArmStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_proto_enumTypes[11].Descriptor()
+}
+
+func (ArmStatus) Type() protoreflect.EnumType {
+	return &file_proto_agent_proto_enumTypes[11]
+}
+
+func (x ArmStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ArmStatus.Descriptor instead.
+func (ArmStatus) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_proto_rawDescGZIP(), []int{11}
 }
 
 type HeartbeatRequest struct {
@@ -2968,6 +3066,125 @@ func (x *FetchLockStatusResponse) GetFilevaultTargetUsers() []string {
 	return nil
 }
 
+// Агент → Сервер: забрать секреты вооружения для КОНКРЕТНОГО лок-инстанса.
+// device_id в теле НЕТ — устройство авторизуется mTLS-сертом (CN, ADR-1).
+type FetchLockSecretsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// request_id ТОГО ЖЕ лок-инстанса, что агент уже держит (bcrypt-хеш пароля
+	// разблокировки — он же идентичность лока, см. FetchLockStatusResponse).
+	//
+	// Сервер обязан отдавать секрет ТОЛЬКО когда у ЭТОГО устройства есть АКТИВНЫЙ
+	// desired-лок с lock_mode=FILEVAULT И request_id совпадает. Одного mTLS мало:
+	// без сверки инстанса протухший повторный запрос слил бы СВЕЖЕЕ вооружение.
+	RequestId     string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchLockSecretsRequest) Reset() {
+	*x = FetchLockSecretsRequest{}
+	mi := &file_proto_agent_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchLockSecretsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchLockSecretsRequest) ProtoMessage() {}
+
+func (x *FetchLockSecretsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchLockSecretsRequest.ProtoReflect.Descriptor instead.
+func (*FetchLockSecretsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_agent_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *FetchLockSecretsRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+// Сервер → Агент. Плейнтекст живёт ТОЛЬКО в памяти агента — на диск не пишется,
+// в argv не попадает (системные утилиты вызываются в prompt-режиме, секрет уходит
+// им через stdin), в лог не идёт.
+type FetchLockSecretsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Единственный гейт «есть ли в ответе секреты». Отдельного bool armed НЕТ
+	// намеренно: два источника истины про одно и то же рано или поздно разъезжаются.
+	Status ArmStatus `protobuf:"varint,1,opt,name=status,proto3,enum=routineops.ArmStatus" json:"status,omitempty"`
+	// Пусто => провайдер не устанавливается вовсе, и Revoke уходит в ABORT ДО
+	// мутации (существующие гарды RevokeConfig.MDMAdminPassword/PersonalRecoveryKey).
+	MdmadminPassword    string `protobuf:"bytes,2,opt,name=mdmadmin_password,json=mdmadminPassword,proto3" json:"mdmadmin_password,omitempty"`
+	PersonalRecoveryKey string `protobuf:"bytes,3,opt,name=personal_recovery_key,json=personalRecoveryKey,proto3" json:"personal_recovery_key,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *FetchLockSecretsResponse) Reset() {
+	*x = FetchLockSecretsResponse{}
+	mi := &file_proto_agent_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchLockSecretsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchLockSecretsResponse) ProtoMessage() {}
+
+func (x *FetchLockSecretsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchLockSecretsResponse.ProtoReflect.Descriptor instead.
+func (*FetchLockSecretsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_agent_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *FetchLockSecretsResponse) GetStatus() ArmStatus {
+	if x != nil {
+		return x.Status
+	}
+	return ArmStatus_ARM_STATUS_UNSPECIFIED
+}
+
+func (x *FetchLockSecretsResponse) GetMdmadminPassword() string {
+	if x != nil {
+		return x.MdmadminPassword
+	}
+	return ""
+}
+
+func (x *FetchLockSecretsResponse) GetPersonalRecoveryKey() string {
+	if x != nil {
+		return x.PersonalRecoveryKey
+	}
+	return ""
+}
+
 var File_proto_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_proto_rawDesc = "" +
@@ -3159,7 +3376,14 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\rpassword_hash\x18\x02 \x01(\tR\fpasswordHash\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x121\n" +
 	"\tlock_mode\x18\x04 \x01(\x0e2\x14.routineops.LockModeR\blockMode\x124\n" +
-	"\x16filevault_target_users\x18\x05 \x03(\tR\x14filevaultTargetUsers*\x84\x02\n" +
+	"\x16filevault_target_users\x18\x05 \x03(\tR\x14filevaultTargetUsers\"8\n" +
+	"\x17FetchLockSecretsRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\"\xaa\x01\n" +
+	"\x18FetchLockSecretsResponse\x12-\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x15.routineops.ArmStatusR\x06status\x12+\n" +
+	"\x11mdmadmin_password\x18\x02 \x01(\tR\x10mdmadminPassword\x122\n" +
+	"\x15personal_recovery_key\x18\x03 \x01(\tR\x13personalRecoveryKey*\x84\x02\n" +
 	"\x0fUninstallMethod\x12 \n" +
 	"\x1cUNINSTALL_METHOD_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14UNINSTALL_METHOD_MSI\x10\x01\x12\"\n" +
@@ -3178,12 +3402,13 @@ const file_proto_agent_proto_rawDesc = "" +
 	"TaskStatus\x12\x1b\n" +
 	"\x17TASK_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13TASK_STATUS_SUCCESS\x10\x01\x12\x15\n" +
-	"\x11TASK_STATUS_ERROR\x10\x02*\x9c\x01\n" +
+	"\x11TASK_STATUS_ERROR\x10\x02*\xb8\x01\n" +
 	"\tAlertType\x12\x1a\n" +
 	"\x16ALERT_TYPE_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dALERT_TYPE_FORBIDDEN_SOFTWARE\x10\x01\x12#\n" +
 	"\x1fALERT_TYPE_UNAUTHORIZED_INSTALL\x10\x02\x12+\n" +
-	"'ALERT_TYPE_UNAUTHORIZED_SETTINGS_CHANGE\x10\x03*p\n" +
+	"'ALERT_TYPE_UNAUTHORIZED_SETTINGS_CHANGE\x10\x03\x12\x1a\n" +
+	"\x16ALERT_TYPE_LOCK_TAMPER\x10\x04*p\n" +
 	"\x0ePolicyRuleType\x12 \n" +
 	"\x1cPOLICY_RULE_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18POLICY_RULE_TYPE_ALLOWED\x10\x01\x12\x1e\n" +
@@ -3208,18 +3433,26 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x0fRecoveryKeyType\x12!\n" +
 	"\x1dRECOVERY_KEY_TYPE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fRECOVERY_KEY_TYPE_FILEVAULT_PRK\x10\x01\x12*\n" +
-	"&RECOVERY_KEY_TYPE_SECONDARY_CREDENTIAL\x10\x02*\xbd\x01\n" +
+	"&RECOVERY_KEY_TYPE_SECONDARY_CREDENTIAL\x10\x02*\x8b\x02\n" +
 	"\tLockState\x12\x1a\n" +
 	"\x16LOCK_STATE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOCK_STATE_LOCKED\x10\x01\x12\x17\n" +
 	"\x13LOCK_STATE_UNLOCKED\x10\x02\x12 \n" +
 	"\x1cLOCK_STATE_FILEVAULT_REVOKED\x10\x03\x12&\n" +
 	"\"LOCK_STATE_FILEVAULT_REVOKE_FAILED\x10\x04\x12\x1a\n" +
-	"\x16LOCK_STATE_LOCK_FAILED\x10\x05*U\n" +
+	"\x16LOCK_STATE_LOCK_FAILED\x10\x05\x12\"\n" +
+	"\x1eLOCK_STATE_FILEVAULT_NOT_ARMED\x10\x06\x12(\n" +
+	"$LOCK_STATE_FILEVAULT_SECRET_MISMATCH\x10\a*U\n" +
 	"\bLockMode\x12\x19\n" +
 	"\x15LOCK_MODE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOCK_MODE_OVERLAY\x10\x01\x12\x17\n" +
-	"\x13LOCK_MODE_FILEVAULT\x10\x022\xcb\t\n" +
+	"\x13LOCK_MODE_FILEVAULT\x10\x02*x\n" +
+	"\tArmStatus\x12\x1a\n" +
+	"\x16ARM_STATUS_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10ARM_STATUS_ARMED\x10\x01\x12\x18\n" +
+	"\x14ARM_STATUS_NOT_ARMED\x10\x02\x12\x1f\n" +
+	"\x1bARM_STATUS_REQUEST_MISMATCH\x10\x032\xaa\n" +
+	"\n" +
 	"\fAgentService\x12=\n" +
 	"\aConnect\x12\x1c.routineops.HeartbeatRequest\x1a\x10.routineops.Task(\x010\x01\x12S\n" +
 	"\x0fAckTaskReceived\x12\x1b.routineops.TaskReceivedAck\x1a#.routineops.TaskReceivedAckResponse\x12H\n" +
@@ -3234,7 +3467,8 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x12ReportScriptResult\x12\x18.routineops.ScriptResult\x1a\x1b.routineops.ScriptResultAck\x12]\n" +
 	"\x10ReportLockStatus\x12#.routineops.ReportLockStatusRequest\x1a$.routineops.ReportLockStatusResponse\x12Z\n" +
 	"\x0fFetchLockStatus\x12\".routineops.FetchLockStatusRequest\x1a#.routineops.FetchLockStatusResponse\x12`\n" +
-	"\x11EscrowRecoveryKey\x12$.routineops.EscrowRecoveryKeyRequest\x1a%.routineops.EscrowRecoveryKeyResponseB%Z#github.com/Floodww/RoutineOps/protob\x06proto3"
+	"\x11EscrowRecoveryKey\x12$.routineops.EscrowRecoveryKeyRequest\x1a%.routineops.EscrowRecoveryKeyResponse\x12]\n" +
+	"\x10FetchLockSecrets\x12#.routineops.FetchLockSecretsRequest\x1a$.routineops.FetchLockSecretsResponseB%Z#github.com/Floodww/RoutineOps/protob\x06proto3"
 
 var (
 	file_proto_agent_proto_rawDescOnce sync.Once
@@ -3248,8 +3482,8 @@ func file_proto_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_proto_rawDescData
 }
 
-var file_proto_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
-var file_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_proto_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
+var file_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_proto_agent_proto_goTypes = []any{
 	(UninstallMethod)(0),                // 0: routineops.UninstallMethod
 	(TaskPriority)(0),                   // 1: routineops.TaskPriority
@@ -3262,98 +3496,104 @@ var file_proto_agent_proto_goTypes = []any{
 	(RecoveryKeyType)(0),                // 8: routineops.RecoveryKeyType
 	(LockState)(0),                      // 9: routineops.LockState
 	(LockMode)(0),                       // 10: routineops.LockMode
-	(*HeartbeatRequest)(nil),            // 11: routineops.HeartbeatRequest
-	(*DeviceInfo)(nil),                  // 12: routineops.DeviceInfo
-	(*SoftwareItem)(nil),                // 13: routineops.SoftwareItem
-	(*InventoryReport)(nil),             // 14: routineops.InventoryReport
-	(*InventoryAck)(nil),                // 15: routineops.InventoryAck
-	(*Task)(nil),                        // 16: routineops.Task
-	(*DecommissionCommand)(nil),         // 17: routineops.DecommissionCommand
-	(*RebootCommand)(nil),               // 18: routineops.RebootCommand
-	(*LockCommand)(nil),                 // 19: routineops.LockCommand
-	(*TaskResult)(nil),                  // 20: routineops.TaskResult
-	(*TaskResultAck)(nil),               // 21: routineops.TaskResultAck
-	(*TaskReceivedAck)(nil),             // 22: routineops.TaskReceivedAck
-	(*TaskReceivedAckResponse)(nil),     // 23: routineops.TaskReceivedAckResponse
-	(*SecurityEvent)(nil),               // 24: routineops.SecurityEvent
-	(*SecurityEventAck)(nil),            // 25: routineops.SecurityEventAck
-	(*SoftwarePolicyRule)(nil),          // 26: routineops.SoftwarePolicyRule
-	(*FetchPolicyRequest)(nil),          // 27: routineops.FetchPolicyRequest
-	(*FetchPolicyResponse)(nil),         // 28: routineops.FetchPolicyResponse
-	(*RequestAdminAccessRequest)(nil),   // 29: routineops.RequestAdminAccessRequest
-	(*RequestAdminAccessResponse)(nil),  // 30: routineops.RequestAdminAccessResponse
-	(*FetchAdminStatusRequest)(nil),     // 31: routineops.FetchAdminStatusRequest
-	(*FetchAdminStatusResponse)(nil),    // 32: routineops.FetchAdminStatusResponse
-	(*ReportAdminAccessRequest)(nil),    // 33: routineops.ReportAdminAccessRequest
-	(*ReportAdminAccessResponse)(nil),   // 34: routineops.ReportAdminAccessResponse
-	(*ScriptPolicy)(nil),                // 35: routineops.ScriptPolicy
-	(*FetchScriptPoliciesRequest)(nil),  // 36: routineops.FetchScriptPoliciesRequest
-	(*FetchScriptPoliciesResponse)(nil), // 37: routineops.FetchScriptPoliciesResponse
-	(*ScriptResult)(nil),                // 38: routineops.ScriptResult
-	(*ScriptResultAck)(nil),             // 39: routineops.ScriptResultAck
-	(*EscrowRecoveryKeyRequest)(nil),    // 40: routineops.EscrowRecoveryKeyRequest
-	(*EscrowRecoveryKeyResponse)(nil),   // 41: routineops.EscrowRecoveryKeyResponse
-	(*ReportLockStatusRequest)(nil),     // 42: routineops.ReportLockStatusRequest
-	(*ReportLockStatusResponse)(nil),    // 43: routineops.ReportLockStatusResponse
-	(*FetchLockStatusRequest)(nil),      // 44: routineops.FetchLockStatusRequest
-	(*FetchLockStatusResponse)(nil),     // 45: routineops.FetchLockStatusResponse
+	(ArmStatus)(0),                      // 11: routineops.ArmStatus
+	(*HeartbeatRequest)(nil),            // 12: routineops.HeartbeatRequest
+	(*DeviceInfo)(nil),                  // 13: routineops.DeviceInfo
+	(*SoftwareItem)(nil),                // 14: routineops.SoftwareItem
+	(*InventoryReport)(nil),             // 15: routineops.InventoryReport
+	(*InventoryAck)(nil),                // 16: routineops.InventoryAck
+	(*Task)(nil),                        // 17: routineops.Task
+	(*DecommissionCommand)(nil),         // 18: routineops.DecommissionCommand
+	(*RebootCommand)(nil),               // 19: routineops.RebootCommand
+	(*LockCommand)(nil),                 // 20: routineops.LockCommand
+	(*TaskResult)(nil),                  // 21: routineops.TaskResult
+	(*TaskResultAck)(nil),               // 22: routineops.TaskResultAck
+	(*TaskReceivedAck)(nil),             // 23: routineops.TaskReceivedAck
+	(*TaskReceivedAckResponse)(nil),     // 24: routineops.TaskReceivedAckResponse
+	(*SecurityEvent)(nil),               // 25: routineops.SecurityEvent
+	(*SecurityEventAck)(nil),            // 26: routineops.SecurityEventAck
+	(*SoftwarePolicyRule)(nil),          // 27: routineops.SoftwarePolicyRule
+	(*FetchPolicyRequest)(nil),          // 28: routineops.FetchPolicyRequest
+	(*FetchPolicyResponse)(nil),         // 29: routineops.FetchPolicyResponse
+	(*RequestAdminAccessRequest)(nil),   // 30: routineops.RequestAdminAccessRequest
+	(*RequestAdminAccessResponse)(nil),  // 31: routineops.RequestAdminAccessResponse
+	(*FetchAdminStatusRequest)(nil),     // 32: routineops.FetchAdminStatusRequest
+	(*FetchAdminStatusResponse)(nil),    // 33: routineops.FetchAdminStatusResponse
+	(*ReportAdminAccessRequest)(nil),    // 34: routineops.ReportAdminAccessRequest
+	(*ReportAdminAccessResponse)(nil),   // 35: routineops.ReportAdminAccessResponse
+	(*ScriptPolicy)(nil),                // 36: routineops.ScriptPolicy
+	(*FetchScriptPoliciesRequest)(nil),  // 37: routineops.FetchScriptPoliciesRequest
+	(*FetchScriptPoliciesResponse)(nil), // 38: routineops.FetchScriptPoliciesResponse
+	(*ScriptResult)(nil),                // 39: routineops.ScriptResult
+	(*ScriptResultAck)(nil),             // 40: routineops.ScriptResultAck
+	(*EscrowRecoveryKeyRequest)(nil),    // 41: routineops.EscrowRecoveryKeyRequest
+	(*EscrowRecoveryKeyResponse)(nil),   // 42: routineops.EscrowRecoveryKeyResponse
+	(*ReportLockStatusRequest)(nil),     // 43: routineops.ReportLockStatusRequest
+	(*ReportLockStatusResponse)(nil),    // 44: routineops.ReportLockStatusResponse
+	(*FetchLockStatusRequest)(nil),      // 45: routineops.FetchLockStatusRequest
+	(*FetchLockStatusResponse)(nil),     // 46: routineops.FetchLockStatusResponse
+	(*FetchLockSecretsRequest)(nil),     // 47: routineops.FetchLockSecretsRequest
+	(*FetchLockSecretsResponse)(nil),    // 48: routineops.FetchLockSecretsResponse
 }
 var file_proto_agent_proto_depIdxs = []int32{
 	0,  // 0: routineops.SoftwareItem.uninstall_method:type_name -> routineops.UninstallMethod
-	12, // 1: routineops.InventoryReport.device_info:type_name -> routineops.DeviceInfo
-	13, // 2: routineops.InventoryReport.software:type_name -> routineops.SoftwareItem
+	13, // 1: routineops.InventoryReport.device_info:type_name -> routineops.DeviceInfo
+	14, // 2: routineops.InventoryReport.software:type_name -> routineops.SoftwareItem
 	1,  // 3: routineops.Task.priority:type_name -> routineops.TaskPriority
-	19, // 4: routineops.Task.lock:type_name -> routineops.LockCommand
-	17, // 5: routineops.Task.decommission:type_name -> routineops.DecommissionCommand
-	18, // 6: routineops.Task.reboot:type_name -> routineops.RebootCommand
+	20, // 4: routineops.Task.lock:type_name -> routineops.LockCommand
+	18, // 5: routineops.Task.decommission:type_name -> routineops.DecommissionCommand
+	19, // 6: routineops.Task.reboot:type_name -> routineops.RebootCommand
 	10, // 7: routineops.LockCommand.lock_mode:type_name -> routineops.LockMode
 	2,  // 8: routineops.TaskResult.status:type_name -> routineops.TaskStatus
 	3,  // 9: routineops.SecurityEvent.alert_type:type_name -> routineops.AlertType
 	4,  // 10: routineops.SoftwarePolicyRule.rule_type:type_name -> routineops.PolicyRuleType
-	26, // 11: routineops.FetchPolicyResponse.rules:type_name -> routineops.SoftwarePolicyRule
+	27, // 11: routineops.FetchPolicyResponse.rules:type_name -> routineops.SoftwarePolicyRule
 	5,  // 12: routineops.RequestAdminAccessResponse.status:type_name -> routineops.AdminAccessStatus
 	5,  // 13: routineops.FetchAdminStatusResponse.status:type_name -> routineops.AdminAccessStatus
 	5,  // 14: routineops.ReportAdminAccessRequest.status:type_name -> routineops.AdminAccessStatus
 	6,  // 15: routineops.ScriptPolicy.trigger:type_name -> routineops.ScriptTrigger
 	7,  // 16: routineops.ScriptPolicy.event_trigger:type_name -> routineops.ScriptEventType
-	35, // 17: routineops.FetchScriptPoliciesResponse.policies:type_name -> routineops.ScriptPolicy
+	36, // 17: routineops.FetchScriptPoliciesResponse.policies:type_name -> routineops.ScriptPolicy
 	6,  // 18: routineops.ScriptResult.trigger:type_name -> routineops.ScriptTrigger
 	8,  // 19: routineops.EscrowRecoveryKeyRequest.key_type:type_name -> routineops.RecoveryKeyType
 	9,  // 20: routineops.ReportLockStatusRequest.state:type_name -> routineops.LockState
 	10, // 21: routineops.FetchLockStatusResponse.lock_mode:type_name -> routineops.LockMode
-	11, // 22: routineops.AgentService.Connect:input_type -> routineops.HeartbeatRequest
-	22, // 23: routineops.AgentService.AckTaskReceived:input_type -> routineops.TaskReceivedAck
-	14, // 24: routineops.AgentService.ReportInventory:input_type -> routineops.InventoryReport
-	20, // 25: routineops.AgentService.ReportTaskResult:input_type -> routineops.TaskResult
-	24, // 26: routineops.AgentService.ReportSecurityEvent:input_type -> routineops.SecurityEvent
-	27, // 27: routineops.AgentService.FetchPolicy:input_type -> routineops.FetchPolicyRequest
-	29, // 28: routineops.AgentService.RequestAdminAccess:input_type -> routineops.RequestAdminAccessRequest
-	31, // 29: routineops.AgentService.FetchAdminStatus:input_type -> routineops.FetchAdminStatusRequest
-	33, // 30: routineops.AgentService.ReportAdminAccess:input_type -> routineops.ReportAdminAccessRequest
-	36, // 31: routineops.AgentService.FetchScriptPolicies:input_type -> routineops.FetchScriptPoliciesRequest
-	38, // 32: routineops.AgentService.ReportScriptResult:input_type -> routineops.ScriptResult
-	42, // 33: routineops.AgentService.ReportLockStatus:input_type -> routineops.ReportLockStatusRequest
-	44, // 34: routineops.AgentService.FetchLockStatus:input_type -> routineops.FetchLockStatusRequest
-	40, // 35: routineops.AgentService.EscrowRecoveryKey:input_type -> routineops.EscrowRecoveryKeyRequest
-	16, // 36: routineops.AgentService.Connect:output_type -> routineops.Task
-	23, // 37: routineops.AgentService.AckTaskReceived:output_type -> routineops.TaskReceivedAckResponse
-	15, // 38: routineops.AgentService.ReportInventory:output_type -> routineops.InventoryAck
-	21, // 39: routineops.AgentService.ReportTaskResult:output_type -> routineops.TaskResultAck
-	25, // 40: routineops.AgentService.ReportSecurityEvent:output_type -> routineops.SecurityEventAck
-	28, // 41: routineops.AgentService.FetchPolicy:output_type -> routineops.FetchPolicyResponse
-	30, // 42: routineops.AgentService.RequestAdminAccess:output_type -> routineops.RequestAdminAccessResponse
-	32, // 43: routineops.AgentService.FetchAdminStatus:output_type -> routineops.FetchAdminStatusResponse
-	34, // 44: routineops.AgentService.ReportAdminAccess:output_type -> routineops.ReportAdminAccessResponse
-	37, // 45: routineops.AgentService.FetchScriptPolicies:output_type -> routineops.FetchScriptPoliciesResponse
-	39, // 46: routineops.AgentService.ReportScriptResult:output_type -> routineops.ScriptResultAck
-	43, // 47: routineops.AgentService.ReportLockStatus:output_type -> routineops.ReportLockStatusResponse
-	45, // 48: routineops.AgentService.FetchLockStatus:output_type -> routineops.FetchLockStatusResponse
-	41, // 49: routineops.AgentService.EscrowRecoveryKey:output_type -> routineops.EscrowRecoveryKeyResponse
-	36, // [36:50] is the sub-list for method output_type
-	22, // [22:36] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	11, // 22: routineops.FetchLockSecretsResponse.status:type_name -> routineops.ArmStatus
+	12, // 23: routineops.AgentService.Connect:input_type -> routineops.HeartbeatRequest
+	23, // 24: routineops.AgentService.AckTaskReceived:input_type -> routineops.TaskReceivedAck
+	15, // 25: routineops.AgentService.ReportInventory:input_type -> routineops.InventoryReport
+	21, // 26: routineops.AgentService.ReportTaskResult:input_type -> routineops.TaskResult
+	25, // 27: routineops.AgentService.ReportSecurityEvent:input_type -> routineops.SecurityEvent
+	28, // 28: routineops.AgentService.FetchPolicy:input_type -> routineops.FetchPolicyRequest
+	30, // 29: routineops.AgentService.RequestAdminAccess:input_type -> routineops.RequestAdminAccessRequest
+	32, // 30: routineops.AgentService.FetchAdminStatus:input_type -> routineops.FetchAdminStatusRequest
+	34, // 31: routineops.AgentService.ReportAdminAccess:input_type -> routineops.ReportAdminAccessRequest
+	37, // 32: routineops.AgentService.FetchScriptPolicies:input_type -> routineops.FetchScriptPoliciesRequest
+	39, // 33: routineops.AgentService.ReportScriptResult:input_type -> routineops.ScriptResult
+	43, // 34: routineops.AgentService.ReportLockStatus:input_type -> routineops.ReportLockStatusRequest
+	45, // 35: routineops.AgentService.FetchLockStatus:input_type -> routineops.FetchLockStatusRequest
+	41, // 36: routineops.AgentService.EscrowRecoveryKey:input_type -> routineops.EscrowRecoveryKeyRequest
+	47, // 37: routineops.AgentService.FetchLockSecrets:input_type -> routineops.FetchLockSecretsRequest
+	17, // 38: routineops.AgentService.Connect:output_type -> routineops.Task
+	24, // 39: routineops.AgentService.AckTaskReceived:output_type -> routineops.TaskReceivedAckResponse
+	16, // 40: routineops.AgentService.ReportInventory:output_type -> routineops.InventoryAck
+	22, // 41: routineops.AgentService.ReportTaskResult:output_type -> routineops.TaskResultAck
+	26, // 42: routineops.AgentService.ReportSecurityEvent:output_type -> routineops.SecurityEventAck
+	29, // 43: routineops.AgentService.FetchPolicy:output_type -> routineops.FetchPolicyResponse
+	31, // 44: routineops.AgentService.RequestAdminAccess:output_type -> routineops.RequestAdminAccessResponse
+	33, // 45: routineops.AgentService.FetchAdminStatus:output_type -> routineops.FetchAdminStatusResponse
+	35, // 46: routineops.AgentService.ReportAdminAccess:output_type -> routineops.ReportAdminAccessResponse
+	38, // 47: routineops.AgentService.FetchScriptPolicies:output_type -> routineops.FetchScriptPoliciesResponse
+	40, // 48: routineops.AgentService.ReportScriptResult:output_type -> routineops.ScriptResultAck
+	44, // 49: routineops.AgentService.ReportLockStatus:output_type -> routineops.ReportLockStatusResponse
+	46, // 50: routineops.AgentService.FetchLockStatus:output_type -> routineops.FetchLockStatusResponse
+	42, // 51: routineops.AgentService.EscrowRecoveryKey:output_type -> routineops.EscrowRecoveryKeyResponse
+	48, // 52: routineops.AgentService.FetchLockSecrets:output_type -> routineops.FetchLockSecretsResponse
+	38, // [38:53] is the sub-list for method output_type
+	23, // [23:38] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_proto_init() }
@@ -3366,8 +3606,8 @@ func file_proto_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_proto_rawDesc), len(file_proto_agent_proto_rawDesc)),
-			NumEnums:      11,
-			NumMessages:   35,
+			NumEnums:      12,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

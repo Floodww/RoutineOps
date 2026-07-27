@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -210,7 +211,10 @@ func TestAgentEndToEnd(t *testing.T) {
 		ackCh: make(chan string, 4),
 		resCh: make(chan *pb.TaskResult, 4),
 		invCh: make(chan *pb.InventoryReport, 4),
-		task:  &pb.Task{TaskId: "itest-1", ScriptContent: "echo integration-ok", Platform: "macOS"},
+		// Платформа — ХОСТОВАЯ: с чужой агент честно возьмёт чужой интерпретатор
+		// (interpreterCmd: windows → powershell, иначе bash) и задача не выполнится.
+		// Захардкоженный "macOS" делал этот e2e непроходимым на Windows.
+		task: &pb.Task{TaskId: "itest-1", ScriptContent: "echo integration-ok", Platform: hostPlatform()},
 	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -928,4 +932,14 @@ func TestAgentReconnectsAfterServerRestart(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("client.Run не завершился после cancel")
 	}
+}
+
+// hostPlatform — значение Task.platform, при котором агент возьмёт интерпретатор
+// ЭТОЙ ОС (см. command.interpreterCmd). Скрипт `echo integration-ok` одинаково
+// работает и в bash, и в powershell.
+func hostPlatform() string {
+	if runtime.GOOS == "windows" {
+		return "Windows"
+	}
+	return "macOS"
 }

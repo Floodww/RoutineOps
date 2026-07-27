@@ -15,6 +15,7 @@ package lock
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,15 +162,138 @@ type Manager struct {
 	log         *slog.Logger
 	locker      Locker
 
+	reportTamper   TamperReporter // nil = событие только логируется
+	tamperCooldown time.Duration
+
 	mu    sync.Mutex
 	state State
+	// tamperNextReportAt — момент, раньше которого следующее событие подделки не
+	// отправляется. Дедуп строится ТОЛЬКО на нём (жёсткий потолок частоты),
+	// намеренно без «эпизодов».
+	//
+	// Соблазн «сбрасывать дедуп, когда файл снова согласован, чтобы новая попытка
+	// отчиталась сразу» ЛОЖНЫЙ и был отвергнут: демон сам пере-утверждает файл на
+	// КАЖДОМ тике, поэтому согласованное состояние — это норма МЕЖДУ записями
+	// атакующего, а не конец атаки. С таким сбросом подделка с периодом в 3
+	// секунды давала бы событие каждые 3 секунды (≈1200/час) — ровно тот флуд,
+	// ради которого дедуп и введён. Цена честная: две РАЗНЫЕ попытки внутри окна
+	// видны как одна; каждая из них по-прежнему попадает в лог агента.
+	//
+	// Нулевое значение = «ещё не отчитывались», поэтому первая подделка за жизнь
+	// процесса уходит сразу.
+	tamperNextReportAt time.Time
+}
+
+// TamperKind — КЛАССИФИКАЦИЯ подделки: что именно подделыватель положил в
+// last_unlocked_hash. В событие ИБ уезжает она, а НЕ само значение поля.
+//
+// Это не косметика, а требование безопасности. Файл состояния на Windows
+// намеренно user-writable (см. SetDurableUnlockPath), то есть содержимое поля
+// целиком пишет ровно тот непривилегированный пользователь, против которого
+// направлено само событие. Пустив его байты в Details, мы дали бы ему писать
+// текст алерта о самом себе, а именно:
+//   - ГЛУШЕНИЕ: набивка на несколько МБ разносит SecurityEvent за серверный
+//     grpc.MaxRecvMsgSize (4 МиБ) → ResourceExhausted → outbox считает код
+//     терминальным и ДРОПАЕТ запись. Событие не доходит никогда, а окно дедупа
+//     при этом израсходовано.
+//   - ИНЪЕКЦИЯ: сервер шлёт Details в Telegram с parse_mode=HTML; строка с «<»
+//     ломает разбор (алерт не доставляется), а разметка со ссылкой уезжает
+//     ИТ-админам от имени системы.
+//
+// Классификация покрывает всё, что нужно для триажа (пустой маркер / скопирован
+// соседний hash / произвольное значение), и при этом ограничена фиксированным
+// словарём.
+type TamperKind string
+
+const (
+	// TamperMarkerEmpty — маркер оставлен пустым (простейшая подделка «одной строкой»).
+	TamperMarkerEmpty TamperKind = "маркер пустой"
+	// TamperMarkerCopiedHash — маркер равен hash активного лока: подделыватель
+	// скопировал его из соседнего поля того же файла, имитируя «доказательство»
+	// снятия. Ровно этот вектор пропускала прежняя проверка.
+	TamperMarkerCopiedHash TamperKind = "маркер = hash активного лока (скопирован из соседнего поля)"
+	// TamperMarkerOther — произвольное значение.
+	TamperMarkerOther TamperKind = "маркер — произвольное значение"
+)
+
+// TamperReporter доставляет событие ИБ о попытке снять лок в обход демона
+// (обычно постановка pb.SecurityEvent в outbox). kind — классификация подделки,
+// markerLen — длина подделанного маркера в байтах (число, не текст: полезно для
+// триажа и неподделываемо как разметка).
+//
+// Возвращает true, если событие устойчиво поставлено в очередь. false (не
+// поставили) НЕ сжигает полное окно дедупа — повтор будет через
+// tamperRetryInterval, иначе сбой диска съедал бы сигнал на 15 минут.
+//
+// Ни request_id, ни само значение маркера сюда НЕ передаются: request_id на
+// pull-пути реконсиляции равен bcrypt-хешу живого пароля разблокировки
+// (Reconciler.reconcileLocked зовёт Lock(hash, hash, ...)), а его нельзя
+// отправлять в alerts и тем более пересылать в Telegram — это третья сторона вне
+// периметра. Устройство и активный лок сервер и так знает по mTLS-серту и
+// devices.lock_request_id.
+//
+// Вызывается БЕЗ удержания Manager.mu (постановка в outbox — файловая операция).
+type TamperReporter func(kind TamperKind, markerLen int) bool
+
+// tamperReportInterval — минимальный интервал между событиями подделки. Первая
+// подделка за жизнь процесса отчитывается сразу, дальше — не чаще этого окна,
+// СКОЛЬКО БЫ раз файл ни подделывали.
+//
+// Гейт обязателен, а не «на всякий случай»: сторож detectOfflineUnlock тикает
+// раз в секунду (cmd/agent/main.go), а KindSecurity в outbox — protected-класс,
+// где свежая protected-запись вытесняет СТАРЕЙШУЮ protected (outbox.enforceLimit).
+// При OutboxMax=1000 событие на каждый тик за ~17 минут выдавило бы из очереди
+// именно loss-sensitive отчёты — те, про которые сам outbox пишет «серверной
+// компенсации нет». 15 минут дают потолок 4 события в час на устройство и при
+// этом не превращают продолжающуюся атаку в одну строчку раз в сутки (почему не
+// час, как lockFailedReportInterval: там дребезг СВОЕГО ретрая, здесь — сигнал о
+// чужом активном действии, его IT хочет видеть повторяющимся).
+const tamperReportInterval = 15 * time.Minute
+
+// tamperRetryInterval — укороченное окно, когда событие НЕ удалось поставить в
+// очередь (диск полон/недоступен). Полное окно тут списывать нельзя: сбой
+// доставки — не повод молчать про подделку ещё 15 минут. Флуда не создаёт:
+// неудачный Enqueue по определению ничего в очередь не кладёт.
+const tamperRetryInterval = time.Minute
+
+// maxLoggedMarker — потолок на длину подделанного маркера В ЛОГЕ. Значение пишет
+// непривилегированный пользователь (user-writable lock.json), а сторож тикает раз
+// в секунду: без потолка набивка на мегабайты уходила бы в лог каждый тик.
+// В событие ИБ маркер не попадает вообще (см. TamperKind).
+const maxLoggedMarker = 64
+
+// classifyTamperMarker разбирает подделанный маркер в фиксированный словарь,
+// сверяя его с hash АКТИВНОГО лока (сравнение постоянного времени — значение
+// приходит извне).
+func classifyTamperMarker(marker, activeHash string) TamperKind {
+	switch {
+	case marker == "":
+		return TamperMarkerEmpty
+	case subtle.ConstantTimeCompare([]byte(marker), []byte(activeHash)) == 1:
+		return TamperMarkerCopiedHash
+	default:
+		return TamperMarkerOther
+	}
+}
+
+// truncateMarker обрезает маркер для лога, помечая факт обрезки.
+func truncateMarker(s string) string {
+	if len(s) <= maxLoggedMarker {
+		return s
+	}
+	return s[:maxLoggedMarker] + fmt.Sprintf("…(обрезано, всего %d байт)", len(s))
 }
 
 // New собирает Manager. path — файл состояния (машинный каталог), locker —
 // платформенный замок.
 func New(path string, locker Locker, log *slog.Logger) *Manager {
-	return &Manager{path: path, log: log, locker: locker}
+	return &Manager{path: path, log: log, locker: locker, tamperCooldown: tamperReportInterval}
 }
+
+// SetTamperReporter подключает доставку события ИБ о подделке файла состояния.
+// Вызывать до Run. nil (по умолчанию) — подделка по-прежнему обнаруживается,
+// лок пере-утверждается и пишется лог, но серверу не сообщается.
+func (m *Manager) SetTamperReporter(fn TamperReporter) { m.reportTamper = fn }
 
 // SetDurableUnlockPath задаёт файл durable-памяти последнего локально снятого
 // лока. Вызывать до Load. Файл ОБЯЗАН лежать в защищённом каталоге состояния
@@ -450,14 +574,39 @@ func (m *Manager) detectOfflineUnlock() {
 		return // файл недоступен или всё ещё заблокирован — ничего не делаем
 	}
 	reqID := m.state.RequestID
+	// Классифицируем маркер ПОД mu — нужен hash активного лока из памяти. Наружу
+	// уходит только категория и длина, не байты подделывателя (см. TamperKind).
+	kind := classifyTamperMarker(st.LastUnlockedHash, m.state.Hash)
+	markerLen := len(st.LastUnlockedHash)
+	// Дедуп события ИБ — жёсткий потолок частоты, см. tamperNextReportAt и
+	// tamperReportInterval. Решение принимается ПОД mu вместе со снимком, сама
+	// отправка — после Unlock (Enqueue пишет файл).
+	reportTamper := m.reportTamper != nil && !time.Now().Before(m.tamperNextReportAt)
+	if reportTamper {
+		// Окно закрываем СРАЗУ, ещё под mu: иначе между решением и отправкой
+		// осталась бы щель, в которой второй вызов принял бы то же решение.
+		// Если поставить в очередь не удастся — укоротим ниже.
+		m.tamperNextReportAt = time.Now().Add(m.tamperCooldown)
+	}
 	// Пере-утверждаем: на диск уходит текущее (заблокированное) состояние из
 	// памяти — она, а не файл, источник истины для демона.
 	persistErr := m.persist()
 	m.mu.Unlock()
 
+	if reportTamper && !m.reportTamper(kind, markerLen) {
+		// Провал Enqueue (диск полон/недоступен) не должен дарить подделывателю
+		// полное окно тишины — ретраим скоро (см. tamperRetryInterval). Флуда не
+		// создаёт: неудачный Enqueue по определению ничего в очередь не кладёт.
+		m.mu.Lock()
+		m.tamperNextReportAt = time.Now().Add(tamperRetryInterval)
+		m.mu.Unlock()
+	}
+
 	m.log.Warn("lock: файл состояния разблокирован в обход демона — блокировка пере-утверждена (tamper)",
 		slog.String("request_id", reqID),
-		slog.String("external_unlocked_hash", st.LastUnlockedHash))
+		slog.String("marker_kind", string(kind)),
+		slog.Int("marker_len", markerLen),
+		slog.String("external_unlocked_hash", truncateMarker(st.LastUnlockedHash)))
 	if persistErr != nil {
 		// Не фатально: память осталась заблокированной, поэтому следующий тик
 		// увидит расхождение снова и повторит запись.

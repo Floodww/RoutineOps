@@ -59,6 +59,9 @@ func TestRunnerEnqueuesResult(t *testing.T) {
 // TestDefaultExecRealShell — реальный запуск shell (быстрый, кроссплатформенно
 // на unix). Проверяет exit-код и stdout.
 func TestDefaultExecRealShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh-скрипт: unix-платформы")
+	}
 	res := defaultExec(context.Background(), "shell", "printf out; exit 3")
 	if res.exitCode != 3 {
 		t.Fatalf("exit_code=%d want 3", res.exitCode)

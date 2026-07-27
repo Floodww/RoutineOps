@@ -33,6 +33,7 @@ const (
 	AgentService_ReportLockStatus_FullMethodName    = "/routineops.AgentService/ReportLockStatus"
 	AgentService_FetchLockStatus_FullMethodName     = "/routineops.AgentService/FetchLockStatus"
 	AgentService_EscrowRecoveryKey_FullMethodName   = "/routineops.AgentService/EscrowRecoveryKey"
+	AgentService_FetchLockSecrets_FullMethodName    = "/routineops.AgentService/FetchLockSecrets"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -68,6 +69,20 @@ type AgentServiceClient interface {
 	// после устойчивого сохранения. Реальная ошибка (Unavailable/FailedPrecondition) —
 	// агент ретраит и НЕ запускает деструктив, если escrow не подтверждён. НЕ через outbox.
 	EscrowRecoveryKey(ctx context.Context, in *EscrowRecoveryKeyRequest, opts ...grpc.CallOption) (*EscrowRecoveryKeyResponse, error)
+	// Вооружение FileVault-лока (enterprise, PULL). Транзит секрета, который оператор
+	// расшифровал офлайн (cmd/mdm-unseal): сервер держит плейнтекст ТОЛЬКО в RAM с TTL,
+	// вооружает его ЧЕЛОВЕК (POST /devices/{id}/lock/arm, requireHuman + аудит ФАКТА
+	// вооружения, никогда — значения).
+	//
+	// Почему отдельный pull-RPC, а не поле в Task: (1) секрет в Task лёг бы at-rest в БД
+	// и в очередь; (2) FILEVAULT-команда самозаживает ТОЛЬКО реконсиляцией — reconcile
+	// зовёт RevokeAndShutdown на каждом тике, никакого Task там уже нет, поэтому push-only
+	// вооружение сломало бы ровно тот путь, ради которого реконсиляция и написана.
+	//
+	// Эскроу остаётся server-blind везде, КРОМЕ окна вооружения: на arm-time плейнтекст
+	// сознательно проходит через сервер и живёт у него в RAM. Границы дыры — только RAM,
+	// только TTL, только человеком.
+	FetchLockSecrets(ctx context.Context, in *FetchLockSecretsRequest, opts ...grpc.CallOption) (*FetchLockSecretsResponse, error)
 }
 
 type agentServiceClient struct {
@@ -221,6 +236,16 @@ func (c *agentServiceClient) EscrowRecoveryKey(ctx context.Context, in *EscrowRe
 	return out, nil
 }
 
+func (c *agentServiceClient) FetchLockSecrets(ctx context.Context, in *FetchLockSecretsRequest, opts ...grpc.CallOption) (*FetchLockSecretsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FetchLockSecretsResponse)
+	err := c.cc.Invoke(ctx, AgentService_FetchLockSecrets_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -254,6 +279,20 @@ type AgentServiceServer interface {
 	// после устойчивого сохранения. Реальная ошибка (Unavailable/FailedPrecondition) —
 	// агент ретраит и НЕ запускает деструктив, если escrow не подтверждён. НЕ через outbox.
 	EscrowRecoveryKey(context.Context, *EscrowRecoveryKeyRequest) (*EscrowRecoveryKeyResponse, error)
+	// Вооружение FileVault-лока (enterprise, PULL). Транзит секрета, который оператор
+	// расшифровал офлайн (cmd/mdm-unseal): сервер держит плейнтекст ТОЛЬКО в RAM с TTL,
+	// вооружает его ЧЕЛОВЕК (POST /devices/{id}/lock/arm, requireHuman + аудит ФАКТА
+	// вооружения, никогда — значения).
+	//
+	// Почему отдельный pull-RPC, а не поле в Task: (1) секрет в Task лёг бы at-rest в БД
+	// и в очередь; (2) FILEVAULT-команда самозаживает ТОЛЬКО реконсиляцией — reconcile
+	// зовёт RevokeAndShutdown на каждом тике, никакого Task там уже нет, поэтому push-only
+	// вооружение сломало бы ровно тот путь, ради которого реконсиляция и написана.
+	//
+	// Эскроу остаётся server-blind везде, КРОМЕ окна вооружения: на arm-time плейнтекст
+	// сознательно проходит через сервер и живёт у него в RAM. Границы дыры — только RAM,
+	// только TTL, только человеком.
+	FetchLockSecrets(context.Context, *FetchLockSecretsRequest) (*FetchLockSecretsResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -305,6 +344,9 @@ func (UnimplementedAgentServiceServer) FetchLockStatus(context.Context, *FetchLo
 }
 func (UnimplementedAgentServiceServer) EscrowRecoveryKey(context.Context, *EscrowRecoveryKeyRequest) (*EscrowRecoveryKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method EscrowRecoveryKey not implemented")
+}
+func (UnimplementedAgentServiceServer) FetchLockSecrets(context.Context, *FetchLockSecretsRequest) (*FetchLockSecretsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchLockSecrets not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -568,6 +610,24 @@ func _AgentService_EscrowRecoveryKey_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_FetchLockSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchLockSecretsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).FetchLockSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_FetchLockSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).FetchLockSecrets(ctx, req.(*FetchLockSecretsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -626,6 +686,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "EscrowRecoveryKey",
 			Handler:    _AgentService_EscrowRecoveryKey_Handler,
+		},
+		{
+			MethodName: "FetchLockSecrets",
+			Handler:    _AgentService_FetchLockSecrets_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -12,6 +12,13 @@
 # без генератора — это и есть генератор, только хуже. Расхождение по полям ловится
 # ревью, расхождение по эндпоинтам — здесь.
 #
+# Open-core: маршруты Enterprise объявлены не в handler.go, а в своих пакетах под
+# //go:build enterprise (escrow, license) и монтируются RouterOption'ами. Гард
+# подхватывает такие файлы по build-тегу. Во Free-срезе их нет вообще — тогда пути,
+# помеченные в спецификации `x-enterprise: true`, пропускаются с явной строкой в логе.
+# Публичная спецификация описывает и ручки Enterprise (как и docs/rbac-matrix.md) —
+# читатель должен видеть, что возможность существует, а не гадать.
+#
 # Read-only, зависимости: python3 + PyYAML. Запуск из любого cwd:
 #   bash scripts/check-openapi.sh
 set -u
@@ -77,23 +84,70 @@ spec_ops = {
     if m in METHODS
 }
 
-src = open(src_path, encoding="utf-8").read()
+# Ручки Enterprise помечены в спецификации `x-enterprise: true` на уровне пути. Их код
+# лежит под //go:build enterprise, и во Free-срезе его физически нет — см. ниже.
+ent_ops = {
+    f"{m.upper()} {path}"
+    for path, item in (spec.get("paths") or {}).items()
+    if item.get("x-enterprise")
+    for m in item
+    if m in METHODS
+}
+
 # r.Get(...), r.With(...).Post(...) — внутренние скобки у With непусты (httprate),
 # поэтому нежадный .*? до первого ").".
 pattern = re.compile(r'r\.(?:With\(.*?\)\.)?(Get|Post|Put|Patch|Delete)\("([^"]+)"')
+
+# Enterprise-роуты монтируются RouterOption'ами из СВОИХ пакетов (escrow, license), а
+# не из handler.go — без них гард видел только часть реальности, из-за чего
+# /escrow/status и /license годами жили неописанными, а описанный reveal ронял CI Free.
+# Ищем их по build-тегу, а не списком путей: список пришлось бы помнить при каждой новой
+# ручке, а забытый файл выглядел бы как «ручка не описана».
+SKIP_DIRS = {".git", "node_modules", "web", "build", "vendor", "releases"}
+ent_files = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+    for fn in sorted(filenames):
+        if not fn.endswith(".go") or fn.endswith("_test.go"):
+            continue
+        p = os.path.join(dirpath, fn)
+        try:
+            text = open(p, encoding="utf-8").read()
+        except OSError:
+            continue
+        if text.startswith("//go:build enterprise") and pattern.search(text):
+            ent_files.append(p)
+
 code_ops = set()
-for method, path in pattern.findall(src):
-    if path.startswith("/*") or path.startswith("/downloads"):
-        continue  # статика SPA и файловая раздача — не API
-    # Роуты внутри r.Route("/api/v1", ...) объявлены без префикса.
-    if not path.startswith("/api/v1") and path not in ("/healthz", "/ca.crt"):
-        path = "/api/v1" + path
-    code_ops.add(f"{method.upper()} {path}")
+for path_ in [src_path] + ent_files:
+    src = open(path_, encoding="utf-8").read()
+    for method, path in pattern.findall(src):
+        if path.startswith("/*") or path.startswith("/downloads"):
+            continue  # статика SPA и файловая раздача — не API
+        # Роуты внутри r.Route("/api/v1", ...) объявлены без префикса. Enterprise-роуты
+        # монтируются в ту же группу, поэтому правило одно на всех.
+        if not path.startswith("/api/v1") and path not in ("/healthz", "/ca.crt"):
+            path = "/api/v1" + path
+        code_ops.add(f"{method.upper()} {path}")
 
 missing = sorted(code_ops - spec_ops)   # есть в коде, не описано
 extra = sorted(spec_ops - code_ops)     # описано, но в коде нет
 
+# Во Free-срезе enterprise-исходников нет вообще — тогда помеченные ручки пропускаем.
+# Именно «нет вообще»: если хоть один enterprise-файл на месте, мы в полном дереве, и
+# отсутствие описанной ручки снова становится ошибкой, а не поблажкой по маркеру.
+skipped = []
+if not ent_files:
+    skipped = [x for x in extra if x in ent_ops]
+    extra = [x for x in extra if x not in ent_ops]
+
 print(f"== 2. эндпоинты: в коде {len(code_ops)}, в спецификации {len(spec_ops)} ==")
+if skipped:
+    # Громко, а не молча: пропуск — это заявление «мы в срезе», и оно должно быть
+    # видно в логе CI, иначе маркером x-enterprise можно спрятать реальное расхождение.
+    print(f"  Free-срез (enterprise-исходников нет): пропущено ручек Enterprise — {len(skipped)}")
+    for x in sorted(skipped):
+        print(f"    ~ {x}")
 if missing:
     fail = 1
     print("  НЕ ОПИСАНО в docs/openapi.yaml:")
@@ -101,7 +155,8 @@ if missing:
         print(f"    {x}")
 if extra:
     fail = 1
-    print("  ОПИСАНО, но в коде отсутствует (удалили ручку — уберите из спецификации):")
+    print("  ОПИСАНО, но в коде отсутствует (удалили ручку — уберите из спецификации;")
+    print("  ручка Enterprise — пометьте путь `x-enterprise: true`):")
     for x in extra:
         print(f"    {x}")
 if not missing and not extra:

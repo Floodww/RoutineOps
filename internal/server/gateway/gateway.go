@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/notifier"
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"github.com/Floodww/RoutineOps/internal/server/worker"
@@ -446,11 +447,12 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 			"forbidden_software":           "Запрещённое ПО",
 			"unauthorized_install":         "Неавторизованная установка",
 			"unauthorized_settings_change": "Изменение настроек",
+			"lock_tamper":                  "Попытка обхода блокировки",
 		}[alertType]
 		if alertLabel == "" {
 			alertLabel = alertType
 		}
-		text := fmt.Sprintf("🚨 <b>Алерт безопасности</b>\nТип: %s\nУстройство: <code>%s</code>\nДетали: %s",
+		text := notifier.HTMLf("🚨 <b>Алерт безопасности</b>\nТип: %s\nУстройство: <code>%s</code>\nДетали: %s",
 			alertLabel, hostname, req.Details)
 		go g.bot.NotifyITAdmins(context.Background(), text)
 	}
@@ -492,7 +494,7 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 		if reason == "" {
 			reason = "не указана"
 		}
-		text := fmt.Sprintf("🔐 <b>Заявка на права администратора</b>\nУстройство: <code>%s</code>\nПричина: %s\n\nОткройте панель MDM для рассмотрения заявки.",
+		text := notifier.HTMLf("🔐 <b>Заявка на права администратора</b>\nУстройство: <code>%s</code>\nПричина: %s\n\nОткройте панель MDM для рассмотрения заявки.",
 			hostname, reason)
 		go g.bot.NotifyITAdmins(context.Background(), text)
 	}
@@ -703,7 +705,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		}
 		if g.bot != nil {
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
-			text := fmt.Sprintf("🔐 <b>FileVault-лок: токен снят</b>\nУстройство: <code>%s</code>\nРебут ещё НЕ сделан — лок пока не эффективен.\nДетали: %s",
+			text := notifier.HTMLf("🔐 <b>FileVault-лок: токен снят</b>\nУстройство: <code>%s</code>\nРебут ещё НЕ сделан — лок пока не эффективен.\nДетали: %s",
 				hostname, req.Details)
 			go g.bot.NotifyITAdmins(context.Background(), text)
 		}
@@ -731,7 +733,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		}
 		if g.bot != nil {
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
-			text := fmt.Sprintf("🛑 <b>FileVault-лок: revoke НЕ завершён</b>\nУстройство: <code>%s</code>\nДеструктив мог примениться ЧАСТИЧНО — требуется ручной разбор IT.\nДетали: %s",
+			text := notifier.HTMLf("🛑 <b>FileVault-лок: revoke НЕ завершён</b>\nУстройство: <code>%s</code>\nДеструктив мог примениться ЧАСТИЧНО — требуется ручной разбор IT.\nДетали: %s",
 				hostname, req.Details)
 			go g.bot.NotifyITAdmins(context.Background(), text)
 		}
@@ -758,7 +760,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		}
 		if g.bot != nil {
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
-			text := fmt.Sprintf("⚠️ <b>Блокировка НЕ применена</b>\nУстройство: <code>%s</code>\nАгент не смог поднять лок и продолжает попытки — машина пока РАБОЧАЯ, хотя в панели помечена как заблокированная.\nДетали: %s",
+			text := notifier.HTMLf("⚠️ <b>Блокировка НЕ применена</b>\nУстройство: <code>%s</code>\nАгент не смог поднять лок и продолжает попытки — машина пока РАБОЧАЯ, хотя в панели помечена как заблокированная.\nДетали: %s",
 				hostname, req.Details)
 			go g.bot.NotifyITAdmins(context.Background(), text)
 		}

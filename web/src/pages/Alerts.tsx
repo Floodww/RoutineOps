@@ -10,6 +10,7 @@ import { toast } from "@/lib/toast"
 import { useMe } from "@/lib/useMe"
 
 const alertTypeLabel: Record<string, string> = {
+  lock_tamper:                    "Попытка обхода блокировки",
   forbidden_software:             "Запрещённое ПО",
   unauthorized_install:           "Неавторизованная установка",
   unauthorized_settings_change:   "Изменение настроек",
@@ -17,6 +18,10 @@ const alertTypeLabel: Record<string, string> = {
 }
 
 const alertTypeColor: Record<string, string> = {
+  // lock_tamper — не нарушение политики, а активная попытка обойти уже
+  // применённый контроль. Отдельный цвет, а не оттенок красного: рядом с
+  // forbidden_software два красных читались бы как один класс событий.
+  lock_tamper:                  "text-fuchsia-600 dark:text-fuchsia-400",
   forbidden_software:           "text-red-600 dark:text-red-500",
   unauthorized_install:         "text-amber-600 dark:text-amber-500",
   unauthorized_settings_change: "text-orange-600 dark:text-orange-500",
@@ -25,7 +30,10 @@ const alertTypeColor: Record<string, string> = {
 
 // TYPE_ORDER — порядок секций. Типы вне списка (сервер хранит alert_type свободным
 // TEXT, без enum) уезжают в конец по алфавиту, а не пропадают.
+// lock_tamper первым: единственный тип, означающий живого противника на устройстве
+// прямо сейчас, — остальные это постфактум-нарушения политики.
 const TYPE_ORDER = [
+  "lock_tamper",
   "forbidden_software",
   "unauthorized_install",
   "unauthorized_settings_change",

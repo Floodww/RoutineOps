@@ -108,6 +108,76 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
   visible: after the correct password the screen closes once the service confirms
   (a fraction of a second), and if the service is stopped it says so instead of
   releasing silently.
+- **Attempts to release the lock behind the service's back are now visible in
+  security.** Previously such tampering only restored the lock and went to the agent
+  log — nothing reached the console, and the security team never learned an attempt
+  had been made. The agent now sends a security event. The event reports an ATTEMPT,
+  not a success: the lock stays in force. Repeats are deliberately damped — at most
+  one event per device per 15 minutes: the watchdog checks the file every second, and
+  an event per check would push reports that cannot be reconstructed out of the
+  delivery queue. Every attempt still lands in the agent log. In the console such an
+  event appears as its own type, "Lock bypass attempt", and sorts first: it is the only
+  alert type that means a live intruder on the device right now, rather than a policy
+  violation noticed after the fact.
+- **Telegram notifications: an undelivered message is no longer counted as sent.** The
+  server did not check Telegram's response at all — any refusal (a bot blocked by the
+  employee, rate limiting, a rejected message) looked like a successful send, and the
+  alert vanished without a trace in the log. Refusals now reach the server log with a
+  reason. Along with it, one way to suppress delivery using the device's own data is
+  closed: hostname and detail text come from the agent and were interpolated into the
+  formatted message as-is, so a single markup character in them broke parsing on
+  Telegram's side — and the alert about a device was silenced by that same device's data.
+- **[Enterprise] FileVault lock: secrets now travel over a separate arming channel.**
+  The recovery key and the service administrator password are no longer meant to ride
+  inside the lock command itself: the command is stored in the database, and a secret
+  does not belong there for a single second. Instead the operator "arms" an already
+  issued lock as a separate action (`POST /devices/{id}/lock/arm`) — the secret reaches
+  only the server's memory, lives for a bounded time (15 minutes by default) and is
+  handed to the agent exactly once. Only a device with an already issued FileVault lock
+  can be armed, and only by a human: automation and service tokens are refused. A server
+  restart clears the arming — the lock will not apply until the operator arms it again;
+  this is deliberate, because the alternative is keeping the administrator password on
+  disk. The audit log records the fact of arming, never the secret values.
+- **[Enterprise] FileVault lock: the key is matched against escrow before the
+  irreversible step.** Before stripping disk-decryption rights, the agent now verifies
+  that the recovery key (and service administrator password) supplied by the operator
+  is the one held in this device's escrow. Previously only two things were confirmed —
+  that "some key reached the server" and that "the key unlocks the volume" — but not
+  that they were the SAME key: after a rotation the operator could supply a key from a
+  stale record, leaving the disk sealed with a key that escrow does not hold. A
+  mismatch, or the absence of anything to match against, stops the operation BEFORE the
+  first irreversible action. Devices escrowed before this release have nothing to match
+  against — for them the operation stops until provisioning is run again.
+- **[Enterprise] FileVault lock: the disk-owner list was being read past.** Before
+  stripping rights, the agent enumerates everyone able to decrypt the disk and strips
+  rights from all but the service administrator. The second, backstop source of that
+  list was parsed incorrectly — it looked for a label the system does not print, and so
+  never contributed a single owner. The check effectively rested on one source instead
+  of two. Parsing now matches the real output format and has been verified against a
+  live machine. It also accounts for the recovery key being listed alongside user
+  accounts: it is not an owner to be evicted — it is precisely what support uses to
+  open the disk after a lock. An unrecognised entry type (for example Apple ID
+  recovery, which an employee can enable themselves and which defeats the lock) now
+  stops the operation instead of being skipped silently.
+- **[Enterprise] FileVault lock: a refusal before the irreversible step no longer
+  stays silent.** When the lock cannot be applied (the key does not match, the service
+  password is rejected, the owner list cannot be read), the device is left untouched —
+  but until now the server was not told either: the console showed an issued task while
+  the laptop kept working. The agent now reports an unapplied lock the same way it
+  reports a partial failure — with an audit entry and a security alert. Repeats are
+  damped to one message per hour per command: the agent re-checks desired state every
+  thirty seconds, and a persistent misconfiguration would otherwise flood the inbox.
+- **[Enterprise] FileVault lock: the service password is no longer visible in the
+  process list.** On macOS the command-line arguments of any process — including ones
+  running as root — are readable by every user of the machine. While the agent stripped
+  decryption rights, the service password was briefly visible to the very employee it
+  was being stripped from: reading it in time would let them grant themselves access
+  right back. Both lock operations now pass the password to the system utilities over a
+  hidden channel, using the built-in mode Apple itself calls preferable. For the
+  one-off device setup operations the previous method is deliberately kept: two
+  passwords take part in a single command there, the hidden channel carries one, and
+  switching would protect the less valuable of the two at the cost of breaking a
+  working setup flow.
 
 ---
 

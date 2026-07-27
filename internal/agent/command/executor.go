@@ -474,10 +474,16 @@ func (e *Executor) handleLock(client pb.AgentServiceClient, taskID string, lc *p
 			err = fmt.Errorf("filevault revoker не сконфигурирован на этом агенте (сборка/ОС не поддерживает FileVault-лок)")
 			state = pb.LockState_LOCK_STATE_FILEVAULT_REVOKE_FAILED
 		} else {
-			// RevokeAndShutdown durably репортит САМ и успех (FILEVAULT_REVOKED), и
-			// провал (FILEVAULT_REVOKE_FAILED) — блокирующий retry, report.go. Executor
-			// НЕ пере-репортит: иначе дубль аудита/алерта + гонка с shutdown -h now
-			//. Ошибку только логируем — отчёт уже за revoker'ом.
+			// RevokeAndShutdown durably репортит САМ все три исхода — успех
+			// (FILEVAULT_REVOKED), ABORT после мутации и ABORT до мутации (оба —
+			// FILEVAULT_REVOKE_FAILED, блокирующий retry, report.go). Executor НЕ
+			// пере-репортит: иначе дубль аудита/алерта + гонка с shutdown -h now.
+			// Ошибку только логируем — отчёт уже за revoker'ом.
+			//
+			// ⚠️ Ранний return здесь верен ТОЛЬКО пока это так. До 2026-07-26
+			// pre-mutation ABORT'ы (а сегодня туда уходит каждая FileVault-команда:
+			// MDMAdminPassword намеренно nil) не репортились ни revoker'ом, ни
+			// отсюда — сервер не узнавал о неприменённом локе вообще ничего.
 			if _, rerr := e.revoker.RevokeAndShutdown(e.execCtx, reqID); rerr != nil {
 				e.log.Error("lock: filevault RevokeAndShutdown", slog.String("request_id", reqID), slog.Any("error", rerr))
 			}

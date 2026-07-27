@@ -1538,6 +1538,7 @@ paths:
   # открывает оператор офлайн утилитой routineops-unseal шерами приватного ключа.
 
   /api/v1/devices/{id}/escrow:
+    x-enterprise: true
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]
     get:
       tags: [Устройства]
@@ -1558,6 +1559,7 @@ paths:
         '404': { description: Возможность Enterprise — в этой сборке роут отсутствует }
 
   /api/v1/devices/{id}/escrow/reveal:
+    x-enterprise: true
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]
     post:
       tags: [Устройства]
@@ -1610,6 +1612,156 @@ paths:
         '403': { description: Нет роли, сервисный токен либо нет гранта can_reveal_escrow }
         '404': { description: Строки эскроу нет (или роут отсутствует — сборка не Enterprise) }
         '409': { description: 'recipient строки не совпал с запиненным' }
+
+  /api/v1/devices/{id}/lock/arm:
+    x-enterprise: true
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Устройства]
+      summary: Вооружение FileVault-лока секретами (ADR-F24)
+      description: |
+        Роль: `it_admin`, только человек. Кладёт секреты, которые агент заберёт на
+        lock-time отдельным pull-каналом. Команда лока остаётся durable и неизменной —
+        секрет в БД не попадает НИКОГДА: он живёт только в памяти сервера, под TTL
+        (`ROUTINEOPS_LOCK_ARM_TTL`, дефолт 15м) и отдаётся агенту ОДИН раз.
+
+        Вооружать можно только под ЖИВОЙ desired-лок с `lock_mode=filevault` — это и
+        есть граница окна, в котором секрет лежит в RAM. Без активного лока, при
+        overlay-локе и при локе без `request_id` (выдан до миграции 032) — 409.
+
+        Повторный вызов перезаписывает и продлевает: агент мог забрать секрет и не
+        довести ревок (машина уходит в шатдаун), после чего вооружение надо повторить.
+        Рестарт сервера гасит вооружение — агент уйдёт в `NOT_ARMED`, это fail-closed.
+
+        🔴 В аудит (`arm_lock_secrets`) пишется ФАКТ вооружения — какой лок и какие поля
+        поданы, — и никогда значения. Аудит стоит ДО вооружения и fail-closed: не
+        записали — не вооружили.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Хотя бы одно поле обязано быть непустым
+              properties:
+                mdmadmin_password:
+                  type: string
+                  description: Пароль сервисной учётки mdmadmin
+                personal_recovery_key:
+                  type: string
+                  description: Personal Recovery Key тома FileVault
+      responses:
+        '200':
+          description: Вооружено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id:
+                    type: string
+                    description: Команда лока, под которую вооружено; чужой id секрет не получит
+                  expires_at:
+                    type: string
+                    format: date-time
+        '400': { description: Битое тело либо оба секрета пусты }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { description: Роут отсутствует — сборка не Enterprise либо escrow не сконфигурирован }
+        '409': { description: Нет активного FileVault-лока, лок без request_id либо лицензия не покрывает FileVault }
+
+  /api/v1/escrow/status:
+    x-enterprise: true
+    get:
+      tags: [Устройства]
+      summary: Готовность FileVault-эскроу
+      description: |
+        Любая аутентифицированная роль. Нужен затем, что эскроу — fail-closed фича:
+        при невыставленном или неподошедшем `ESCROW_RECIPIENT` она выключается ТИХО, и
+        без этой ручки заметить это можно было бы только по отказу первого же
+        FileVault-лока. `enabled` считается живым гейтом: истечение лицензии переводит
+        его в `false` без рестарта.
+      responses:
+        '200':
+          description: Статус
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                    description: Эскроу сконфигурировано И лицензия покрывает FileVault И жива
+                  recipient_fpr:
+                    type: string
+                    description: Отпечаток запиненного публичного age-recipient (не секрет)
+        '404': { description: Роут отсутствует — сборка не Enterprise }
+
+  # ─────────────────────────── Лицензия (Enterprise) ───────────────────────────
+  # В open-core этих роутов нет — 404, и страница «Лицензия» показывает «недоступно в
+  # этой редакции». Лицензия проверяется вшитым на сборке публичным ключом вендора.
+
+  /api/v1/license:
+    x-enterprise: true
+    get:
+      tags: [Администрирование]
+      summary: Снимок энтайтлмента
+      description: |
+        Роль: `it_admin`. Секретов не отдаёт. `configured` и `valid` различают «истекла»
+        (`configured && !valid`) от «не задана» (`!configured`) — UI показывает разные
+        состояния. `valid` считается тем же выражением, что и боевой гейт, иначе экран
+        говорил бы «активна», когда операции уже отбиваются.
+      x-requires-human: true
+      responses:
+        '200':
+          description: Снимок на момент запроса
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { description: Роут отсутствует — сборка не Enterprise }
+    post:
+      tags: [Администрирование]
+      summary: Применение или деактивация лицензии
+      description: |
+        Роль: `it_admin`. Применяется LIVE, без рестарта, и персистится, чтобы пережить
+        его. Пустой `license` = деактивация (в аудит уходит отдельным действием
+        `deactivate_license`: снятие enterprise и его выдача не должны выглядеть в
+        журнале одинаково). Отклонённая лицензия НЕ сбрасывает текущую.
+
+        `persist_warning` непусто, когда live-применение удалось, а сохранение — нет
+        (том :ro) либо будет перекрыто на старте переменной `ROUTINEOPS_LICENSE`. Молчать
+        в этом случае нельзя: админ считал бы, что сохранил, а рестарт вернул бы его в
+        прежнее состояние.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                license:
+                  type: string
+                  description: Blob лицензии; пустая строка = деактивация
+                activation_password:
+                  type: string
+      responses:
+        '200':
+          description: Применено
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/LicenseStatus'
+                  - type: object
+                    properties:
+                      persist_warning:
+                        type: string
+                        description: Непусто, если после рестарта состояние не совпадёт с текущим
+        '400': { description: Некорректный запрос либо лицензия отклонена (подпись/активация/срок) }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { description: Роут отсутствует — сборка не Enterprise }
 
   # ─────────────────────────── Каталог (LDAP, Enterprise) ───────────────────────────
   # Синхронизация персон из LDAP/Active Directory и авто-привязка владельцев устройств.
@@ -2246,6 +2398,20 @@ components:
         revealed_at: { type: string, format: date-time, description: 'Последняя выгрузка; полная история — в аудите' }
         revealed_by: { type: string, description: 'Email того, кто выгружал' }
         latest: { type: boolean, description: 'Эту строку отдаст reveal для своего secret_type' }
+
+    LicenseStatus:
+      type: object
+      description: >
+        Снимок энтайтлмента на момент запроса (Enterprise). Секретов не содержит:
+        сам blob лицензии обратно не отдаётся.
+      properties:
+        configured: { type: boolean, description: 'Лицензия валидно подписана и активирована — возможно, при этом истекла' }
+        valid: { type: boolean, description: 'Живой энтайтлмент: считается тем же выражением, что и боевой гейт' }
+        licensee: { type: string }
+        edition: { type: string }
+        features: { type: array, items: { type: string }, description: 'Покрытые возможности, напр. filevault' }
+        expires_at: { type: string, format: date-time }
+        seats: { type: integer, description: 'Историческое поле; модель лицензирования плоская, по времени' }
 
     DirectoryConfig:
       type: object

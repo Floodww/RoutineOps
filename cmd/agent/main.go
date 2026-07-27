@@ -1670,6 +1670,33 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		log.Warn("lock: durable-память локального снятия отключена (RAM-only) — каталог task-state вне машинного каталога состояния",
 			slog.String("task_state", cfg.TaskStateFile))
 	}
+	// Событие ИБ о попытке снять лок в обход демона (подделка lock.json при
+	// остановленной службе, находка 1.3). Durable — через тот же outbox, что и
+	// алерты security-монитора; дедуп по эпизоду живёт в Manager, здесь его нет
+	// намеренно (см. lock.tamperReportInterval: сторож тикает раз в секунду, а
+	// KindSecurity вытесняет из очереди старейшую protected-запись).
+	// Details собирается ТОЛЬКО из фиксированного словаря (lock.TamperKind) и
+	// числа: ни одного байта из подделанного файла и ни одного request_id (на
+	// pull-пути он равен bcrypt-хешу живого пароля разблокировки). Причины — в
+	// доке lock.TamperKind: сервер пересылает Details в Telegram с
+	// parse_mode=HTML, а оверсайзное событие сервер отвергает по
+	// MaxRecvMsgSize, и outbox дропает его как терминальную ошибку.
+	locker.SetTamperReporter(func(kind lock.TamperKind, markerLen int) bool {
+		data, err := proto.Marshal(&pb.SecurityEvent{
+			AlertType:  pb.AlertType_ALERT_TYPE_LOCK_TAMPER,
+			Details:    fmt.Sprintf("файл состояния блокировки подделан на «разблокировано» в обход демона; лок пере-утверждён; %s (%d байт)", kind, markerLen),
+			OccurredAt: time.Now().Unix(),
+		})
+		if err != nil {
+			log.Error("lock: сериализация tamper-события", slog.Any("error", err))
+			return false
+		}
+		if err := ob.Enqueue(outbox.KindSecurity, data); err != nil {
+			log.Error("lock: постановка tamper-события в очередь", slog.Any("error", err))
+			return false
+		}
+		return true
+	})
 	if err := locker.Load(); err != nil {
 		log.Error("lock: загрузка состояния блокировки", slog.Any("error", err))
 	}

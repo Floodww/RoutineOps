@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,10 +14,11 @@ import (
 // демон писал в свой tmp, трей читал пустоту в своём. Теперь status.json лежит рядом с
 // lock.json в общем каталоге службы, который оба процесса получают из -lock-state.
 func TestStatusFilePathSharesLockDir(t *testing.T) {
-	cfg := &config.Config{LockStateFile: "/var/lib/RoutineOps-agent/shared/lock.json"}
+	shared := filepath.Join(os.TempDir(), "routineops-shared")
+	cfg := &config.Config{LockStateFile: filepath.Join(shared, "lock.json")}
 
 	got := statusFilePath(cfg)
-	if want := "/var/lib/RoutineOps-agent/shared/status.json"; got != want {
+	if want := filepath.Join(shared, "status.json"); got != want {
 		t.Fatalf("statusFilePath = %q, want %q", got, want)
 	}
 	// В одном каталоге с lock.json и admin-request.json (общий машинный каталог,
