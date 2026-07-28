@@ -43,7 +43,26 @@ type Config struct {
 	// устройству. Гасит дребезг modern-standby (машина просыпается ~раз в час на минуту,
 	// двигает last_seen_at → каждый сон выглядит новым эпизодом). 0/отриц = без cooldown.
 	UnreachableCooldownMinutes int
-	CookieSecure               bool
+	// EscalateAfterMinutes — сколько минут непринятый алерт критичности не ниже
+	// EscalateMinSeverity висит, прежде чем в Telegram уйдёт напоминание.
+	// 0/отриц = эскалация выключена. Дефолт 30: короче — и напоминание придёт
+	// раньше, чем дежурный успеет открыть панель, то есть станет шумом, который
+	// отключат целиком.
+	EscalateAfterMinutes int
+	// EscalateRepeatMinutes — интервал повторных напоминаний по тому же алерту,
+	// пока его не приняли. 0/отриц = напомнить ровно один раз.
+	EscalateRepeatMinutes int
+	// EscalateMinSeverity — минимальная критичность, участвующая в эскалации.
+	// Дефолт critical: эскалируется то, что не должно ждать до утра. Понижать до
+	// medium/low имеет смысл только там, где алертов мало.
+	EscalateMinSeverity string
+	CookieSecure        bool
+	// TrustedProxies — TRUSTED_PROXIES: с каких адресов верить заголовку с адресом
+	// клиента (X-Real-IP / X-Forwarded-For). Пусто = приватные и loopback-диапазоны,
+	// чего хватает для штатного деплоя (nginx рядом в compose-сети). Задавать нужно,
+	// если прокси стоит на ПУБЛИЧНОМ адресе — иначе per-IP лимиты снова схлопнутся в
+	// один общий бакет. Разбор и семантика — internal/server/api/realip.go.
+	TrustedProxies string
 	// FileVault-escrow recipient (ESCROW_RECIPIENT) читается enterprise-оверлеем
 	// (cmd/server, //go:build enterprise), не open-core-конфигом.
 }
@@ -126,7 +145,11 @@ func Load(configPath string) Config {
 		AuditRetentionDays:          parseInt(os.Getenv("AUDIT_RETENTION_DAYS"), 365),
 		UnreachableThresholdMinutes: parseInt(os.Getenv("AGENT_UNREACHABLE_MINUTES"), 10080),
 		UnreachableCooldownMinutes:  parseInt(os.Getenv("AGENT_UNREACHABLE_COOLDOWN_MINUTES"), 360),
+		EscalateAfterMinutes:        parseInt(os.Getenv("ALERT_ESCALATE_AFTER_MINUTES"), 30),
+		EscalateRepeatMinutes:       parseInt(os.Getenv("ALERT_ESCALATE_REPEAT_MINUTES"), 60),
+		EscalateMinSeverity:         coalesce(os.Getenv("ALERT_ESCALATE_MIN_SEVERITY"), "critical"),
 		CookieSecure:                os.Getenv("COOKIE_SECURE") == "true",
+		TrustedProxies:              os.Getenv("TRUSTED_PROXIES"),
 	}
 }
 

@@ -7,8 +7,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { UserPlus } from "lucide-react"
+import { UserPlus, Trash2 } from "lucide-react"
 import { toast } from "@/lib/toast"
+import { useMe } from "@/lib/useMe"
 
 interface User {
   id: string
@@ -34,6 +35,11 @@ export default function Users() {
   // Ссылка-приглашение, если письмо не ушло (SMTP выключен или отправка не удалась):
   // бэкенд возвращает invite_url, чтобы оператор передал её вручную.
   const [inviteLink, setInviteLink] = useState<string | null>(null)
+  const { me } = useMe()
+  // Кого удаляем — держим весь объект, а не id: в подтверждении нужен email, иначе
+  // оператор соглашается на «удалить пользователя» вслепую.
+  const [toDelete, setToDelete] = useState<User | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     api.get<User[]>("/users")
@@ -70,6 +76,31 @@ export default function Users() {
     }
   }
 
+  async function handleDelete() {
+    if (!toDelete) return
+    setDeleting(true)
+    try {
+      await api.delete(`/users/${toDelete.id}`)
+      setUsers((prev) => prev.filter((u) => u.id !== toDelete.id))
+      toast({ title: `${toDelete.email} удалён`, variant: "success" })
+      setToDelete(null)
+    } catch (e) {
+      // 409 — отказ по смыслу (последний администратор, попытка удалить себя), и
+      // причину сервер называет текстом. Показываем её, а не «не удалось»: иначе
+      // осмысленный отказ выглядит сбоем и оператор идёт жать ещё раз.
+      const detail = (e as { response?: { status?: number; data?: unknown } })?.response
+      const text = typeof detail?.data === "string" ? detail.data.trim() : ""
+      toast({
+        title: detail?.status === 409 && text ? text : "Не удалось удалить пользователя",
+        variant: "destructive",
+      })
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const isAdmin = me?.role === "it_admin"
+
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between gap-4">
@@ -103,18 +134,19 @@ export default function Users() {
               <TableHead className="px-5 text-xs font-medium text-muted-foreground">Email</TableHead>
               <TableHead className="px-5 text-xs font-medium text-muted-foreground">Роль</TableHead>
               <TableHead className="px-5 text-xs font-medium text-muted-foreground">Добавлен</TableHead>
+              {isAdmin && <TableHead className="px-5 w-px" />}
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Загрузка...</TableCell></TableRow>
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Загрузка...</TableCell></TableRow>
             ) : users.length === 0 ? (
-              <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Пользователей нет</TableCell></TableRow>
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Пользователей нет</TableCell></TableRow>
             ) : (() => {
               const q = query.trim().toLowerCase()
               const filtered = q ? users.filter((u) => u.email.toLowerCase().includes(q)) : users
               if (filtered.length === 0) {
-                return <TableRow className="hover:bg-transparent"><TableCell colSpan={4} className="text-center text-xs text-muted-foreground py-8">Ничего не найдено</TableCell></TableRow>
+                return <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Ничего не найдено</TableCell></TableRow>
               }
               return filtered.map((u) => (
               <TableRow key={u.id} className="hover:bg-transparent">
@@ -128,12 +160,60 @@ export default function Users() {
                 <TableCell className="px-5 py-3 text-xs text-muted-foreground tabular-nums">
                   {new Date(u.created_at).toLocaleDateString("ru-RU")}
                 </TableCell>
+                {/* Себе кнопку не рисуем: сервер такое удаление отвергает, и показывать
+                    действие, которое заведомо откажет, — обман. */}
+                {isAdmin && (
+                  <TableCell className="px-5 py-3 text-right">
+                    {u.id !== me?.id && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Удалить ${u.email}`}
+                        title="Удалить учётную запись"
+                        onClick={() => setToDelete(u)}
+                        className="text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-4 w-4" strokeWidth={2} />
+                      </Button>
+                    )}
+                  </TableCell>
+                )}
               </TableRow>
               ))
             })()}
           </TableBody>
         </Table>
       </div>
+
+      {/* Подтверждение простое, без ввода имени руками: удаление аккаунта обратимо
+          приглашением, в отличие от сноса агента с живой машины. Но email в тексте
+          обязателен — по строке «удалить пользователя?» соглашаются не глядя. */}
+      <Dialog open={toDelete !== null} onOpenChange={(o) => { if (!o) setToDelete(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Удалить учётную запись?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <p className="text-sm text-soft">
+              <span className="font-medium text-foreground">{toDelete?.email}</span> потеряет доступ
+              к панели немедленно: активные сессии оборвутся, выпущенные им сервисные токены
+              перестанут работать.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Записи журнала аудита и заявки на локальные права сохранятся — они переживают
+              удаление аккаунта.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setToDelete(null)} disabled={deleting}>
+                Отмена
+              </Button>
+              <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+                {deleting ? "Удаление..." : "Удалить"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={inviteOpen} onOpenChange={(o) => { setInviteOpen(o); if (!o) { setInviteLink(null); setInviteEmail("") } }}>
         <DialogContent>

@@ -9,6 +9,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/api"
 	"github.com/Floodww/RoutineOps/internal/server/gateway"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/hibiken/asynq"
 )
 
 // Open-core: FileVault recovery-escrow — enterprise-фича. Escrow-сервис НЕ регистрируется
@@ -18,7 +19,7 @@ func registerEnterpriseFlags() {}
 
 func runEnterpriseCLI() bool { return false }
 
-func enterpriseSetup(_ *gateway.Gateway, _ *storage.DB, logger *slog.Logger) []api.RouterOption {
+func enterpriseSetup(_ *gateway.Gateway, _ *storage.DB, _ *asynq.Client, logger *slog.Logger) []api.RouterOption {
 	// Оператор задал ESCROW_* на open-core-бинаре — фичи тут физически нет; молчание
 	// выглядело бы как «эскроу включён». Предупредить, но стартовать (fail-closed).
 	if os.Getenv("ESCROW_RECIPIENT") != "" || os.Getenv("ESCROW_RECIPIENT_FPR") != "" {

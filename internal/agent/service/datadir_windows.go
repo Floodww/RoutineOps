@@ -19,11 +19,37 @@ import (
 // миграцией файлы) получают тот же admin-only ACL.
 const dataDirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
-// inheritOnlyDACL — пустой (без явных ACE) UNPROTECTED DACL: снимает
-// собственные ACE объекта, оставляя только унаследованные от защищённого
-// родителя (то есть admin-only от state). Применяется к уже существовавшим
-// детям state, чтобы pre-seed атакующего не сохранил свои права.
-const inheritOnlyDACL = "D:"
+// childDirSDDL — DACL, который ставится уже существовавшим детям state.
+//
+// Тот же admin-only, что и на самом state, и ЯВНЫМИ ACE — не пустым DACL в
+// расчёте на наследование. Прежняя реализация ставила детям `"D:"` (пустой DACL)
+// с флагом UNPROTECTED_DACL_SECURITY_INFORMATION, рассчитывая, что система
+// подтянет унаследованные ACE от защищённого родителя. На деле это давало
+// каталогу пустой И protected DACL — доступ запрещён ВСЕМ, включая SYSTEM, а
+// P отрезает наследование, так что само не чинится.
+//
+// Полевое следствие (2.5.1, полевая Windows-машина): после ПЕРВОГО же рестарта службы
+// (на свежей установке outbox ещё не существует, на втором старте — уже да)
+// C:\ProgramData\RoutineOps\state\outbox получал O:BA D:P, и служба под SYSTEM
+// теряла и запись, и чтение собственной очереди. Молча для сервера: outbox и
+// есть канал доставки, поэтому умирали разом отчёты задач, security-события и
+// статусы лока, а снаружи это выглядело только залипшим статусом в панели.
+//
+// Механизм проверен на Windows-боксе, а не выведен из документации:
+//   - SecurityDescriptorFromString("D:") даёт DACL PRESENT с нулём ACE
+//     (не NULL-DACL) — то есть «запрещено всем», а не «доступ по умолчанию»;
+//   - SetSecurityInfo по ХЭНДЛУ (SE_KERNEL_OBJECT) наследование от родителя не
+//     пересчитывает и отдаёт объекту ровно этот пустой DACL, выставляя при этом
+//     protected. Тот же вызов через SetNamedSecurityInfo (path-based) наследование
+//     подтягивает — но path-based API мы здесь не используем осознанно: он молча
+//     проходит сквозь подсунутый junction, ради чего вся эта функция и открывает
+//     объекты no-follow по хэндлу.
+//
+// Явные ACE снимают зависимость от семантики наследования целиком: результат
+// один и тот же независимо от того, что унаследовалось бы от родителя. Проверено
+// под NT AUTHORITY\SYSTEM: со старым DACL — Access denied на чтение и запись,
+// с этим — обе операции проходят.
+const childDirSDDL = dataDirSDDL
 
 // userWritableDirSDDL — PROTECTED DACL общего каталога ProgramData\RoutineOps
 // (lock.json, status.json, unlock-request-*; пишут и служба, и юзер-сессия).
@@ -169,23 +195,38 @@ func ensureRealDir(dir string, sddl string) error {
 	return nil
 }
 
-// secureExistingChildren рекурсивно лишает уже существующие дети dir собственных
-// ACE и владельца (оставляя унаследованный admin-only от защищённого dir), а
+// secureExistingChildren рекурсивно переустанавливает уже существующим детям dir
+// владельца и admin-only DACL (снимая ACE, которые мог оставить pre-seed), а
 // вложенные reparse-точки удаляет. dir к этому моменту подтверждён настоящим и
 // защищён, поэтому чтение его содержимого безопасно. Best-effort: непрочитанное
 // пропускаем (в худшем случае объект просто не пере-защищён — не хуже прежнего).
 func secureExistingChildren(dir string) error {
+	return secureChildrenWith(dir, childDirSDDL)
+}
+
+// secureChildrenWith — тело secureExistingChildren с явным SDDL. Вынесено
+// параметром РАДИ ТЕСТА: гард пустого DACL ниже иначе непроверяем, а он —
+// единственное, что стоит между опечаткой в константе и повторением полевого
+// бага, который сервер не видит.
+func secureChildrenWith(dir, sddl string) error {
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
 	}
-	sd, err := windows.SecurityDescriptorFromString(inheritOnlyDACL)
+	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return err
+	}
+	// Пустой DACL сюда не должен попасть НИКОГДА: именно он и лишал SYSTEM
+	// доступа к собственной очереди в 2.5.1. Проверка дешёвая и стоит прямо
+	// перед применением — опечатка в константе иначе повторила бы полевой баг
+	// молча, а увидели бы мы её снова только по залипшему статусу в панели.
+	if dacl == nil || dacl.AceCount == 0 {
+		return fmt.Errorf("DACL детей каталога состояния пуст — применение запрещено (запретило бы доступ всем, включая SYSTEM)")
 	}
 	secureTree(dir, admins, dacl, 0)
 	runtime.KeepAlive(sd)
@@ -195,7 +236,7 @@ func secureExistingChildren(dir string) error {
 // secureTree обходит содержимое dir на один уровень и рекурсивно углубляется в
 // подтверждённые настоящие каталоги. Каждый объект открывается no-follow, чтобы
 // авторитетно (по хэндлу) отличить reparse от настоящего и не пройти по junction.
-func secureTree(dir string, owner *windows.SID, inheritDACL *windows.ACL, depth int) {
+func secureTree(dir string, owner *windows.SID, childDACL *windows.ACL, depth int) {
 	if depth >= maxSecureDepth {
 		return
 	}
@@ -221,15 +262,18 @@ func secureTree(dir string, owner *windows.SID, inheritDACL *windows.ACL, depth 
 			_ = os.Remove(path)
 			continue
 		}
+		// PROTECTED, а не UNPROTECTED: DACL здесь явный и самодостаточный, и
+		// пересчёт наследования нам не нужен. Прежний UNPROTECTED в паре с
+		// пустым DACL и давал протекший наружу O:BA D:P — см. childDirSDDL.
 		_ = windows.SetSecurityInfo(
 			h, windows.SE_KERNEL_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
-			owner, nil, inheritDACL, nil,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			owner, nil, childDACL, nil,
 		)
 		isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 		windows.CloseHandle(h)
 		if isDir {
-			secureTree(path, owner, inheritDACL, depth+1)
+			secureTree(path, owner, childDACL, depth+1)
 		}
 	}
 }

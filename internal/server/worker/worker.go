@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/Floodww/RoutineOps/internal/server/registry"
@@ -149,6 +150,26 @@ func (h *Handler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 			DelaySeconds: task.RebootDelaySeconds,
 		}
 	}
+	if task.TaskType == "uninstall" {
+		// Едет СЕЛЕКТОР, а не команда: агент снимает инвентарь заново, ищет по этим
+		// полям запись в своём свежем снимке и выполняет метод, который определил сам.
+		// uninstall_method здесь — предмет сверки: расхождение с тем, что агент видит
+		// сейчас, означает, что запись изменилась после снимка (инвентарь отстаёт до
+		// пяти минут), и агент отказывает TARGET_CHANGED вместо «снесу что похоже».
+		//
+		// request_id = task.ID: агент дедуплицирует durably по нему, передоставка того
+		// же id безопасна. Новый id для того же намерения был бы второй командой.
+		pbTask.Uninstall = &pb.UninstallCommand{
+			RequestId:       task.ID,
+			SoftwareName:    task.Uninstall.SoftwareName,
+			Version:         task.Uninstall.Version,
+			UninstallId:     task.Uninstall.UninstallID,
+			InstallLocation: task.Uninstall.InstallLocation,
+			UninstallMethod: uninstallMethodFromString(task.Uninstall.Method),
+			Scope:           task.Uninstall.Scope,
+			Reason:          task.Uninstall.Reason,
+		}
+	}
 	sent := h.registry.Send(cn, pbTask)
 	if !sent {
 		return fmt.Errorf("send to device %s failed, will retry", cn)
@@ -182,4 +203,21 @@ func deliverRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 		return d
 	}
 	return asynq.DefaultRetryDelayFunc(n, e, t)
+}
+
+// uninstallMethodFromString — обратная сторона gateway.uninstallMethodToString: канон
+// БД (миграция 036) → enum. Собирается из имени enum'а, а не из руками выписанной
+// таблицы: таблица разъехалась бы с proto молча, при добавлении нового метода — и
+// разъезд проявился бы TARGET_CHANGED на живой машине, потому что агент сверяет метод.
+//
+// Неизвестное значение даёт UNSPECIFIED, и это fail-closed: агент сверяет присланный
+// метод со своим и на UNSPECIFIED откажет, вместо того чтобы снести цель наугад.
+func uninstallMethodFromString(s string) pb.UninstallMethod {
+	if s == "" {
+		return pb.UninstallMethod_UNINSTALL_METHOD_UNSPECIFIED
+	}
+	if v, ok := pb.UninstallMethod_value["UNINSTALL_METHOD_"+strings.ToUpper(s)]; ok {
+		return pb.UninstallMethod(v)
+	}
+	return pb.UninstallMethod_UNINSTALL_METHOD_UNSPECIFIED
 }

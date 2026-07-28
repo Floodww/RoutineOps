@@ -391,6 +391,15 @@ export default function Devices() {
                         {DEVICE_STATUS[d.status]?.label ?? d.status}
                       </Badge>
                     )}
+                    {/* Ровно рядом с онлайн-бейджем, и это не украшение: такая машина
+                        ЗЕЛЁНАЯ и молчит, потому что её отчёты не доходят. Без метки
+                        строка выглядит здоровее любой другой. */}
+                    {d.outbox_unavailable && (
+                      <Badge variant="outline" className="border-violet-500 text-violet-600 dark:text-violet-400"
+                             title={d.degraded_detail || "Очередь отчётов агента недоступна"}>
+                        🕳 Ослеп
+                      </Badge>
+                    )}
                   </div>
                 </TableCell>
                 <TableCell className="px-4 py-3 text-muted-foreground text-xs font-mono">

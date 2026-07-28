@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
@@ -212,6 +213,40 @@ func (b *Bot) NotifyITAdmins(ctx context.Context, text string) {
 		}
 		if err := b.send(chatID, text); err != nil {
 			b.logger.Error("telegram: send message", "chat_id", chatID, "err", b.redact(err))
+		}
+	}
+}
+
+// NotifyAlert рассылает уведомление об алерте, уважая порог доставки каждого
+// получателя (users.notify_min_severity, миграция 041).
+//
+// Отдельно от NotifyITAdmins намеренно: у части уведомлений критичности нет вообще
+// (заявка на права администратора, служебные сообщения бота), и фильтровать их по
+// важности неверно — заявку нельзя «отложить как неважную», она либо
+// рассматривается, либо истекает.
+//
+// Ошибка чтения получателей НЕ глушит рассылку молча: без списка отправить некому,
+// и единственное, что здесь можно сделать правильно, — оставить громкий след в
+// логе. Это точка, где потеря уведомления о critical никак иначе себя не проявит.
+func (b *Bot) NotifyAlert(ctx context.Context, severity alerting.Severity, text string) {
+	if b == nil {
+		return // бот не сконфигурён (нет токена) — уведомления просто отключены
+	}
+	recipients, err := b.db.GetTelegramRecipients(ctx)
+	if err != nil {
+		b.logger.Error("telegram: get alert recipients", "severity", string(severity), "err", err)
+		return
+	}
+	for _, r := range recipients {
+		if !alerting.DeliverTo(severity, alerting.Severity(r.MinSeverity)) {
+			continue
+		}
+		chatID, err := strconv.ParseInt(r.ChatID, 10, 64)
+		if err != nil {
+			continue
+		}
+		if err := b.send(chatID, text); err != nil {
+			b.logger.Error("telegram: send alert", "chat_id", chatID, "err", b.redact(err))
 		}
 	}
 }

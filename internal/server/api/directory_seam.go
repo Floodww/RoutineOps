@@ -25,6 +25,14 @@ type DirectoryConfig struct {
 	UserFilter      string `json:"user_filter"`       // напр. (&(objectClass=user)(objectCategory=person))
 	SyncIntervalMin int    `json:"sync_interval_min"` // 0 = только вручную
 	HasPassword     bool   `json:"has_password"`      // только в ответе: задан ли bind-пароль
+	// StartTLS — поднять TLS на уже открытом ldap://-соединении. Третий режим поверх
+	// схемы URL: ldaps:// = неявный TLS, ldap:// = открытый канал, ldap:// + start_tls =
+	// апгрейд. Взаимоисключающ с ldaps:// (двойной TLS бессмыслен) — validate отбивает.
+	StartTLS bool `json:"start_tls"`
+	// HasCACert — только в ответе: задан ли корневой сертификат каталога. Сам PEM
+	// наружу не отдаётся никогда (симметрично bind-паролю): он не секрет, но его
+	// наличие достаточно, а лишний вынос содержимого — лишняя поверхность.
+	HasCACert bool `json:"has_ca_cert"`
 }
 
 // DirectorySyncResult — итог синка каталога.
@@ -38,7 +46,9 @@ type DirectorySyncResult struct {
 // (//go:build enterprise).
 type DirectoryService interface {
 	GetConfig(ctx context.Context) (DirectoryConfig, error)
-	SetConfig(ctx context.Context, cfg DirectoryConfig, bindPassword string) error // bindPassword=="" не меняет
+	// SetConfig: bindPassword=="" и caCertPEM=="" НЕ трогают уже сохранённые значения —
+	// UI не показывает ни пароль, ни PEM и шлёт пустые строки при правке прочих полей.
+	SetConfig(ctx context.Context, cfg DirectoryConfig, bindPassword, caCertPEM string) error
 	TestConnection(ctx context.Context) error
 	SyncNow(ctx context.Context) (DirectorySyncResult, error)
 }
@@ -77,19 +87,26 @@ func (h *Handler) setDirectoryConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DirectoryConfig
 		BindPassword string `json:"bind_password"` // "" = не менять существующий пароль
+		// CACertPEM — write-only, как и пароль: приходит в PUT, наружу не возвращается.
+		CACertPEM string `json:"ca_cert_pem"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if err := h.directorySvc.SetConfig(r.Context(), req.DirectoryConfig, req.BindPassword); err != nil {
+	if err := h.directorySvc.SetConfig(r.Context(), req.DirectoryConfig, req.BindPassword, req.CACertPEM); err != nil {
 		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
 	// В аудит — метаданные, НЕ пароль.
 	h.audit(r.Context(), claims.UserID, claims.Email, "set_directory_config", "directory", "",
-		map[string]any{"url": req.URL, "base_dn": req.BaseDN, "enabled": req.Enabled})
+		// Транспорт — часть модели доверия: по нему видно, ходил ли сервер к каталогу
+		// открытым каналом. Содержимое PEM не пишем, только факт замены.
+		map[string]any{
+			"url": req.URL, "base_dn": req.BaseDN, "enabled": req.Enabled,
+			"start_tls": req.StartTLS, "ca_cert_replaced": req.CACertPEM != "",
+		})
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/enroll"
 	"github.com/Floodww/RoutineOps/internal/server/mailer"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -109,6 +111,8 @@ type Handler struct {
 	directorySvc DirectoryService
 	// telegramBotUsername — @username бота этого деплоя (getMe). nil = бот не настроен.
 	telegramBotUsername func(context.Context) string
+	// trustedProxies — с каких адресов верить заголовку с адресом клиента. См. realip.go.
+	trustedProxies []netip.Prefix
 }
 
 func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *enroll.CASigner, publicWebURL, releasesDir string, m *mailer.Mailer, cookieSecure bool, opts ...RouterOption) http.Handler {
@@ -123,10 +127,15 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		cookieSecure: cookieSecure,
 		lockPolicy:   overlayOnlyPolicy{},
 		// D: 5 неудачных попыток на аккаунт за 15 мин → блок аккаунта на 15 мин.
-		loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute),
+		loginLimiter:   newLoginLimiter(5, 15*time.Minute, 15*time.Minute),
+		trustedProxies: defaultTrustedProxies,
 	}
 
 	r := chi.NewRouter()
+	// ПЕРВЫМ в цепочке: ниже по цепочке per-IP лимиты ключуются по RemoteAddr, и он
+	// должен быть уже настоящим. За обратным прокси без этого все клиенты делят один
+	// бакет — см. realip.go.
+	r.Use(h.realIPFromProxy)
 	r.Use(accessLogRedacted) // не логируем query: одноразовые токены приходят в query-string
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestSize(1 << 20)) // 1 MB cap — защита от OOM через гигантские тела
@@ -188,6 +197,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		// держателю read-only токена, а тот, скормив его боту, перехватывал
 		// админские алерты. Привязка Telegram — личное действие человека.
 		r.With(requireHuman).Get("/profile/telegram", h.getTelegramStatus)
+		r.With(requireHuman).Post("/profile/notify-min-severity", h.setNotifyMinSeverity)
 		r.Get("/admin-access-requests", h.listAdminAccessRequests)
 		r.Get("/policies", h.listPolicies)
 		r.Get("/policies/compliance", h.listPolicyCompliance)
@@ -231,6 +241,9 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			// Отзыв НЕ гейтим requireHuman: защитное действие (ниже тот же приём с правами).
 			r.Delete("/enrollment-tokens/{id}", h.revokeEnrollmentToken)
 			r.With(requireHuman).Post("/devices/{id}/approve", h.approveDevice)
+			// Проверка целостности журнала — admin-only: она раскрывает состояние
+			// контроля безопасности, и наблюдателю знать, сломана ли цепочка, не нужно.
+			r.Get("/audit-log/verify", h.verifyAuditChain)
 			r.Post("/devices/{id}/reject", h.rejectDevice)
 			r.With(requireHuman).Post("/enrollment-queue/approve", h.approvePendingDevices)
 			r.Post("/enrollment-queue/reject", h.rejectPendingDevices)
@@ -273,6 +286,9 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			// нет в списке /api-tokens, поэтому при разборе инцидента её не находят, а
 			// отзыв утёкшего токена доступ не отбирает.
 			r.With(requireHuman).Post("/users/invite", h.inviteUser)
+			// Удаление аккаунта — тем же гардом, что и выпуск: обе операции меняют
+			// состав тех, кто управляет парком. См. док deleteUser.
+			r.With(requireHuman).Delete("/users/{id}", h.deleteUser)
 			// Сервисные токены — только it_admin И только человеком (requireHuman).
 			// Токен это учётные данные с ролью, выпуск их равносилен заведению
 			// пользователя. 🔴 Без requireHuman модель отзыва была фикцией: утёкший
@@ -830,11 +846,54 @@ func (h *Handler) getTelegramStatus(w http.ResponseWriter, r *http.Request) {
 	if h.telegramBotUsername != nil {
 		botUsername = h.telegramBotUsername(r.Context())
 	}
+	// min_severity отдаётся вместе со статусом привязки, а не отдельной ручкой:
+	// порог доставки имеет смысл только там, где есть куда доставлять, и UI
+	// показывает его в той же карточке.
+	minSeverity, err := h.db.GetUserNotifyMinSeverity(r.Context(), claims.UserID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"linked":       chatID != nil && *chatID != "",
 		"link_token":   linkToken,
 		"bot_username": botUsername,
+		"min_severity": minSeverity,
 	})
+}
+
+type setMinSeverityRequest struct {
+	MinSeverity string `json:"min_severity"`
+}
+
+// setNotifyMinSeverity меняет порог доставки уведомлений текущему пользователю.
+//
+// Личная ручка, а не админская: порог — свойство получателя, и решать за коллегу,
+// каких алертов ему не видеть, не должен никто. Отсюда же requireHuman в роутере —
+// у сервисного токена нет личности, и он менял бы настройку создавшего его админа.
+func (h *Handler) setNotifyMinSeverity(w http.ResponseWriter, r *http.Request) {
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	var req setMinSeverityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	// Валидация ЗДЕСЬ, а не только CHECK-ограничением в БД: опечатка должна вернуться
+	// пользователю понятной ошибкой, а не 500 от драйвера. И молча подставлять
+	// значение по умолчанию нельзя — это превратило бы опечатку в тихое отключение
+	// части уведомлений, которое ничем себя не проявит.
+	sev, ok := alerting.Parse(req.MinSeverity)
+	if !ok {
+		http.Error(w, "неизвестный уровень критичности", http.StatusBadRequest)
+		return
+	}
+	if err := h.db.SetUserNotifyMinSeverity(r.Context(), claims.UserID, string(sev)); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	h.audit(r.Context(), claims.UserID, claims.Email, "set_notify_min_severity", "user", claims.UserID,
+		map[string]any{"min_severity": string(sev)})
+	writeJSON(w, http.StatusOK, map[string]string{"min_severity": string(sev)})
 }
 
 func (h *Handler) generateTelegramLinkToken(w http.ResponseWriter, r *http.Request) {
@@ -1683,6 +1742,57 @@ func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
 		users = []storage.User{}
 	}
 	writeJSON(w, http.StatusOK, users)
+}
+
+// deleteUser — удаление аккаунта панели. Реализует ровно тот сценарий, ради которого
+// заводилось: сотрудник уволился, доступ надо отобрать. Работает и как единственный
+// способ отобрать доступ насовсем — смена пароля админом лишь роняет живые сессии.
+//
+// Три отказа, каждый по своей причине:
+//   - себя удалить нельзя (409): оператор мгновенно теряет сессию посреди работы, а
+//     польза от такого самообслуживания нулевая — снести коллегу может любой it_admin;
+//   - последнего администратора удалить нельзя (409): панель осталась бы без единого
+//     аккаунта, способного что-либо изменить, и чинилось бы это только доступом к БД;
+//   - несуществующего — 404, включая кривой UUID из URL.
+//
+// Ручка под requireHuman: удаление администратора меняет состав тех, кто управляет
+// парком. Сервисный токен — автоматизация, и распоряжаться личностями не должен, как
+// и выпускать их (users/invite рядом закрыт тем же гардом).
+func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	if id == claims.UserID {
+		http.Error(w, "cannot delete your own account", http.StatusConflict)
+		return
+	}
+	// Читаем ДО удаления: после него email взять неоткуда, а в журнале безопасности
+	// «удалён пользователь <uuid>» без адреса бесполезно.
+	target, err := h.db.GetUserByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if target == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	deleted, err := h.db.DeleteUser(r.Context(), id)
+	if errors.Is(err, storage.ErrLastAdmin) {
+		http.Error(w, "cannot delete the last it_admin", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	h.audit(r.Context(), claims.UserID, claims.Email, "delete_user", "user", id,
+		map[string]any{"email": target.Email, "role": target.Role})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type inviteUserRequest struct {

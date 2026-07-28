@@ -14,6 +14,175 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.7.0 — 27 July 2026
+
+### Devices
+
+- **[Enterprise] Uninstalling software from the device page.** Every entry the agent can
+  remove now has a delete action in the software list. Entries that cannot be removed
+  (installed into a user profile on Windows, protected by the system on macOS) get no
+  button — it would only return a refusal.
+
+  The server does not send the agent an operating-system command. It sends a **target
+  description**, and the agent re-collects its inventory, finds that entry locally and
+  runs whichever removal method it determined itself. Otherwise the task channel would
+  become a second path to arbitrary execution on the device — bypassing the signing,
+  auditing and limits that scripts have.
+
+  A consequence worth knowing up front: server-side inventory lags by a few minutes. If
+  the program was updated or its key changed in the meantime, the removal will **not**
+  happen — you will see "target changed" and can retry after refreshing the inventory.
+  By construction the system cannot remove the wrong version, or a same-named product
+  from a different vendor.
+
+  The outcome is shown separately from the task status, because different outcomes call
+  for different actions: "target changed" — refresh the inventory, "ambiguous target" —
+  narrow it down, "not removable" — nothing to do. **"Still present"** deserves its own
+  mention: it is not the same as an error. An uninstaller can report success while the
+  program remains — for instance when removal is deferred until reboot. That is why the
+  agent verifies with a second inventory snapshot rather than trusting the exit code.
+
+  The agent will not remove itself: such an attempt returns "this is the agent". Removing
+  the agent is done by decommissioning the device.
+
+
+- **You can now see when an agent has gone blind.** The agent has a queue that carries
+  task results, lock statuses and security events to the server. When that queue fails
+  (disk error, broken permissions on the state directory) the device stays connected and
+  looks perfectly healthy in the console — it simply stops reporting anything. That is
+  exactly how the 2.5.1 field failure on Windows presented itself: the only outward sign
+  was a frozen lock status, spotted by eye.
+
+  The agent now reports the queue being unavailable in its heartbeat — the one channel
+  that does not depend on it. An "Agent blind" marker with the cause and the time it
+  started appears in the device list and on the device page, and an entry requiring
+  acknowledgement appears under alerts. While the marker is up, the absence of events
+  from that machine does not mean nothing is happening on it: it means events are not
+  getting through. The marker clears itself as soon as the queue recovers; the alert
+  entry stays — a human closes it after checking that nothing happened during the
+  blind period.
+
+  Requires an agent of this version or newer. An older agent does not send the signal and
+  its device is shown as before.
+
+### Notifications
+
+- **Alerts now have severity levels, and notifications have a threshold.** Every alert used
+  to be equal: "a destructive action is happening right now" and "an agent has not checked
+  in for two hours" looked the same and were pushed to Telegram to every administrator
+  alike. The knowledge of what matters more lived in the frontend only, so neither the
+  server, nor notifications, nor exports could see it.
+
+  Each alert now carries one of four levels. It is stamped when the alert is created and
+  then lives with the row: editing the severity map does not rewrite history, and an
+  incident triaged six months ago as medium stays medium. The order reflects urgency of
+  intervention rather than "seriousness in general". The list shows the level as a badge
+  and sorts unacknowledged first, by level second: an acknowledged critical alert has
+  already been handled by a human and must not push unacknowledged ones out of view.
+
+  Each recipient has their own delivery threshold — the selector next to the Telegram
+  binding. The default delivers everything, exactly as before: any higher default would
+  **silently** unsubscribe administrators from part of what they received yesterday. It
+  only gets quieter by an explicit operator action. Local-admin requests are not subject to
+  the threshold — they carry no severity; they are either reviewed or they expire.
+
+  An unacknowledged critical alert reminds after 30 minutes and then hourly until it is
+  acknowledged (`ALERT_ESCALATE_AFTER_MINUTES`, `ALERT_ESCALATE_REPEAT_MINUTES`,
+  `ALERT_ESCALATE_MIN_SEVERITY`; a zero interval disables escalation). An alert type the
+  server does not know is treated as high rather than low: an unknown type means an agent
+  newer than the server, and such an event must not silently fall below the threshold.
+
+### Users
+
+- **Accounts can now be deleted.** There was no delete endpoint at all: an employee who
+  left could only be left in the system. The only way to take access away was changing
+  their password — that drops live sessions, but the account keeps existing.
+
+  Every row under "Users" now has a delete action. It takes access away immediately and
+  completely: active sessions stop being accepted on the very next request, and service
+  tokens issued by that person are removed along with them — otherwise automation acting
+  in their name would outlive their departure, invisibly, because nobody would be left to
+  look at it.
+
+  What deletion does not touch: the audit log, issued invitations, recovery-key reveals
+  and local-privilege requests. All of it stays, losing its reference to the deleted
+  account — a security journal must not be cleared along with a person.
+
+  Two refusals: deleting yourself (the operator would instantly lose their own session,
+  and any other administrator can remove a colleague) and deleting the last IT
+  administrator (the console would be left without a single account able to change
+  anything, fixable only with database access).
+
+### Security
+
+- **The login attempt limit is counted per client address again.** The "10 login attempts
+  per minute per address" limit relied on the address the server sees on the connection —
+  and behind nginx that address is the same for every request. The limit was therefore not
+  per-address but **one shared counter for everyone**: a brute-force from a single machine
+  consumed it entirely and locked everyone else out, with no per-address isolation at all.
+  The same applied to password recovery, password reset and invitation acceptance.
+
+  The server now recovers the client address from the header the proxy sets — but trusts
+  that header **only** when the request comes from the proxy's address. A request from
+  anywhere else carrying its own header changes nothing: otherwise the limit could be
+  bypassed by supplying a fresh value on every attempt, which is worse than the original
+  problem.
+
+  Private and loopback ranges are trusted by default, which covers the standard
+  installation where nginx sits alongside the server. If your proxy is on a public
+  address, list it in `TRUSTED_PROXIES`, or the counter becomes shared again. A typo in
+  that variable stops the server from starting: silently falling back to the default would
+  leave the operator with a limit they believe is configured.
+
+  nginx was fixed alongside: it now overwrites the client-address header on all routes,
+  not only under `/api/`. Previously a client-supplied header passed straight through on
+  the other routes; that did not affect the login limits (they live under `/api/`) but was
+  a trap for any future address-based check.
+
+
+- **[Enterprise] Directory: StartTLS and a custom root certificate.** The server
+  previously supported only `ldaps://` verified against system roots — so a directory
+  whose Active Directory is issued by the organisation's own certificate authority could
+  not be connected at all, and the only alternative was a plaintext channel, which a
+  production AD generally refuses to accept a service-account bind over. The directory
+  settings now offer a StartTLS switch (raises encryption on an already-open connection,
+  before the password is sent) and a field for the root certificate.
+
+  The certificate **replaces** the system roots rather than extending them: trust is
+  addressed to the organisation's own authority. Otherwise a certificate from any public
+  authority, issued for the name of your domain controller, would be accepted. There is
+  no "skip certificate verification" option and there will not be one — it turns the
+  channel into a plaintext one while looking like encryption is on in the interface.
+
+  The certificate is parsed on save: a PEM mangled while pasting is rejected by the form
+  instead of surfacing as a sync failure an hour later. Like the password, it is never
+  returned — the interface only shows whether one is set.
+
+
+- **The audit log can now be checked for tampering.** It used to be an ordinary table:
+  anyone who reached the database could edit a row or delete it without leaving a trace. A
+  log that cannot be verified is not evidence in an incident review, it is an opinion.
+
+  Every entry now carries a chain number and a hash linking it to the previous one. The
+  check (`GET /audit-log/verify`) catches an edited field, a deletion from the middle, a
+  reordering and an insertion. Routine retention cleanup does not count as tampering —
+  otherwise the nightly cleanup would raise a forgery alarm every time and the check would
+  be switched off within a week. There is no button in the panel yet; the check is
+  available through the API.
+
+  **An honest boundary.** The chain does not stop someone who is allowed to write to the
+  database and knows about it: they will recompute the whole thing. What makes it
+  meaningful is keeping the head outside the database, so the server prints the chain head
+  to the log on every start and once a day — that line is not diagnostics, it is part of
+  the mechanism, and must not be filtered out as noise. That is what you compare against.
+
+  Entries written before the upgrade are not part of the chain and never will be:
+  recomputing over data that may already have been tampered with would produce a valid
+  chain over a forgery. The check reports their count separately, so that "the check
+  passed" is not read as "the whole log is intact". It also returns 200 when tampering is
+  found: "the check ran, the result is that the log was tampered with" is a successful
+  response, whereas an error code would be indistinguishable from the server being down.
+
 ## 2.6.0 — 27 July 2026
 
 Product release (server + web). The agent stays at **2.5.1** — its Free-edition code has

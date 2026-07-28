@@ -13,6 +13,7 @@ const alertTypeLabel: Record<string, string> = {
   lock_tamper:                    "Попытка обхода блокировки",
   filevault_revoke_failed:        "FileVault: revoke не завершён",
   filevault_secret_mismatch:      "FileVault: секрет не совпал с эскроу",
+  outbox_unavailable:             "Агент ослеп: очередь отчётов недоступна",
   forbidden_software:             "Запрещённое ПО",
   unauthorized_install:           "Неавторизованная установка",
   unauthorized_settings_change:   "Изменение настроек",
@@ -30,32 +31,85 @@ const alertTypeColor: Record<string, string> = {
   // Расхождение секрета с эскроу — деструктив остановлен ДО мутации, машина цела.
   // Красный, а не fuchsia: это не противник на устройстве, а рассогласование кастодии.
   filevault_secret_mismatch:    "text-red-600 dark:text-red-500",
+  // Не нарушение и не противник, а мёртвый датчик: с этой машины не придёт НИ ОДИН из
+  // типов выше. Фиолетовый — семейство «здоровье агента» (там же синий agent_unreachable),
+  // но сильнее: недоступный агент виден по last_seen_at, ослепший выглядит здоровым.
+  outbox_unavailable:           "text-violet-600 dark:text-violet-400",
   forbidden_software:           "text-red-600 dark:text-red-500",
   unauthorized_install:         "text-amber-600 dark:text-amber-500",
   unauthorized_settings_change: "text-orange-600 dark:text-orange-500",
   agent_unreachable:            "text-blue-600 dark:text-blue-500",
 }
 
-// TYPE_ORDER — порядок секций. Типы вне списка (сервер хранит alert_type свободным
-// TEXT, без enum) уезжают в конец по алфавиту, а не пропадают.
+// severityRank — вес уровня для сортировки. Зеркалит alerting.Rank на сервере;
+// неизвестный уровень весит 0 и уезжает в конец, а не в начало.
+const severityRank: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+}
+
+const severityLabel: Record<string, string> = {
+  critical: "критично",
+  high: "высокая",
+  medium: "средняя",
+  low: "низкая",
+}
+
+// Плашка уровня. Цвет здесь отвечает за КРИТИЧНОСТЬ, а alertTypeColor выше — за
+// ТИП события: это две разные оси, и красить их одной палитрой значило бы потерять
+// одну из них. Оттого у плашки заливка, а у иконки типа — только штрих.
+const severityBadge: Record<string, string> = {
+  critical: "bg-red-500/15 text-red-600 dark:text-red-400",
+  high:     "bg-orange-500/15 text-orange-600 dark:text-orange-400",
+  medium:   "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+  low:      "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+}
+
+// TYPE_ORDER — порядок типов ВНУТРИ одного уровня критичности. С миграции 040 сам
+// уровень приходит с сервера (alerts.severity), и сортировка секций идёт сначала по
+// нему; этот список остался тай-брейкером, чтобы порядок в пределах уровня не
+// начал зависеть от алфавита. Зеркалит alerting.typeOrder на сервере.
+// Типы вне списка (alert_type — свободный TEXT) уезжают в конец своей секции, а не
+// пропадают.
+//
 // Порядок по срочности вмешательства IT, а не по «серьёзности вообще»:
 // filevault_revoke_failed — деструктив УЖЕ начался, машина полу-ревокнута и сама не
 // починится; lock_tamper — живой противник на устройстве прямо сейчас;
 // filevault_secret_mismatch — деструктив остановлен ДО мутации, машина цела, но
 // кастодия ключей разъехалась. Остальное — постфактум-нарушения политики.
+//
+// outbox_unavailable стоит выше нарушений политики не по «серьёзности вообще», а
+// потому что обесценивает ТИШИНУ: пока он висит, отсутствие остальных типов с этой
+// машины ничего не доказывает — они физически не могут доехать.
 const TYPE_ORDER = [
   "filevault_revoke_failed",
   "lock_tamper",
   "filevault_secret_mismatch",
+  "outbox_unavailable",
   "forbidden_software",
   "unauthorized_install",
   "unauthorized_settings_change",
   "agent_unreachable",
 ]
 
-type AlertGroup = { type: string; alerts: Alert[]; unacked: number }
+type AlertGroup = { type: string; severity: string; alerts: Alert[]; unacked: number }
 
-// groupByType сохраняет порядок алертов внутри секции (сервер отдаёт их created_at DESC).
+// groupSeverity — критичность секции. Берём МАКСИМУМ по её алертам, а не severity
+// первого: сервер может выдать разным строкам одного типа разные уровни (оператор
+// поднял критичность конкретного инцидента), и секция обязана сортироваться по
+// самому важному, что в ней лежит, иначе он спрячется в глубине списка.
+function groupSeverity(alerts: Alert[]): string {
+  let best = alerts[0]?.severity ?? ""
+  for (const a of alerts) {
+    if ((severityRank[a.severity] ?? 0) > (severityRank[best] ?? 0)) best = a.severity
+  }
+  return best
+}
+
+// groupByType сохраняет порядок алертов внутри секции (сервер отдаёт их
+// severity DESC, created_at DESC).
 function groupByType(alerts: Alert[]): AlertGroup[] {
   const buckets = new Map<string, Alert[]>()
   for (const a of alerts) {
@@ -63,13 +117,23 @@ function groupByType(alerts: Alert[]): AlertGroup[] {
     if (list) list.push(a)
     else buckets.set(a.alert_type, [a])
   }
-  const rank = (t: string) => {
+  const typeRank = (t: string) => {
     const i = TYPE_ORDER.indexOf(t)
     return i === -1 ? TYPE_ORDER.length : i
   }
   return [...buckets.entries()]
-    .map(([type, list]) => ({ type, alerts: list, unacked: list.filter((a) => !a.acknowledged_at).length }))
-    .sort((a, b) => rank(a.type) - rank(b.type) || a.type.localeCompare(b.type))
+    .map(([type, list]) => ({
+      type,
+      severity: groupSeverity(list),
+      alerts: list,
+      unacked: list.filter((a) => !a.acknowledged_at).length,
+    }))
+    .sort(
+      (a, b) =>
+        (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0) ||
+        typeRank(a.type) - typeRank(b.type) ||
+        a.type.localeCompare(b.type),
+    )
 }
 
 export default function Alerts() {
@@ -183,6 +247,15 @@ export default function Alerts() {
               <span className="text-[15px] font-semibold text-foreground">
                 {alertTypeLabel[g.type] ?? g.type}
               </span>
+              {g.severity && (
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
+                    severityBadge[g.severity] ?? "bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {severityLabel[g.severity] ?? g.severity}
+                </span>
+              )}
               <span className="text-xs text-muted-foreground tabular-nums">{g.alerts.length}</span>
               {g.unacked > 0 && (
                 <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-semibold text-red-600 dark:text-red-400">

@@ -3,7 +3,18 @@
 
 set -e
 
-VERSION=${1:-1.0.0}
+# Версия ОБЯЗАТЕЛЬНА. Прежний дефолт 1.0.0 означал, что забытый аргумент собирал
+# канонические релизные артефакты (build/pkg/RoutineOps-agent.pkg и
+# build/darwin/agent_darwin_arm64.version) под номером v1.0.0 при AGENT_VERSION=2.5.1 —
+# и скрипт при этом рапортовал «канонические артефакты обновлены». Прямой вызов
+# документирован в шапке, так что промах не экзотика.
+if [ -z "${1:-}" ]; then
+    echo "ОШИБКА: версия не указана." >&2
+    echo "  ./build-pkg.sh <version> [arm64|amd64|native]" >&2
+    echo "  либо make pkg-mac / pkg-mac-native — они подставят \$(cat AGENT_VERSION)." >&2
+    exit 1
+fi
+VERSION=$1
 ARCH=${2:-arm64}
 EXE_PATH="../../bin/agent_darwin_${ARCH}"
 if [ "$ARCH" == "native" ]; then
@@ -40,8 +51,18 @@ echo "Компиляция бинарного файла версии v$VERSION.
 TAGSFLAG=""
 LDFLAGS_ESCROW=""
 if [ "${AGENT_TAGS:-}" == "enterprise" ]; then
+    # Гейт обязан быть СИММЕТРИЧНЫМ. Обратный случай (escrow-переменные без тега) ловился
+    # ниже, а этот — нет: -X по ПУСТОЙ строке линкер отрабатывает молча, и enterprise-.pkg
+    # уезжал на парк с выключенным FileVault-escrow. Хватало опечатки в имени переменной.
+    if [ -z "${ESCROW_RECIPIENT:-}" ] || [ -z "${ESCROW_RECIPIENT_FPR:-}" ]; then
+        echo "ОШИБКА: AGENT_TAGS=enterprise, но ESCROW_RECIPIENT/_FPR пусты." >&2
+        echo "Линкер подставит пустые строки, и FileVault-escrow окажется ВЫКЛЮЧЕН во всём парке." >&2
+        echo "Задай оба: ESCROW_RECIPIENT=age1... ESCROW_RECIPIENT_FPR=<fpr>." >&2
+        exit 1
+    fi
     TAGSFLAG="-tags enterprise"
-    LDFLAGS_ESCROW="-X main.escrowRecipient=${ESCROW_RECIPIENT:-} -X main.escrowRecipientFpr=${ESCROW_RECIPIENT_FPR:-}"
+    LDFLAGS_ESCROW="-X main.escrowRecipient=${ESCROW_RECIPIENT} -X main.escrowRecipientFpr=${ESCROW_RECIPIENT_FPR}"
+    echo "escrow ВШИВАЕТСЯ: recipient=${ESCROW_RECIPIENT} fpr=${ESCROW_RECIPIENT_FPR}"
 elif [ -n "${ESCROW_RECIPIENT:-}${ESCROW_RECIPIENT_FPR:-}" ]; then
     echo "ОШИБКА: ESCROW_RECIPIENT/_FPR заданы, но AGENT_TAGS != enterprise —" >&2
     echo "free-агент не содержит escrow-символов, пиннинг молча потеряется." >&2
@@ -72,6 +93,21 @@ echo "Сборка PKG пакета версии $VERSION (архитектур�
 WORK_DIR=$(mktemp -d)
 PAYLOAD_DIR="$WORK_DIR/payload"
 SCRIPTS_DIR="$WORK_DIR/scripts"
+
+# Любой аварийный выход — сработавший гейт -trimpath, упавший productsign — оставлял на
+# диске .pkg под ШТАТНЫМ именем: неподписанный или с утечкой путей внутри, но внешне
+# неотличимый от готового. Это тот же класс, что полусобранный каталог export-free.
+# Плюс mktemp-каталог утекал при каждом падении.
+cleanup() {
+    rc=$?
+    rm -rf "$WORK_DIR"
+    if [ "$rc" -ne 0 ] && [ -f "$OUT_PKG" ]; then
+        rm -f "$OUT_PKG"
+        echo "Сборка прервана (код $rc) — недоделанный $OUT_PKG удалён." >&2
+    fi
+    exit $rc
+}
+trap cleanup EXIT
 
 # 1. Готовим Payload (то, что будет скопировано на диск)
 mkdir -p "$PAYLOAD_DIR/usr/local/bin"
@@ -170,7 +206,18 @@ if [ -f "$ENROLL_ENV" ] && consume_enroll_env "$ENROLL_ENV"; then
             rm -f "$ENROLL_ENV"
             echo "Регистрация выполнена, $ENROLL_ENV удалён."
         else
-            echo "Ошибка авто-регистрации ($ENROLL_ENV оставлен для повтора)" >&2
+            # exit 0 здесь означал «Installation Successful» на НЕэнролленной машине:
+            # в парке на 1000+ так тихо теряются устройства, а причина уходит в stderr,
+            # который в GUI-инсталляторе виден только внутри install.log. Дублируем в
+            # собственный лог и отдаём ненулевой код, чтобы Installer/Jamf увидели правду.
+            LOG=/var/log/routineops-postinstall.log
+            {
+                echo "[$(date -u +%FT%TZ)] авто-регистрация ПРОВАЛИЛАСЬ"
+                echo "  $ENROLL_ENV оставлен для повтора и содержит многоразовый bulk-токен"
+                echo "  в world-writable /tmp — удали его, если повтор не планируется"
+            } >> "$LOG" 2>/dev/null
+            echo "Ошибка авто-регистрации ($ENROLL_ENV оставлен для повтора, детали: $LOG)" >&2
+            exit 1
         fi
         exit 0
     fi
@@ -217,7 +264,6 @@ else
     echo "Пропуск подписи пакета (установите SIGNING_IDENTITY для подписи)"
 fi
 
-rm -rf "$WORK_DIR"
 echo "Готово! Пакет собран: $OUT_PKG"
 
 # 5. Канонические артефакты релиза (зеркало build/msi/RoutineOps-agent.msi в git).
@@ -266,6 +312,19 @@ fi
 # утечку. Требуем ВТОРОЙ разделитель: путь сборки это всегда /Users/<юзер>/…
 # или /home/<юзер>/go/pkg/mod/…, а склейка констант следующего '/' не даёт.
 BUILD_PATH_RE='(/home|/Users)/[A-Za-z0-9._-]{1,32}/'
+if [ ! -f "$BIN_SRC" ]; then
+    echo "ОШИБКА: $BIN_SRC не найден — проверка утечки путей не выполнена." >&2
+    exit 1
+fi
+# Байтовая эвристика ниже привязана к /Users|/home и СЛЕПА, если дерево лежит в
+# /private/tmp (git worktree), /Volumes, /opt или на CI-раннере — проверено: бинарь,
+# собранный без -trimpath из /private/tmp, проходил её насквозь. Поэтому сначала
+# авторитетный источник: Go пишет фактические флаги сборки в сам бинарь.
+if ! go version -m "$BIN_SRC" | grep -qE '^[[:space:]]*build[[:space:]]+-trimpath=true$'; then
+    echo "ОШИБКА: $BIN_SRC собран БЕЗ -trimpath (go version -m это подтверждает)." >&2
+    go version -m "$BIN_SRC" | grep -E '^[[:space:]]*build[[:space:]]' >&2
+    exit 1
+fi
 if LC_ALL=C grep -aqE "$BUILD_PATH_RE" "$BIN_SRC"; then
     echo "ОШИБКА: в бинаре остались абсолютные пути сборки — собран без -trimpath." >&2
     LC_ALL=C grep -aoE "$BUILD_PATH_RE[^ ]{0,40}" "$BIN_SRC" | sort -u | head -3 >&2
@@ -275,6 +334,36 @@ fi
 sha256_of() { # формат `<hash>  <файл>`, совместим с `sha256sum -c` в alpine
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi
 }
+
+# Канонические артефакты в git — это ПУБЛИЧНЫЙ Free-релиз: универсальный агент
+# без вшитых ключей (RELEASE_PUBKEY пуст, ключ приезжает с энроллом). Enterprise-
+# сборка несёт вшитый escrow-recipient конкретной инсталляции, и класть её сюда
+# нельзя: файлы коммитятся, и такой бинарь уехал бы всему парку под видом Free —
+# мимо leak-guard'а, который смотрит граф зависимостей и исходники, но не
+# содержимое собранного артефакта.
+#
+# Сборка при этом остаётся полноценной: .pkg лежит рядом со скриптом, путь
+# печатается ниже. Просто не подменяет релизные файлы.
+if [ -n "${AGENT_TAGS:-}${ESCROW_RECIPIENT:-}${ESCROW_RECIPIENT_FPR:-}" ]; then
+    echo ""
+    echo "ВНИМАНИЕ: сборка не-Free (AGENT_TAGS='${AGENT_TAGS:-}')."
+    echo "Канонические артефакты git НЕ обновлены — они обязаны оставаться универсальными."
+    echo "Готовый пакет: $(cd "$(dirname "$OUT_PKG")" && pwd)/$(basename "$OUT_PKG")"
+    exit 0
+fi
+
+# Канонические артефакты — это то, что update.sh/install.sh сверяют с AGENT_VERSION.
+# Расхождение = агент вечно качает «новую» версию и рапортует старую, петля каждые 6ч
+# (см. комментарий про .version ниже). Пакет при этом собран и лежит рядом — не
+# обновляем только релизные файлы, ровно как в случае не-Free сборки выше.
+if [ -f "$REPO_ROOT/AGENT_VERSION" ] && [ "$VERSION" != "$(cat "$REPO_ROOT/AGENT_VERSION")" ]; then
+    echo ""
+    echo "ВНИМАНИЕ: собрано v$VERSION, а AGENT_VERSION=$(cat "$REPO_ROOT/AGENT_VERSION")."
+    echo "Канонические артефакты git НЕ обновлены — иначе агенты попали бы в петлю обновления."
+    echo "Для релиза: ./build-pkg.sh $(cat "$REPO_ROOT/AGENT_VERSION") $ARCH (или сначала обнови AGENT_VERSION)."
+    echo "Готовый пакет: $(cd "$(dirname "$OUT_PKG")" && pwd)/$(basename "$OUT_PKG")"
+    exit 0
+fi
 
 mkdir -p "$REPO_ROOT/build/darwin"
 cp "$BIN_SRC" "$REPO_ROOT/build/darwin/agent_darwin_${REL_ARCH}"

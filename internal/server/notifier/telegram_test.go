@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"github.com/Floodww/RoutineOps/internal/server/testutil"
 )
@@ -190,6 +191,56 @@ func TestNotifyITAdmins_SendsToLinkedAdmins(t *testing.T) {
 	}
 	if !containsSub(msgs, "777111") {
 		t.Errorf("сообщение не адресовано chat_id 777111, сообщения: %v", msgs)
+	}
+}
+
+// NotifyAlert уважает порог доставки каждого получателя (миграция 041): админ с
+// порогом critical не получает high, админ с порогом low получает всё.
+//
+// Проверяются оба направления одним прогоном намеренно: тест «отфильтрованный не
+// получил» в одиночку зелёный и при полностью сломанной рассылке.
+func TestNotifyAlert_RespectsPerRecipientThreshold(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	cs := newCaptureServer(t)
+	bot := newBot(db, cs.URL)
+
+	quiet, err := db.CreateUser(ctx, "Quiet Admin", uniqEmail("quiet"), "hash", "it_admin")
+	if err != nil {
+		t.Fatalf("CreateUser quiet: %v", err)
+	}
+	loud, err := db.CreateUser(ctx, "Loud Admin", uniqEmail("loud"), "hash", "it_admin")
+	if err != nil {
+		t.Fatalf("CreateUser loud: %v", err)
+	}
+	if err := db.SetUserTelegramChatID(ctx, quiet.ID, "777222"); err != nil {
+		t.Fatalf("chat id quiet: %v", err)
+	}
+	if err := db.SetUserTelegramChatID(ctx, loud.ID, "777333"); err != nil {
+		t.Fatalf("chat id loud: %v", err)
+	}
+	if err := db.SetUserNotifyMinSeverity(ctx, quiet.ID, string(alerting.SeverityCritical)); err != nil {
+		t.Fatalf("порог quiet: %v", err)
+	}
+	if err := db.SetUserNotifyMinSeverity(ctx, loud.ID, string(alerting.SeverityLow)); err != nil {
+		t.Fatalf("порог loud: %v", err)
+	}
+
+	bot.NotifyAlert(ctx, alerting.SeverityHigh, "запрещённое ПО на ноутбуке")
+
+	msgs := cs.messages()
+	if !containsSub(msgs, "777333") {
+		t.Errorf("админ с порогом low не получил high-алерт, сообщения: %v", msgs)
+	}
+	if containsSub(msgs, "777222") {
+		t.Errorf("админ с порогом critical получил high-алерт, сообщения: %v", msgs)
+	}
+
+	// Тот же получатель обязан получить critical — иначе предыдущая проверка
+	// доказывала бы лишь то, что рассылка не работает вовсе.
+	bot.NotifyAlert(ctx, alerting.SeverityCritical, "попытка обхода блокировки")
+	if !containsSub(cs.messages(), "777222") {
+		t.Errorf("админ с порогом critical не получил critical-алерт, сообщения: %v", cs.messages())
 	}
 }
 

@@ -57,6 +57,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/agent/status"
 	"github.com/Floodww/RoutineOps/internal/agent/tamper"
 	"github.com/Floodww/RoutineOps/internal/agent/transport"
+	"github.com/Floodww/RoutineOps/internal/agent/uninstall"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -1621,11 +1622,16 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// Data Collector: периодическая инвентаризация, отдельно от heartbeat (ADR-5).
 	// Через outbox НЕ идёт: это полный снапшот состояния, самовосстанавливается
 	// на следующем тике (буферизация промежуточных снапшотов бессмысленна).
+	// Буфер 1: отправитель (executor после снятия ПО) шлёт неблокирующе, а
+	// репортер в этот момент может быть занят предыдущей отправкой — сигнал
+	// должен дождаться его, а не потеряться и не подвесить задачу.
+	inventoryNudge := make(chan struct{}, 1)
 	reporter := &inventory.Reporter{
 		Interval: cfg.InventoryInterval,
 		Dialer:   dialer,
 		Log:      log,
 		Version:  version,
+		Nudge:    inventoryNudge,
 	}
 	go reporter.Run(ctx)
 
@@ -1712,6 +1718,22 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// самообновление или рестарт службы тихо отменили бы перезагрузку) — поэтому
 	// здесь нет ни горутины, ни состояния, см. package reboot.
 	executor.SetRebooter(reboot.Scheduler{})
+	// uninstall: снятие ПО из карточки устройства. New отдаёт ошибку, когда агент
+	// не смог установить СВОЮ идентичность (os.Executable) — тогда исполнитель
+	// НЕ подключается вовсе и команда честно отказывает. Так и задумано: guard
+	// самозащиты без знания о себе не работает, а снимать ПО, не умея отличить
+	// его от самого агента, нельзя (см. package uninstall, selfguard.go).
+	if uninstaller, uerr := uninstall.New(log); uerr != nil {
+		log.Error("uninstall: удаление ПО отключено на этом агенте", slog.Any("error", uerr))
+	} else {
+		executor.SetUninstaller(uninstaller)
+		executor.SetInventoryNudge(func() {
+			select {
+			case inventoryNudge <- struct{}{}:
+			default: // сигнал уже стоит в очереди — второй не нужен
+			}
+		})
+	}
 	// Реконсиляция блокировки (pull, FetchLockStatus): переживает потерю push-
 	// команды и ребут — см. package lock, Reconciler. OnLocalUnlock тем же
 	// движением durably (через outbox) отчитывается о ЛОКАЛЬНОМ снятии блокировки
@@ -1821,7 +1843,11 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		IPFunc:    collector.LocalIP,
 		OnTask:    executor.Submit,
 		OnBeat:    writeStatus, // индикатор статуса в трее (status-файл)
-		Log:       log,
+		// Признак «durable-очередь мертва» уезжает heartbeat'ом: через саму
+		// очередь об этом отчитаться нельзя, а её отказ забирает с собой отчёты
+		// задач, статусы лока и security-события — молча (полевой баг 2.5.1).
+		DegradedFunc: ob.Unavailable,
+		Log:          log,
 	}
 
 	// client.Run блокирует до отмены ctx (SIGTERM/SIGINT). После — graceful:

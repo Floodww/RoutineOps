@@ -47,3 +47,24 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	writeTotal(w, total)
 	writeJSON(w, http.StatusOK, entries)
 }
+
+// verifyAuditChain проверяет целостность журнала (миграция 042).
+//
+// HTTP 200 отдаётся и при обнаруженном нарушении: «проверка выполнена, результат —
+// журнал подделан» это успешный ответ, а не ошибка сервера. Различать надо по полю
+// ok, и клиент обязан смотреть именно на него. Ответ 4xx/5xx на найденную подделку
+// был бы хуже вдвойне: он неотличим от недоступности сервера, то есть противнику
+// достаточно уронить ручку, чтобы результат читался так же.
+//
+// Сама проверка НЕ пишется в аудит: она ничего не меняет, а запись о ней сдвинула бы
+// голову цепочки, из-за чего два последовательных запуска давали бы разный HeadHash
+// без единого административного действия — и сверка головы с внешней копией
+// перестала бы что-либо значить.
+func (h *Handler) verifyAuditChain(w http.ResponseWriter, r *http.Request) {
+	st, err := h.db.VerifyAuditChain(r.Context())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}

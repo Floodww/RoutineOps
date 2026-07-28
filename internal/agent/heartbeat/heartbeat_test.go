@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -202,4 +204,81 @@ func TestSessionPeriodicHeartbeats(t *testing.T) {
 	cancel()
 	fs.recv <- recvMsg{err: io.EOF}
 	<-done
+}
+
+// Признак деградации обязан доехать до сервера именно heartbeat'ом: об умершей
+// durable-очереди отчитаться через неё саму нельзя, а её отказ забирает разом
+// результаты задач, статусы лока и security-события (полевой баг 2.5.1).
+func TestSend_CarriesOutboxDegradation(t *testing.T) {
+	fs := newFakeStream()
+	h := &Heartbeater{
+		Interval:     time.Hour,
+		IPFunc:       func() string { return "192.0.2.2" },
+		DegradedFunc: func() (bool, string) { return true, "outbox запись: Access is denied." },
+		Log:          discardLog(),
+	}
+	if err := h.send(fs); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	fs.mu.Lock()
+	got := fs.sent[0]
+	fs.mu.Unlock()
+	if !got.GetOutboxUnavailable() {
+		t.Fatal("признак недоступности очереди не уехал — сервер снова не узнает об отказе")
+	}
+	if got.GetDegradedDetail() == "" {
+		t.Error("причина не уехала — оператору нечего показать")
+	}
+}
+
+// Исправная очередь не должна поднимать флаг: ложная деградация в панели быстро
+// приучает её игнорировать.
+func TestSend_HealthyOutboxSendsNoFlag(t *testing.T) {
+	fs := newFakeStream()
+	h := &Heartbeater{
+		Interval:     time.Hour,
+		IPFunc:       func() string { return "192.0.2.2" },
+		DegradedFunc: func() (bool, string) { return false, "" },
+		Log:          discardLog(),
+	}
+	if err := h.send(fs); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	fs.mu.Lock()
+	got := fs.sent[0]
+	fs.mu.Unlock()
+	if got.GetOutboxUnavailable() || got.GetDegradedDetail() != "" {
+		t.Errorf("исправная очередь дала флаг деградации: %+v", got)
+	}
+}
+
+// Без подключённого источника (старая проводка, тесты) heartbeat обязан
+// работать как раньше, а не падать.
+func TestSend_NilDegradedFuncIsSafe(t *testing.T) {
+	fs := newFakeStream()
+	h := &Heartbeater{Interval: time.Hour, IPFunc: func() string { return "192.0.2.2" }, Log: discardLog()}
+	if err := h.send(fs); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if fs.sentCount() != 1 {
+		t.Fatal("heartbeat без DegradedFunc не отправлен")
+	}
+}
+
+// Причина режется по границе руны: heartbeat идёт каждые несколько секунд, а
+// proto3 string обязан быть валидным UTF-8 — сообщения Windows приезжают на
+// русском, и обрезка по байту дала бы битую строку и потерю всего кадра.
+func TestTruncateDetail_KeepsValidUTF8(t *testing.T) {
+	long := strings.Repeat("отказ доступа ", 60)
+	got := truncateDetail(long)
+	if len(got) > maxDetailBytes+len("…") {
+		t.Errorf("длина %d превышает потолок %d", len(got), maxDetailBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("обрезка дала невалидный UTF-8: %q", got)
+	}
+	short := "outbox запись: отказано"
+	if truncateDetail(short) != short {
+		t.Error("короткая причина не должна меняться")
+	}
 }

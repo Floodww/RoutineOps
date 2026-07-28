@@ -44,12 +44,25 @@ type Reporter struct {
 	// изменился, ReportInventory не шлём (last_seen всё равно держит heartbeat).
 	lastHash string
 
+	// Nudge — сигнал «сними и отправь снимок вне очереди». Нужен операциям,
+	// которые САМИ меняют состав ПО на машине (удаление ПО из интерфейса): без
+	// него карточка устройства до Interval показывала бы снятую программу как
+	// установленную, и успешная задача читалась бы оператором как несработавшая.
+	//
+	// Канал создаёт тот, кто владеет обеими сторонами (cmd/agent), и он обязан
+	// быть буферизованным: отправитель шлёт неблокирующе, а репортер в этот
+	// момент может отправлять предыдущий снимок. nil (не подключён) в select
+	// никогда не срабатывает — штатный цикл продолжает работать как раньше.
+	Nudge <-chan struct{}
+
 	// sendReport отправляет снимок на сервер. Поле (а не прямой dial+RPC), чтобы
 	// тесты могли подставить фейковую отправку. По умолчанию — dialAndSend.
 	sendReport func(ctx context.Context, report *pb.InventoryReport) (received bool, err error)
 }
 
 // Run шлёт отчёт через initialDelay, затем каждые Interval, пока ctx жив.
+// Внеочередной сигнал (Nudge) отправляет снимок немедленно и СДВИГАЕТ обычный
+// таймер: только что отправленный снимок не нужно повторять через долю секунды.
 func (r *Reporter) Run(ctx context.Context) {
 	timer := time.NewTimer(initialDelay)
 	defer timer.Stop()
@@ -59,6 +72,18 @@ func (r *Reporter) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			r.reportOnce(ctx)
+			timer.Reset(r.Interval)
+		case <-r.Nudge:
+			r.Log.Info("inventory: внеочередной снимок (состав ПО изменён агентом)")
+			r.reportOnce(ctx)
+			if !timer.Stop() {
+				// Таймер уже сработал и положил значение в канал — вычерпываем,
+				// иначе следующий виток отправит снимок повторно сразу же.
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			timer.Reset(r.Interval)
 		}
 	}

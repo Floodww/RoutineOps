@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/gateway"
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -51,12 +52,25 @@ func newDB(t *testing.T) *storage.DB {
 type MockNotifier struct {
 	mu       sync.Mutex
 	Messages []string
-	notified chan struct{}
+	// Severities — критичность каждого сообщения, отправленного через NotifyAlert,
+	// в том же порядке, что Messages. Для сообщений из NotifyITAdmins — пустая
+	// строка: у них критичности нет по определению.
+	Severities []alerting.Severity
+	notified   chan struct{}
 }
 
 func (m *MockNotifier) NotifyITAdmins(ctx context.Context, text string) {
+	m.record("", text)
+}
+
+func (m *MockNotifier) NotifyAlert(ctx context.Context, severity alerting.Severity, text string) {
+	m.record(severity, text)
+}
+
+func (m *MockNotifier) record(severity alerting.Severity, text string) {
 	m.mu.Lock()
 	m.Messages = append(m.Messages, text)
+	m.Severities = append(m.Severities, severity)
 	m.mu.Unlock()
 	if m.notified != nil {
 		m.notified <- struct{}{}

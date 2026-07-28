@@ -11,6 +11,7 @@ import { toast } from "@/lib/toast"
 
 const EMPTY: DirectoryConfig = {
   enabled: false, url: "", bind_dn: "", base_dn: "", user_filter: "", sync_interval_min: 0, has_password: false,
+  start_tls: false, has_ca_cert: false,
 }
 
 // Каталог (LDAP) — enterprise-фича. В open-core ручки /directory/* отвечают 501 → страница
@@ -19,6 +20,8 @@ const EMPTY: DirectoryConfig = {
 export default function Directory() {
   const [form, setForm] = useState<DirectoryConfig>(EMPTY)
   const [bindPassword, setBindPassword] = useState("")
+  // PEM тоже write-only: сервер отдаёт лишь has_ca_cert, поле всегда пустое при загрузке.
+  const [caCertPem, setCaCertPem] = useState("")
   const [persons, setPersons] = useState<DirectoryPerson[]>([])
   const [unavailable, setUnavailable] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -58,7 +61,7 @@ export default function Directory() {
     e.preventDefault()
     setSaving(true)
     try {
-      await api.put("/directory/config", { ...form, bind_password: bindPassword })
+      await api.put("/directory/config", { ...form, bind_password: bindPassword, ca_cert_pem: caCertPem })
       setBindPassword("")
       const r = await api.get<DirectoryConfig>("/directory/config")
       setForm(r.data)
@@ -140,6 +143,37 @@ export default function Directory() {
           <Label htmlFor="url">URL сервера</Label>
           <Input id="url" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })}
             placeholder="ldaps://dc.corp.local:636" />
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <Label>StartTLS</Label>
+            <p className="text-xs text-soft mt-1">
+              Поднять TLS на открытом <code>ldap://</code>-соединении. Для <code>ldaps://</code> не нужен — там TLS уже есть.
+            </p>
+          </div>
+          <Select
+            value={form.start_tls ? "1" : ""}
+            onChange={(v) => setForm({ ...form, start_tls: v === "1" })}
+            options={[{ value: "1", label: "Включён" }, { value: "", label: "Выключен" }]}
+            className="max-w-[180px]"
+          />
+        </div>
+        <div>
+          <Label htmlFor="ca_cert">Корневой сертификат каталога (PEM)</Label>
+          <textarea
+            id="ca_cert"
+            value={caCertPem}
+            onChange={(e) => setCaCertPem(e.target.value)}
+            rows={4}
+            spellCheck={false}
+            className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono"
+            placeholder={form.has_ca_cert
+              ? "•••••••• (задан, оставьте пустым — не менять)"
+              : "-----BEGIN CERTIFICATE-----\n… (нужен, если AD выпущен собственным CA)"}
+          />
+          <p className="text-xs text-soft mt-1">
+            Заменяет системные корни, а не дополняет их: доверяем именно этому УЦ.
+          </p>
         </div>
         <div>
           <Label htmlFor="bind_dn">Bind DN (сервис-аккаунт)</Label>

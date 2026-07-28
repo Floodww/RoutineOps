@@ -36,8 +36,20 @@ src_path = os.path.join(root, "internal", "server", "api", "handler.go")
 try:
     import yaml
 except ImportError:
-    print("ПРОПУСК: PyYAML не установлен — проверка спецификации не выполнена", file=sys.stderr)
-    sys.exit(0)
+    # Fail-closed. Раньше здесь стоял sys.exit(0): при отсутствии PyYAML CI-шаг
+    # «guards» проходил ЗЕЛЁНЫМ на заведомо сломанной спецификации — проверено
+    # живьём (одна и та же битая спека: с PyYAML EXIT=1, без него EXIT=0). Гард
+    # держался на том, что образ ubuntu-latest СЛУЧАЙНО комплектуется python3-yaml;
+    # любой setup-python или смена образа тихо превращали его в no-op навсегда.
+    print("ОШИБКА: PyYAML не установлен — проверка спецификации НЕ выполнена.", file=sys.stderr)
+    print("  Установить:    python3 -m pip install --user PyYAML", file=sys.stderr)
+    print("  Debian/Ubuntu: sudo apt-get install -y python3-yaml", file=sys.stderr)
+    if os.environ.get("OPENAPI_GUARD_SKIP") == "1":
+        # Осознанный опт-аут для внешнего контрибьютора Free-среза: пропуск должен
+        # быть ДЕЙСТВИЕМ человека, а не поведением по умолчанию.
+        print("ПРОПУСК по OPENAPI_GUARD_SKIP=1", file=sys.stderr)
+        sys.exit(0)
+    sys.exit(1)
 
 try:
     spec = yaml.safe_load(open(spec_path, encoding="utf-8"))
@@ -95,8 +107,24 @@ ent_ops = {
 }
 
 # r.Get(...), r.With(...).Post(...) — внутренние скобки у With непусты (httprate),
-# поэтому нежадный .*? до первого ").".
-pattern = re.compile(r'r\.(?:With\(.*?\)\.)?(Get|Post|Put|Patch|Delete)\("([^"]+)"')
+# поэтому допускаем один уровень вложенности вместо нежадного .*?. re.S обязателен:
+# gofmt переносит r.With(...) на несколько строк, стоит списку middleware стать длиннее
+# строки, и однострочный регексп переставал видеть такой маршрут вообще.
+pattern = re.compile(
+    r'r\.(?:With\((?:[^()]|\([^()]*\))*\)\.)?'
+    r'(Get|Post|Put|Patch|Delete|Head|Options)\(\s*"([^"]+)"',
+    re.S,
+)
+# chi-регистрация готового http.Handler (а не HandlerFunc): r.Method / r.MethodFunc.
+# Штатная форма, которой гард не видел вовсе.
+method_pattern = re.compile(
+    r'r\.Method(?:Func)?\(\s*(?:http\.Method([A-Za-z]+)|"([A-Za-z]+)")\s*,\s*"([^"]+)"'
+)
+# r.Handle/r.HandleFunc/r.Mount HTTP-метод не называют — сопоставить их со
+# спецификацией принципиально нельзя. Молчаливый пропуск здесь = ручка проезжает мимо
+# гарда, поэтому всё, что не статика, — жёсткая ошибка с файлом и строкой.
+opaque_pattern = re.compile(r'r\.(Handle|HandleFunc|Mount)\(\s*"([^"]+)"')
+STATIC_PREFIXES = ("/*", "/downloads")
 
 # Enterprise-роуты монтируются RouterOption'ами из СВОИХ пакетов (escrow, license), а
 # не из handler.go — без них гард видел только часть реальности, из-за чего
@@ -104,6 +132,18 @@ pattern = re.compile(r'r\.(?:With\(.*?\)\.)?(Get|Post|Put|Patch|Delete)\("([^"]+
 # Ищем их по build-тегу, а не списком путей: список пришлось бы помнить при каждой новой
 # ручке, а забытый файл выглядел бы как «ручка не описана».
 SKIP_DIRS = {".git", "node_modules", "web", "build", "vendor", "releases"}
+
+# Go разрешает комментарии и пустые строки ПЕРЕД //go:build (лицензионная шапка), а сам
+# тег бывает составным (`linux && enterprise`). Прежний startswith() ни того, ни другого
+# не видел: одна шапка над build-тегом — и ПОЛНОЕ дерево объявлялось «Free-срезом», после
+# чего реально неописанная enterprise-ручка пропускалась по маркеру x-enterprise.
+# Семантика ровно как в export-free.sh, шаг 2.
+BUILD_LINE = re.compile(r'^//go:build[ \t]+(.+)$', re.M)
+def has_enterprise_tag(text):
+    head = text.split("\npackage ", 1)[0]
+    m = BUILD_LINE.search(head)
+    return bool(m) and re.search(r'(^|[^!])\benterprise\b', m.group(1))
+
 ent_files = []
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
@@ -115,12 +155,26 @@ for dirpath, dirnames, filenames in os.walk(root):
             text = open(p, encoding="utf-8").read()
         except OSError:
             continue
-        if text.startswith("//go:build enterprise") and pattern.search(text):
+        if has_enterprise_tag(text) and pattern.search(text):
             ent_files.append(p)
 
+def norm(path):
+    # Роуты внутри r.Route("/api/v1", ...) объявлены без префикса.
+    if not path.startswith("/api/v1") and path not in ("/healthz", "/ca.crt"):
+        return "/api/v1" + path
+    return path
+
 code_ops = set()
+opaque = []
 for path_ in [src_path] + ent_files:
     src = open(path_, encoding="utf-8").read()
+    for m in opaque_pattern.finditer(src):
+        if m.group(2).startswith(STATIC_PREFIXES):
+            continue  # статика SPA и файловая раздача — не API
+        line = src.count("\n", 0, m.start()) + 1
+        opaque.append(f'{os.path.relpath(path_, root)}:{line}: r.{m.group(1)}("{m.group(2)}")')
+    for hm, lm, mpath in method_pattern.findall(src):
+        code_ops.add(f"{(hm or lm).upper()} {norm(mpath)}")
     for method, path in pattern.findall(src):
         if path.startswith("/*") or path.startswith("/downloads"):
             continue  # статика SPA и файловая раздача — не API
@@ -148,6 +202,12 @@ if skipped:
     print(f"  Free-срез (enterprise-исходников нет): пропущено ручек Enterprise — {len(skipped)}")
     for x in sorted(skipped):
         print(f"    ~ {x}")
+if opaque:
+    fail = 1
+    print("  МАРШРУТ БЕЗ ЯВНОГО HTTP-МЕТОДА — гард не может сверить его со спецификацией.")
+    print("  Перерегистрируйте через r.Get/r.Post/... или r.Method(http.MethodX, ...):")
+    for x in opaque:
+        print(f"    {x}")
 if missing:
     fail = 1
     print("  НЕ ОПИСАНО в docs/openapi.yaml:")

@@ -76,6 +76,17 @@ type Queue struct {
 	// Цена: Enqueue может подождать конца текущего слива (доставка одной записи,
 	// потолок — таймаут диспетчера); вызывающие и так работают в фоновых горутинах.
 	mu sync.Mutex
+
+	// ioErr — причина последнего отказа ДИСКОВОГО ввода-вывода очереди, nil =
+	// хранилище исправно. Сетевые отказы доставки сюда НЕ попадают: сервер бывает
+	// недоступен штатно, это не деградация агента.
+	//
+	// Нужен, потому что смерть очереди невидима снаружи: outbox и есть канал
+	// доставки отчётов, статусов лока и security-событий, и когда он мёртв,
+	// сервер видит живое устройство, у которого просто ничего не происходит
+	// (полевой баг 2.5.1 на Windows — пустой DACL на каталоге state\outbox).
+	// Признак уезжает в heartbeat, единственный не зависящий от очереди канал.
+	ioErr atomic.Pointer[string]
 }
 
 // New создаёт очередь в каталоге dir (создаётся при необходимости).
@@ -128,18 +139,44 @@ func (q *Queue) Enqueue(kind string, data []byte) error {
 	tmp := filepath.Join(q.dir, name+".tmp")
 	final := filepath.Join(q.dir, name)
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		q.noteIOFailure("запись", err)
 		return fmt.Errorf("outbox: запись %q: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		os.Remove(tmp)
+		q.noteIOFailure("фиксация", err)
 		return fmt.Errorf("outbox: фиксация %q: %w", final, err)
 	}
+	q.noteIOSuccess()
 
 	if err := q.enforceLimit(name); err != nil {
 		return err
 	}
 	q.wake()
 	return nil
+}
+
+// noteIOFailure запоминает отказ дискового ввода-вывода очереди.
+//
+// Порог намеренно НУЛЕВОЙ (признак взводится с первого отказа): разовый сбой
+// снимается ближайшим успешным тиком слива, то есть панель максимум мигнёт, а
+// постоянный отказ виден сразу. Обратный выбор — копить N отказов перед
+// сигналом — задержал бы обнаружение ровно того случая, ради которого признак
+// и заводится: очередь, мёртвая с первого старта службы.
+func (q *Queue) noteIOFailure(op string, err error) {
+	msg := "outbox " + op + ": " + err.Error()
+	q.ioErr.Store(&msg)
+}
+
+func (q *Queue) noteIOSuccess() { q.ioErr.Store(nil) }
+
+// Unavailable сообщает, недоступна ли durable-очередь, и почему. Читается
+// heartbeat'ом — единственным каналом, который не зависит от самой очереди.
+func (q *Queue) Unavailable() (bool, string) {
+	if p := q.ioErr.Load(); p != nil {
+		return true, *p
+	}
+	return false, ""
 }
 
 // newName формирует лексикографически возрастающее имя: <unixnano>-<seq>-<kind>.json.
@@ -187,9 +224,14 @@ func (q *Queue) flush(ctx context.Context) {
 
 	files, err := q.list()
 	if err != nil {
+		q.noteIOFailure("чтение очереди", err)
 		q.log.Error("outbox: чтение очереди", slog.Any("error", err))
 		return
 	}
+	// Успешное чтение каталога — подтверждение, что хранилище живо. Оно же
+	// снимает признак после разового сбоя: следующий тик (interval) вернёт
+	// панель в норму без вмешательства.
+	q.noteIOSuccess()
 	var sent int
 	for _, f := range files {
 		if ctx.Err() != nil {

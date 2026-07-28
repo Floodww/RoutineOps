@@ -21,6 +21,19 @@ set -e
 : "${DATABASE_DSN:?DATABASE_DSN не задан (ожидается из .env.prod)}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-/migrations}"
 
+# 🔴 FAIL-CLOSED: пустой или неверно смонтированный каталог миграций. Раньше цикл шёл по
+# `$(ls "$DIR"/*.sql)`: под `set -e` падение подстановки в списке for НЕ считается упавшей
+# командой, поэтому опечатка в монтировании (/migration вместо /migrations) давала пустой
+# список, «migrations up to date» и EXIT=0. Compose ждёт service_completed_successfully →
+# сервер поднимался на ПУСТОЙ схеме, то есть fail-closed из шапки не срабатывал ровно там,
+# где он единственная защита. Проверяем ДО обращения к БД: нечего катить — это отказ.
+set -- "$MIGRATIONS_DIR"/*.sql
+if [ ! -e "$1" ]; then
+  echo "ОШИБКА: в $MIGRATIONS_DIR нет ни одного .sql — каталог пуст или смонтирован не тот." >&2
+  echo "Проверь volume миграций в docker-compose (ожидается ./migrations:/migrations:ro)." >&2
+  exit 1
+fi
+
 # GUARD: миграции 001..NNN НЕ идемпотентны (CREATE TABLE без IF NOT EXISTS). Если БД
 # уже содержит таблицы приложения, но нет schema_migrations — это СУЩЕСТВУЮЩАЯ
 # инсталляция с ручными миграциями. Слепой накат 001.. упадёт на "relation already
@@ -44,7 +57,9 @@ psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 -c '
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );'
 
-for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
+# Порядок даёт сам глоб (лексикографический, префиксы 001..NNN), `ls | sort` не нужен —
+# и заодно исчезает разбиение по пробелам в путях.
+for f in "$@"; do
   v=$(basename "$f")
   applied=$(psql "$DATABASE_DSN" -tA -c "SELECT 1 FROM schema_migrations WHERE version='$v'")
   if [ "$applied" = "1" ]; then

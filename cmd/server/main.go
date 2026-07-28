@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/api"
 	"github.com/Floodww/RoutineOps/internal/server/config"
 	"github.com/Floodww/RoutineOps/internal/server/enroll"
@@ -154,8 +155,17 @@ func main() {
 	// Enterprise-оверлей (//go:build enterprise) регистрирует escrow-сервис на g и
 	// возвращает RouterOptions (WithLockModePolicy + /escrow/status). Open-core: nil →
 	// escrow Unimplemented, lock mode=filevault → 409. См. enterprise{,_stub}.go.
-	routerOpts := enterpriseSetup(g, db, logger)
+	routerOpts := enterpriseSetup(g, db, asynqClient, logger)
 	routerOpts = append(routerOpts, api.WithReleasePubKey(cfg.ReleasePubKey))
+	// Fail-closed: опечатка в TRUSTED_PROXIES означает, что оператор настраивал
+	// нестандартную топологию. Молча откатиться на дефолт — оставить его с per-IP
+	// лимитом, который он считает настроенным, а тот схлопнут в один общий бакет.
+	trustedProxies, err := api.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		logger.Error("bad TRUSTED_PROXIES", "err", err)
+		os.Exit(1)
+	}
+	routerOpts = append(routerOpts, api.WithTrustedProxies(trustedProxies))
 	if tgUsername != nil {
 		routerOpts = append(routerOpts, api.WithTelegramBotUsername(tgUsername))
 	}
@@ -291,6 +301,93 @@ func main() {
 				} else if n > 0 {
 					logger.Info("agent_unreachable alerts created", "count", n)
 				}
+			}
+		}
+	}()
+
+	// Эскалация непринятых алертов (миграция 042): критичный инцидент, который никто
+	// не принял за EscalateAfterMinutes, напоминает о себе в Telegram и продолжает
+	// напоминать каждые EscalateRepeatMinutes, пока его не примут.
+	//
+	// Тикер в минуту, а не в EscalateAfterMinutes: порог проверяется по created_at в
+	// SQL, поэтому частота опроса влияет только на точность момента напоминания, а не
+	// на его наличие. Захват строк атомарный (TakeEscalations), так что лишние тики
+	// безвредны.
+	if cfg.EscalateAfterMinutes > 0 {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					due, err := db.TakeEscalations(context.Background(),
+						cfg.EscalateMinSeverity, cfg.EscalateAfterMinutes, cfg.EscalateRepeatMinutes)
+					if err != nil {
+						logger.Error("take alert escalations", "err", err)
+						continue
+					}
+					for _, a := range due {
+						waited := int(time.Since(a.CreatedAt).Minutes())
+						sev, ok := alerting.Parse(a.Severity)
+						if !ok {
+							sev = alerting.UnknownSeverity
+						}
+						text := notifier.HTMLf(
+							"%s <b>Алерт не принят %d мин</b>\nТип: %s\nКритичность: %s\nУстройство: <code>%s</code>\nДетали: %s",
+							alerting.Emoji(sev), waited, a.AlertType, alerting.Label(sev), a.DeviceHostname, a.Details)
+						// Напоминание уходит по тем же порогам, что и исходный алерт:
+						// администратор, отписавшийся от этого уровня, не должен получать
+						// его повторно под другим заголовком.
+						//
+						// tgBot, а не локальный bot: интерфейсная переменная — НАСТОЯЩИЙ
+						// nil при пустом токене, а не typed-nil внутри интерфейса (см.
+						// комментарий к её объявлению и полевой инцидент 2026-06-29).
+						if tgBot != nil {
+							tgBot.NotifyAlert(context.Background(), sev, text)
+						}
+					}
+					if len(due) > 0 {
+						logger.Info("alert escalations sent", "count", len(due))
+					}
+				}
+			}
+		}()
+	}
+
+	// Якорь хеш-цепочки аудита (миграция 042): раз в сутки фиксируем голову в
+	// audit_anchors и — что важнее — ПЕЧАТАЕМ её в лог сервера.
+	//
+	// Якорь в той же БД, что и журнал, сам по себе слаб: тот, кто может переписать
+	// цепочку, перепишет и его. Ценность появляется ровно тогда, когда голова
+	// оказывается за пределами БД — в логе, который уезжает в сборщик логов, в
+	// переписке оператора, в тикете. Поэтому строчка лога здесь не диагностика, а
+	// сам механизм: её нельзя убрать как «шумную».
+	go func() {
+		anchor := func() {
+			seq, hash, err := db.WriteAuditAnchor(context.Background())
+			if err != nil {
+				logger.Error("audit chain anchor", "err", err)
+				return
+			}
+			if seq == 0 {
+				return // журнал пуст, фиксировать нечего
+			}
+			logger.Info("audit chain anchor", "seq", seq, "head_hash", hash)
+		}
+		// Первый якорь сразу на старте: перезапуск сервера — естественная точка,
+		// в которой голову стоит зафиксировать, и он же гарантирует, что якорь
+		// появится даже на инсталляции, которую переподнимают чаще раза в сутки.
+		anchor()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				anchor()
 			}
 		}
 	}()

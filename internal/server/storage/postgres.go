@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 )
 
 // ErrForeignKeyViolation — INSERT ссылается на уже удалённую строку (политика/
@@ -75,6 +77,74 @@ func (db *DB) GetITAdminsWithTelegramChatID(ctx context.Context) ([]string, erro
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// TelegramRecipient — получатель уведомления и его порог доставки.
+type TelegramRecipient struct {
+	ChatID string
+	// MinSeverity — минимальная критичность, которую этот администратор согласен
+	// получать (users.notify_min_severity, миграция 043). Пустая строка означает
+	// строку, не прошедшую миграцию; alerting.DeliverTo для неё fail-open.
+	MinSeverity string
+}
+
+// GetTelegramRecipients отдаёт it_admin'ов с привязанным Telegram и их порогом
+// доставки. Отдельный метод рядом с GetITAdminsWithTelegramChatID, а не замена
+// его: тот используется для уведомлений, у которых критичности нет вообще
+// (заявка на права администратора, служебные сообщения бота), и приделывать им
+// фильтр по severity было бы неверно — заявку нельзя «отфильтровать по важности»,
+// она либо рассматривается, либо истекает.
+func (db *DB) GetTelegramRecipients(ctx context.Context) ([]TelegramRecipient, error) {
+	rows, err := db.pool.Query(ctx, `
+		SELECT telegram_chat_id, COALESCE(notify_min_severity, '')
+		FROM users
+		WHERE role = 'it_admin' AND telegram_chat_id IS NOT NULL AND telegram_chat_id != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TelegramRecipient
+	for rows.Next() {
+		var r TelegramRecipient
+		if err := rows.Scan(&r.ChatID, &r.MinSeverity); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetUserNotifyMinSeverity отдаёт порог доставки уведомлений пользователя.
+// Пустая строка (строка не прошла миграцию 041) нормализуется в значение по
+// умолчанию — «всё как раньше», а не в тишину: см. обоснование DEFAULT 'low' в 041.
+func (db *DB) GetUserNotifyMinSeverity(ctx context.Context, userID string) (string, error) {
+	var s string
+	err := db.pool.QueryRow(ctx,
+		`SELECT COALESCE(notify_min_severity, '') FROM users WHERE id = $1`, userID).Scan(&s)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("user %s not found", userID)
+		}
+		return "", err
+	}
+	if s == "" {
+		return string(alerting.SeverityLow), nil
+	}
+	return s, nil
+}
+
+// SetUserNotifyMinSeverity меняет порог доставки. Значение валидируется вызывающим
+// (api.setNotifyMinSeverity) и страхуется CHECK-ограничением в схеме.
+func (db *DB) SetUserNotifyMinSeverity(ctx context.Context, userID, minSeverity string) error {
+	tag, err := db.pool.Exec(ctx,
+		`UPDATE users SET notify_min_severity = $1 WHERE id = $2`, minSeverity, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user %s not found", userID)
+	}
+	return nil
 }
 
 func (db *DB) SetUserTelegramChatID(ctx context.Context, userID, chatID string) error {
@@ -185,6 +255,13 @@ type Device struct {
 	OwnerPersonID    string `json:"owner_person_id"`    // owner_directory_id; "" = владельца нет
 	OwnerPersonName  string `json:"owner_person_name"`  // ФИО для показа
 	OwnerPersonEmail string `json:"owner_person_email"` // почта владельца
+	// Здоровье durable-очереди агента (миграция 039). Заполняется и в списке, и в
+	// карточке — в отличие от инвентарных полей выше: «какие машины сейчас слепы»
+	// это вопрос к парку целиком, и заставлять оператора открывать тысячу карточек,
+	// чтобы его задать, бессмысленно.
+	OutboxUnavailable bool       `json:"outbox_unavailable"`
+	DegradedDetail    string     `json:"degraded_detail"` // причина; пусто = агент её не назвал
+	DegradedSince     *time.Time `json:"degraded_since"`  // nil = очередь жива
 }
 
 // DeviceGroupRef — компактная ссылка на группу в строке/карточке устройства. Цвет едет
@@ -230,14 +307,25 @@ func (db *DB) Pool() *pgxpool.Pool {
 // живой девайс в pending. Прочие статусы (blocked) НЕ трогаем — иначе heartbeat молча
 // снимал бы блокировку у подключённого устройства.
 
+// Здоровье outbox пишется тем же оператором, а не отдельным UPDATE: heartbeat приходит
+// раз в 30 секунд с каждого устройства парка, и второй запрос на кадр удвоил бы запись
+// ради поля, которое почти всегда false. degraded_since взводится ОДИН раз (COALESCE
+// на существующее) — иначе «лежит с 14:02» обнулялось бы каждым кадром и превратилось
+// бы в дубль last_seen_at.
+
 func (db *DB) UpsertDeviceHeartbeat(ctx context.Context, d HeartbeatData) error {
 	_, err := db.pool.Exec(ctx, `
-		INSERT INTO devices (hostname, os, ip_address, public_ip, status, certificate_fingerprint, cert_cn, last_seen_at)
-        VALUES ($1, 'unknown', $2, NULLIF($5,''), 'active', $3, $4, now())
+		INSERT INTO devices (hostname, os, ip_address, public_ip, status, certificate_fingerprint, cert_cn, last_seen_at,
+		                     outbox_unavailable, degraded_detail, degraded_since)
+        VALUES ($1, 'unknown', $2, NULLIF($5,''), 'active', $3, $4, now(),
+                $6, CASE WHEN $6 THEN $7::text ELSE '' END, CASE WHEN $6 THEN now() END)
 		ON CONFLICT (certificate_fingerprint)
 		DO UPDATE SET ip_address = COALESCE(NULLIF($2,''), devices.ip_address), public_ip = COALESCE(NULLIF($5,''), devices.public_ip), last_seen_at = now(), cert_cn = $4,
-			status = CASE WHEN devices.status IN ('enrolled', 'pending') THEN 'active' ELSE devices.status END
-	`, d.DeviceID, d.IPAddress, d.CertFingerprint, d.CertCN, d.PublicIP)
+			status = CASE WHEN devices.status IN ('enrolled', 'pending') THEN 'active' ELSE devices.status END,
+			outbox_unavailable = $6,
+			degraded_detail = CASE WHEN $6 THEN $7::text ELSE '' END,
+			degraded_since  = CASE WHEN $6 THEN COALESCE(devices.degraded_since, now()) END
+	`, d.DeviceID, d.IPAddress, d.CertFingerprint, d.CertCN, d.PublicIP, d.OutboxUnavailable, d.DegradedDetail)
 	return err
 }
 
@@ -297,6 +385,14 @@ type HeartbeatData struct {
 	DeviceID        string
 	CertCN          string
 	IPAddress       string
+	// OutboxUnavailable — durable-очередь агента не пишется/не читается. Едет в
+	// heartbeat, потому что отчитаться об этом больше нечем: outbox и есть канал
+	// доставки отчётов, статусов лока и security-событий (миграция 039).
+	OutboxUnavailable bool
+	// DegradedDetail — причина, уже обрезанная агентом до 200 Б. Значима только при
+	// взведённом флаге; при снятом затирается пустой строкой, чтобы в карточке не
+	// висела причина позавчерашнего сбоя.
+	DegradedDetail string
 }
 
 // UpsertInventory обновляет поля устройства и заменяет список ПО атомарно.
@@ -378,7 +474,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
        COALESCE(lock_actual_state, ''), lock_actual_at,
        COALESCE(d.owner_directory_id::text, ''),
        COALESCE((SELECT COALESCE(display_name, sam_account) FROM directory_persons WHERE id = d.owner_directory_id), ''),
-       COALESCE((SELECT email FROM directory_persons WHERE id = d.owner_directory_id), '')
+       COALESCE((SELECT email FROM directory_persons WHERE id = d.owner_directory_id), ''),
+       d.outbox_unavailable, COALESCE(d.degraded_detail, ''), d.degraded_since
   FROM devices d WHERE d.id = $1
  `, id).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LockStatus, &d.LastSeenAt, &d.CreatedAt,
@@ -388,7 +485,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 		&d.OSPatchDate, &d.BootTime, &d.DiskFree,
 		&d.DomainJoined, &d.TPM, &d.SecureBoot,
 		&d.LockActualState, &d.LockActualAt,
-		&d.OwnerPersonID, &d.OwnerPersonName, &d.OwnerPersonEmail)
+		&d.OwnerPersonID, &d.OwnerPersonName, &d.OwnerPersonEmail,
+		&d.OutboxUnavailable, &d.DegradedDetail, &d.DegradedSince)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil
@@ -484,6 +582,27 @@ type Task struct {
 	// Перезагрузка (037). Delay=0 означает «дефолт агента» (60 с), а не «сейчас».
 	RebootReason       string `json:"reboot_reason"`
 	RebootDelaySeconds int32  `json:"reboot_delay_seconds"`
+	// Удаление ПО (043). Uninstall* — СЕЛЕКТОР цели из снимка инвентаря, а не команда:
+	// агент ищет по нему запись в своём свежем снимке и выполняет собственный метод.
+	// Пустое поле значит «сервер этого не знает», а не «подходит любое».
+	Uninstall UninstallTarget `json:"uninstall,omitzero"`
+	// UninstallOutcome — машиночитаемый исход (proto UninstallOutcome), отдельно от
+	// status: completed/failed не различает «снято», «уже нет», «цель разъехалась» и
+	// «сносить нечем», а это разные действия оператора. Пусто — не uninstall-задача
+	// либо отчёта ещё не было.
+	UninstallOutcome string `json:"uninstall_outcome,omitempty"`
+}
+
+// UninstallTarget — селектор удаляемого ПО. Ровно те поля SoftwareItem, которые сервер
+// получил от этого же агента.
+type UninstallTarget struct {
+	SoftwareName    string `json:"software_name"`
+	Version         string `json:"version,omitempty"`
+	UninstallID     string `json:"uninstall_id,omitempty"`
+	InstallLocation string `json:"install_location,omitempty"`
+	Method          string `json:"uninstall_method,omitempty"`
+	Scope           string `json:"scope,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // Режимы блокировки (совпадают с CHECK-домены значений lock_mode в 022 и с
@@ -729,6 +848,120 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	return &t, nil
 }
 
+// ErrSoftwareNotInInventory — цели нет в снимке инвентаря устройства.
+//
+// Отказ, а не «поставим задачу, агент разберётся»: селектор собирается ИЗ снимка, и
+// если снимка нет, серверу нечего послать — уйдёт команда с пустыми полями, под
+// которую на машине подойдёт что угодно с похожим именем.
+var ErrSoftwareNotInInventory = errors.New("software not found in device inventory")
+
+// ErrSoftwareNotRemovable — у записи в инвентаре нет метода снятия.
+//
+// Это НЕ «попробуем и посмотрим»: метод определяет коллектор агента, и пустой он там,
+// где снять нечем в принципе — per-user установки под Windows (служба работает от
+// LocalSystem и в чужой профиль не ходит), защищённое SIP на macOS. Ставить такую
+// задачу значит гарантированно получить NOT_REMOVABLE и занять оператора ожиданием.
+var ErrSoftwareNotRemovable = errors.New("software has no uninstall method")
+
+// CreateUninstallTask ставит задачу удаления ПО. Селектор берётся ИЗ ИНВЕНТАРЯ этого
+// устройства, а не из тела запроса: клиент передаёт только имя и машинный ключ, всё
+// остальное сервер достаёт сам. Иначе оператор (или сервисный токен) мог бы прислать
+// произвольный селектор с любым методом, и сверка метода на агенте, ради которой она
+// заведена, проверяла бы присланное против присланного.
+//
+// priority='high': control-plane, за очередью скриптов ждать не должен.
+//
+// Идемпотентность как у перезагрузки: повторный вызов при живой недоставленной заявке
+// возвращает СУЩЕСТВУЮЩУЮ задачу. Новый task_id для того же намерения агент считает
+// новой командой и снёс бы цель дважды — на втором заходе это уже ALREADY_ABSENT, но
+// оператор увидел бы две записи об одном действии.
+func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, uninstallID, reason string) (*Task, error) {
+	const cols = `id, device_id, script_content, platform, priority, status, created_at, task_type,
+	              lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds,
+	              uninstall_software_name, uninstall_version, uninstall_uninstall_id,
+	              uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason,
+	              uninstall_outcome`
+	scan := func(row pgx.Row, t *Task) error {
+		return row.Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status,
+			&t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode,
+			&t.RebootReason, &t.RebootDelaySeconds,
+			&t.Uninstall.SoftwareName, &t.Uninstall.Version, &t.Uninstall.UninstallID,
+			&t.Uninstall.InstallLocation, &t.Uninstall.Method, &t.Uninstall.Scope, &t.Uninstall.Reason,
+			&t.UninstallOutcome)
+	}
+
+	// Статус проверяем ПЕРВЫМ и отдельно от поиска цели: инвентарь заблокированной или
+	// списанной машины никуда не делся, и без этой проверки снос уехал бы на устройство,
+	// которое мы намеренно отрезали. Тот же гейт, что у скрипт-канала.
+	var active bool
+	if err := db.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM devices WHERE id::text = $1 AND status = 'active')`, deviceID).Scan(&active); err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, ErrDeviceNotActive
+	}
+
+	// Цель ищем по имени И машинному ключу: одноимённых записей у разных вендоров и
+	// разных версий одного продукта в инвентаре может быть несколько. Пустой
+	// uninstall_id (macOS) сверяется как есть — там ключом служит install_location.
+	var tgt UninstallTarget
+	err := db.pool.QueryRow(ctx, `
+  SELECT software_name, COALESCE(version, ''), uninstall_id, install_location, uninstall_method, scope
+  FROM device_software
+  WHERE device_id::text = $1 AND software_name = $2 AND uninstall_id = $3
+  LIMIT 1`, deviceID, softwareName, uninstallID).
+		Scan(&tgt.SoftwareName, &tgt.Version, &tgt.UninstallID, &tgt.InstallLocation, &tgt.Method, &tgt.Scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSoftwareNotInInventory
+	}
+	if err != nil {
+		return nil, err
+	}
+	if tgt.Method == "" {
+		return nil, ErrSoftwareNotRemovable
+	}
+
+	var t Task
+	err = scan(db.pool.QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type,
+                     uninstall_software_name, uninstall_version, uninstall_uninstall_id,
+                     uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason)
+  VALUES ($1::uuid, '', COALESCE((SELECT os FROM devices WHERE id = $1::uuid), 'unknown'), 'high', 'pending', 'uninstall',
+          $2, $3, $4, $5, $6, $7, $8)
+  ON CONFLICT DO NOTHING
+  RETURNING `+cols,
+		deviceID, tgt.SoftwareName, tgt.Version, tgt.UninstallID,
+		tgt.InstallLocation, tgt.Method, tgt.Scope, reason), &t)
+	if err == nil {
+		return &t, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	// ON CONFLICT DO NOTHING → строк нет: недоставленная заявка на эту цель уже есть.
+	err = scan(db.pool.QueryRow(ctx, `
+  SELECT `+cols+` FROM tasks
+  WHERE device_id::text = $1 AND task_type = 'uninstall' AND status = 'pending'
+    AND uninstall_software_name = $2 AND uninstall_uninstall_id = $3`,
+		deviceID, tgt.SoftwareName, tgt.UninstallID), &t)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// SetTaskUninstallOutcome записывает машиночитаемый исход удаления. Скоуп по устройству —
+// как у CompleteTask: иначе устройство A по чужому task_id проставило бы исход задаче B.
+// Незнакомое значение сохраняется как есть: сервер, не понимающий новый исход агента,
+// обязан его показать, а не отвергнуть.
+func (db *DB) SetTaskUninstallOutcome(ctx context.Context, taskID, deviceID, outcome string) error {
+	_, err := db.pool.Exec(ctx, `
+  UPDATE tasks SET uninstall_outcome = $3
+  WHERE id::text = $1 AND device_id::text = $2 AND task_type = 'uninstall'`, taskID, deviceID, outcome)
+	return err
+}
+
 // FanOutRebootToGroup ставит перезагрузку всем active-устройствам группы одной
 // вставкой. Платформенного фильтра нет (в отличие от скриптов): перезагрузка
 // реализована на всех трёх ОС. Устройства с уже живой недоставленной заявкой
@@ -891,10 +1124,16 @@ func (db *DB) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	var t Task
 	err := db.pool.QueryRow(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
-         task_type, lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds
+         task_type, lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds,
+         uninstall_software_name, uninstall_version, uninstall_uninstall_id,
+         uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason,
+         uninstall_outcome
 FROM tasks WHERE id = $1
  `, taskID).Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.Output, &t.ErrorLog, &t.CreatedAt,
-		&t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode, &t.RebootReason, &t.RebootDelaySeconds)
+		&t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode, &t.RebootReason, &t.RebootDelaySeconds,
+		&t.Uninstall.SoftwareName, &t.Uninstall.Version, &t.Uninstall.UninstallID,
+		&t.Uninstall.InstallLocation, &t.Uninstall.Method, &t.Uninstall.Scope, &t.Uninstall.Reason,
+		&t.UninstallOutcome)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -1198,10 +1437,14 @@ func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, co
 	if thresholdMinutes <= 0 {
 		return 0, nil
 	}
+	// severity подставляется параметром из той же карты, что и в CreateAlert:
+	// вписать 'low' строкой в SQL значило бы завести третью копию правила рядом с
+	// Go-картой и CASE в миграции 043, за которой уже некому следить.
 	res, err := db.pool.Exec(ctx, `
-		INSERT INTO alerts (device_id, alert_type, details)
+		INSERT INTO alerts (device_id, alert_type, details, severity)
 		SELECT d.id, 'agent_unreachable',
-		       'Не выходит на связь с ' || to_char(d.last_seen_at, 'YYYY-MM-DD HH24:MI')
+		       'Не выходит на связь с ' || to_char(d.last_seen_at, 'YYYY-MM-DD HH24:MI'),
+		       $3::text
 		FROM devices d
 		WHERE d.status IN ('active', 'enrolled')
 		  AND d.last_seen_at IS NOT NULL
@@ -1218,7 +1461,7 @@ func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, co
 		        AND a.alert_type = 'agent_unreachable'
 		        AND a.created_at > now() - ($2 * interval '1 minute')
 		  ))
-	`, thresholdMinutes, cooldownMinutes)
+	`, thresholdMinutes, cooldownMinutes, string(alerting.DefaultFor("agent_unreachable")))
 	if err != nil {
 		return 0, err
 	}
@@ -1248,16 +1491,24 @@ func (db *DB) CreateAlert(ctx context.Context, deviceID, alertType, details, adm
 	// последующий DELETE устройства B вечно падает 23503 (заявка B не удаляется каскадом),
 	// а оператор получает ложное «device has escrow». Чужой/битый id молча становится
 	// NULL: ack-контракт (accept-and-drop) цел, событие сохраняется без ложной привязки.
+	// severity вычисляется ЗДЕСЬ, а не приходит параметром: три вызывающих в
+	// gateway плюс будущие не должны иметь возможности её забыть или разойтись между
+	// собой. Маршрутизация уведомлений на стороне вызывающего берёт то же значение
+	// из той же чистой функции alerting.DefaultFor — расхождения быть не может.
+	// Значение фиксируется в строке (см. 041): правка карты по умолчанию не должна
+	// переписывать критичность уже разобранных инцидентов задним числом.
+	severity := string(alerting.DefaultFor(alertType))
 	tag, err := db.pool.Exec(ctx, `
-  INSERT INTO alerts (device_id, alert_type, details, admin_access_request_id)
+  INSERT INTO alerts (device_id, alert_type, details, admin_access_request_id, severity)
   SELECT $1::uuid, $2::text, $3::text,
-    (SELECT r.id FROM admin_access_requests r WHERE r.id = $4::uuid AND r.device_id = $1::uuid)
+    (SELECT r.id FROM admin_access_requests r WHERE r.id = $4::uuid AND r.device_id = $1::uuid),
+    $5::text
   WHERE NOT EXISTS (
     SELECT 1 FROM alerts a
     WHERE a.device_id = $1::uuid AND a.alert_type = $2::text
       AND a.details = $3::text AND a.acknowledged_at IS NULL
   )
- `, deviceID, alertType, details, adminReqID)
+ `, deviceID, alertType, details, adminReqID, severity)
 	// 23503 = устройство/заявка удалены (гонка с удалением или retention-чисткой)
 	// до доставки события — тот же терминальный класс, что и в SaveScriptResult.
 	if err != nil {
@@ -1271,21 +1522,41 @@ type Alert struct {
 	DeviceID       string     `json:"device_id"`
 	DeviceHostname string     `json:"device_hostname"`
 	AlertType      string     `json:"alert_type"`
+	Severity       string     `json:"severity"`
 	Details        string     `json:"details"`
 	CreatedAt      time.Time  `json:"created_at"`
 	AcknowledgedAt *time.Time `json:"acknowledged_at"`
 }
 
+// severityRank строит SQL-выражение ранга критичности над произвольным выражением
+// (столбцом или параметром запроса).
+//
+// Ранг выражением, а не сортировкой по тексту: severity хранится как TEXT под
+// CHECK, и ORDER BY по нему дал бы алфавит ('critical' < 'high' < 'low' <
+// 'medium'), то есть low оказался бы важнее medium. Числа держим только здесь и в
+// alerting.Rank — наружу шкала не выставляется, чтобы её можно было расширить
+// посередине. ELSE 0: неизвестное значение уезжает в конец, а не в начало.
+func severityRank(expr string) string {
+	return `CASE ` + expr + `
+    WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1
+    ELSE 0 END`
+}
+
 func (db *DB) ListAlerts(ctx context.Context, deviceID string, limit int) ([]Alert, error) {
 	query := `
-  SELECT a.id, a.device_id, COALESCE(d.hostname, ''), a.alert_type, a.details, a.created_at, a.acknowledged_at
+  SELECT a.id, a.device_id, COALESCE(d.hostname, ''), a.alert_type, a.severity, a.details, a.created_at, a.acknowledged_at
   FROM alerts a
   LEFT JOIN devices d ON d.id = a.device_id`
 	// Непринятые ПЕРВЫМИ: фронт тянет один список и фильтрует «новые» клиентски, поэтому
 	// при простой сортировке по дате непринятый алерт старше LIMIT-й строки молча выпадал
 	// из выборки (и из счётчика «новых»), вытесненный более свежими ПРИНЯТЫМИ. Сортировка
 	// (acknowledged_at IS NULL) DESC держит все непринятые в голове списка.
-	order := ` ORDER BY (a.acknowledged_at IS NULL) DESC, a.created_at DESC`
+	//
+	// Критичность — второй ключ, ПОСЛЕ признака принятости и ДО даты (миграция 043).
+	// Именно в таком порядке, а не «критичность первой»: принятый critical уже
+	// разобран человеком, и выталкивать им непринятые из окна LIMIT означало бы
+	// вернуть ровно тот баг, ради которого появилась сортировка по acknowledged_at.
+	order := ` ORDER BY (a.acknowledged_at IS NULL) DESC, ` + severityRank("a.severity") + ` DESC, a.created_at DESC`
 	args := []any{}
 	if deviceID != "" {
 		query += ` WHERE a.device_id = $1` + order + ` LIMIT $2`
@@ -1302,12 +1573,83 @@ func (db *DB) ListAlerts(ctx context.Context, deviceID string, limit int) ([]Ale
 	var alerts []Alert
 	for rows.Next() {
 		var a Alert
-		if err := rows.Scan(&a.ID, &a.DeviceID, &a.DeviceHostname, &a.AlertType, &a.Details, &a.CreatedAt, &a.AcknowledgedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.DeviceID, &a.DeviceHostname, &a.AlertType, &a.Severity, &a.Details, &a.CreatedAt, &a.AcknowledgedAt); err != nil {
 			return nil, err
 		}
 		alerts = append(alerts, a)
 	}
 	return alerts, rows.Err()
+}
+
+// TakeEscalations забирает непринятые алерты, по которым пора напомнить, и СРАЗУ
+// помечает их отправленными (escalated_at = now()).
+//
+// Захват и пометка — один UPDATE ... RETURNING, а не SELECT с последующим UPDATE.
+// Это не оптимизация: между SELECT и UPDATE второй узел (или второй тик после
+// зависшей отправки) выбрал бы те же строки и отправил напоминание повторно.
+// UPDATE атомарен относительно строк, которые он трогает, поэтому каждый алерт
+// достаётся ровно одному вызывающему. Цена — напоминание считается отправленным
+// до того, как Telegram его подтвердил: при сбое доставки следующее придёт через
+// repeatMinutes, а не немедленно. Это верный компромисс — обратный порядок
+// (отправить, потом пометить) при падении процесса между шагами превращается в
+// бесконечную рассылку одного и того же алерта.
+//
+// afterMinutes<=0 выключает эскалацию. repeatMinutes<=0 = напомнить ровно один раз.
+func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinutes, repeatMinutes int) ([]Alert, error) {
+	if afterMinutes <= 0 {
+		return nil, nil
+	}
+	if _, ok := alerting.Parse(minSeverity); !ok {
+		// Опечатка в ALERT_ESCALATE_MIN_SEVERITY не должна тихо превращаться в
+		// «эскалировать всё подряд»: минимальный ранг у мусора равен 0, и предикат
+		// ниже пропустил бы вообще каждый алерт, включая agent_unreachable.
+		return nil, fmt.Errorf("escalation: unknown min severity %q", minSeverity)
+	}
+	rows, err := db.pool.Query(ctx, `
+		UPDATE alerts a SET escalated_at = now()
+		WHERE a.id IN (
+		  SELECT a2.id FROM alerts a2
+		  WHERE a2.acknowledged_at IS NULL
+		    AND `+severityRank("a2.severity")+` >= `+severityRank("$1::text")+`
+		    AND a2.created_at < now() - ($2 * interval '1 minute')
+		    AND (a2.escalated_at IS NULL
+		         OR ($3 > 0 AND a2.escalated_at < now() - ($3 * interval '1 minute')))
+		  FOR UPDATE SKIP LOCKED
+		)
+		RETURNING a.id, a.device_id, '', a.alert_type, a.severity, a.details, a.created_at, a.acknowledged_at
+	`, minSeverity, afterMinutes, repeatMinutes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Alert
+	for rows.Next() {
+		var al Alert
+		if err := rows.Scan(&al.ID, &al.DeviceID, &al.DeviceHostname, &al.AlertType,
+			&al.Severity, &al.Details, &al.CreatedAt, &al.AcknowledgedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, al)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Hostname отдельным запросом: RETURNING не умеет JOIN, а напоминание без имени
+	// машины бесполезно — оператор не поймёт, куда идти.
+	for i := range out {
+		var hostname string
+		if err := db.pool.QueryRow(ctx,
+			`SELECT COALESCE(hostname, '') FROM devices WHERE id = $1`, out[i].DeviceID).Scan(&hostname); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, err
+			}
+			// Устройство удалено между созданием алерта и напоминанием — не повод
+			// глушить напоминание целиком: сам факт непринятого инцидента остаётся.
+			continue
+		}
+		out[i].DeviceHostname = hostname
+	}
+	return out, nil
 }
 
 func (db *DB) AcknowledgeAlert(ctx context.Context, alertID string) error {
@@ -2439,7 +2781,10 @@ func (db *DB) ListScriptResultsByPolicy(ctx context.Context, policyID string, li
 
 func (db *DB) ListDeviceTasks(ctx context.Context, deviceID string) ([]Task, error) {
 	rows, err := db.pool.Query(ctx, `
-  SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at
+  SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
+         task_type, uninstall_software_name, uninstall_version, uninstall_uninstall_id,
+         uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason,
+         uninstall_outcome
   FROM tasks WHERE device_id = $1
   ORDER BY created_at DESC LIMIT 50
  `, deviceID)
@@ -2451,7 +2796,11 @@ func (db *DB) ListDeviceTasks(ctx context.Context, deviceID string) ([]Task, err
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.Output, &t.ErrorLog, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.Output, &t.ErrorLog, &t.CreatedAt,
+			&t.TaskType,
+			&t.Uninstall.SoftwareName, &t.Uninstall.Version, &t.Uninstall.UninstallID,
+			&t.Uninstall.InstallLocation, &t.Uninstall.Method, &t.Uninstall.Scope, &t.Uninstall.Reason,
+			&t.UninstallOutcome); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, t)
@@ -2514,6 +2863,7 @@ func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string, li
 		SELECT d.id, d.hostname, d.os, COALESCE(d.os_version, ''), COALESCE(d.ip_address, ''),
 		       d.status, d.last_seen_at, d.created_at, COALESCE(d.agent_version, ''),
 		       COALESCE(d.mac_address, ''), COALESCE(d.serial_number, ''), COALESCE(d.public_ip, ''),
+		       d.outbox_unavailable, COALESCE(d.degraded_detail, ''), d.degraded_since,
 		       COUNT(*) OVER() AS total
 		FROM devices d
 		WHERE d.status != 'pending'
@@ -2533,7 +2883,8 @@ func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string, li
 		var d Device
 		if err := rows.Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 			&d.IPAddress, &d.Status, &d.LastSeenAt, &d.CreatedAt, &d.AgentVersion,
-			&d.MACAddress, &d.SerialNumber, &d.PublicIP, &total); err != nil {
+			&d.MACAddress, &d.SerialNumber, &d.PublicIP,
+			&d.OutboxUnavailable, &d.DegradedDetail, &d.DegradedSince, &total); err != nil {
 			return nil, 0, err
 		}
 		d.Groups = []DeviceGroupRef{}
@@ -2587,10 +2938,15 @@ func (db *DB) attachDeviceGroups(ctx context.Context, devices []Device) error {
 
 // ---- Users ----
 
+// GetUserByID ищет по id::text, а не по id: до появления ручки удаления функцию звали
+// только с идентификатором из проверенного JWT, а теперь в неё едет строка прямо из URL.
+// Голое сравнение с uuid на кривом значении даёт 22P02 — то есть 500 вместо 404, и
+// ловится это не глазами, а тестом на «not-a-uuid». Правка в общей функции, а не в
+// вызывающем: остальным она не мешает, а следующий такой вызывающий появится незаметно.
 func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	var u User
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at FROM users WHERE id = $1
+		SELECT id, name, email, password_hash, role, created_at FROM users WHERE id::text = $1
 	`, id).Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2618,6 +2974,71 @@ func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+// ErrLastAdmin — попытка удалить последнего it_admin. Отдельная ошибка, а не просто
+// «не удалилось»: оператору нужно объяснить причину, иначе отказ выглядит как баг.
+var ErrLastAdmin = errors.New("last it_admin")
+
+// AdminGuardLockKey — ключ advisory-локи, сериализующей удаление администраторов.
+// Число произвольное, важна только уникальность в пределах базы.
+//
+// Экспортирован ради теста: тот берёт ЭТУ ЖЕ локу своим соединением и проверяет, что
+// DeleteUser её ждёт. Косвенная проверка — «два параллельных удаления не снесли обоих» —
+// была ложно-зелёной: она проходит и со снятой локой, потому что окно гонки узкое и
+// две горутины в него попросту не попадают. Проверено снятием локи.
+const AdminGuardLockKey = 4030407
+
+// DeleteUser удаляет аккаунт панели. Возвращает false, если такого пользователя нет.
+//
+// 🔴 Проверка «последний администратор» и само удаление обязаны идти под локой. Без неё
+// два параллельных удаления двух РАЗНЫХ администраторов каждое видит по два (чужая
+// транзакция ещё не закоммичена), обе проходят — и в системе не остаётся ни одного
+// администратора, то есть панель становится неуправляемой без доступа к БД. Лока
+// сериализует именно эту пару операций; берётся на транзакцию и снимается сама.
+//
+// Что уезжает вместе с пользователем (по внешним ключам, миграции 012/029/040):
+// сервисные токены и токены сброса пароля — CASCADE, приглашения и раскрытия эскроу —
+// SET NULL (журнал переживает удаление), заявки на локальные права — SET NULL.
+// Живые JWT умирают сами: jwtMiddleware отвергает токен, если пользователя больше нет.
+func (db *DB) DeleteUser(ctx context.Context, id string) (bool, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(AdminGuardLockKey)); err != nil {
+		return false, err
+	}
+
+	// id::text — кривой UUID из URL иначе даёт 22P02 и превращается в 500 вместо 404.
+	var role string
+	err = tx.QueryRow(ctx, `SELECT role FROM users WHERE id::text = $1`, id).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if role == "it_admin" {
+		var admins int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE role = 'it_admin'`).Scan(&admins); err != nil {
+			return false, err
+		}
+		if admins <= 1 {
+			return false, ErrLastAdmin
+		}
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id::text = $1`, id)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // UpdateUserPassword меняет хэш пароля И двигает password_changed_at=now()

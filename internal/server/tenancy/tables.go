@@ -1,0 +1,138 @@
+// Package tenancy хранит классификацию таблиц по отношению к тенанту.
+//
+// Это единственный источник правды по вопросу «кому принадлежит строка». Пакет
+// намеренно не зависит ни от storage, ни от драйвера БД: он описывает решение, а не
+// его исполнение, и обязан оставаться проверяемым без поднятой PostgreSQL.
+//
+// Зачем это существует ДО реализации мультитенантности: главный риск ретрофита —
+// не первая волна правок, а таблица, добавленная через полгода без решения о
+// тенантности. Карта ниже плюс гейт в tables_test.go делают такое добавление
+// невозможным: новая таблица в migrations/ без записи здесь роняет сборку.
+//
+// Полный контракт с обоснованиями — docs/multitenancy-contract.md (ADR-6).
+package tenancy
+
+// Scope — отношение таблицы к тенанту.
+type Scope string
+
+const (
+	// ScopeOwn — тенант хранится собственной колонкой tenant_id NOT NULL.
+	ScopeOwn Scope = "own"
+
+	// ScopeDerived — строка принадлежит тенанту через родителя (FK). Колонка
+	// tenant_id всё равно денормализуется в таблицу: предикат RLS не должен ходить
+	// по FK на каждую строку выборки (см. контракт, §5, слой 1). Поле Parent
+	// называет источник истины, с которым денормализованная копия обязана совпадать.
+	ScopeDerived Scope = "derived"
+
+	// ScopeGlobal — таблица общая на инсталляцию, тенанта не имеет. Как правило это
+	// значит, что по её ключу происходит аутентификация, то есть он резолвится ДО
+	// того, как тенант известен, — либо что запись обязана действовать во всех
+	// тенантах сразу (отзыв сертификата).
+	ScopeGlobal Scope = "global"
+
+	// ScopeMixed — строки бывают и глобальными (значение по умолчанию для
+	// инсталляции), и тенантскими (переопределение). На 2026-07-27 такая таблица
+	// ровно одна — system_settings.
+	ScopeMixed Scope = "mixed"
+)
+
+// Table — классификация одной таблицы.
+type Table struct {
+	Scope Scope
+	// Parent — таблица-источник тенанта. Обязательна и осмысленна только для
+	// ScopeDerived.
+	Parent string
+	// Why — почему именно так. Обязательно для ScopeGlobal и ScopeMixed: это
+	// единственные два случая, где отсутствие изоляции — осознанное решение, и его
+	// нельзя оставлять без объяснения ревьюеру.
+	Why string
+}
+
+// Tables — классификация всех таблиц схемы. Ключ — имя таблицы в migrations/.
+//
+// Добавляешь таблицу в migrations/ — добавь её сюда, иначе TestEveryTableClassified
+// покраснеет. Это и есть цель.
+var Tables = map[string]Table{
+	// --- Тенантские, собственная колонка ------------------------------------
+	"devices":       {Scope: ScopeOwn},
+	"device_groups": {Scope: ScopeOwn},
+	"scripts":       {Scope: ScopeOwn},
+	"policies":      {Scope: ScopeOwn},
+	"users":         {Scope: ScopeOwn},
+	"api_tokens":    {Scope: ScopeOwn},
+
+	// Токены доступа: принадлежат тенанту, НО ищутся по глобально уникальному
+	// секрету — тенант становится известен только после резолва строки.
+	// Уникальность token/token_hash обязана остаться глобальной (контракт, §6.2).
+	"invitation_tokens": {Scope: ScopeOwn},
+	"enrollment_tokens": {Scope: ScopeOwn},
+
+	"directory_persons": {Scope: ScopeOwn},
+	"audit_log":         {Scope: ScopeOwn},
+
+	// audit_anchors — собственная колонка, а НЕ производная от audit_log, хотя
+	// логически это его голова. FK на audit_log здесь был бы прямо вреден: смысл
+	// якоря в том, что он ПЕРЕЖИВАЕТ удаление записей retention'ом, а каскад его бы
+	// и снёс — ровно в тот момент, когда он единственный доказывает, что усечение
+	// было легальным.
+	// Тенантский, а не глобальный: при раздельном сроке хранения у тенантов общая
+	// цепочка дырявилась бы чужим retention'ом, поэтому цепочка обязана быть на
+	// тенанта. Следствие для миграции: PRIMARY KEY (seq) станет (tenant_id, seq),
+	// а seq — сквозным в пределах тенанта. См. docs/audit-hash-chain.md.
+	"audit_anchors": {Scope: ScopeOwn},
+
+	// software_policy_rules — собственная колонка, а НЕ производная, хотя FK на
+	// devices есть. Причина: device_id nullable, и NULL означает «глобальное
+	// правило». Вывод тенанта через родителя для такой строки не определён, а
+	// дословный ретрофит сделал бы правило глобальным на всю инсталляцию — то есть
+	// софт-политика одного тенанта начала бы применяться к чужому парку и генерить
+	// там алерты. Молча. См. контракт, §7.1.
+	"software_policy_rules": {Scope: ScopeOwn},
+
+	// --- Тенантские, производные --------------------------------------------
+	"device_software":       {Scope: ScopeDerived, Parent: "devices"},
+	"alerts":                {Scope: ScopeDerived, Parent: "devices"},
+	"tasks":                 {Scope: ScopeDerived, Parent: "devices"},
+	"process_events":        {Scope: ScopeDerived, Parent: "devices"},
+	"admin_access_requests": {Scope: ScopeDerived, Parent: "devices"},
+	"recovery_key_escrow":   {Scope: ScopeDerived, Parent: "devices"},
+	"device_group_members":  {Scope: ScopeDerived, Parent: "device_groups"},
+	"policy_assignments":    {Scope: ScopeDerived, Parent: "policies"},
+	"script_results":        {Scope: ScopeDerived, Parent: "scripts"},
+	"password_reset_tokens": {Scope: ScopeDerived, Parent: "users"},
+
+	// --- Глобальные ----------------------------------------------------------
+	"agent_releases": {
+		Scope: ScopeGlobal,
+		Why: "деплойер публикует один набор подписанных бинарей на всю инсталляцию; " +
+			"релиз на тенанта означал бы ключ подписи на тенанта — это другая система",
+	},
+	"revoked_fingerprints": {
+		Scope: ScopeGlobal,
+		Why: "отозванный сертификат обязан быть отозван ВЕЗДЕ; тенантский скоуп здесь " +
+			"даёт fail-open — отпечаток, отозванный в одном тенанте, проходил бы в другом",
+	},
+	"token_blocklist": {
+		Scope: ScopeGlobal,
+		Why:   "проверяется по jti в jwtMiddleware до того, как известен тенант",
+	},
+
+	// --- Смешанная -----------------------------------------------------------
+	"system_settings": {
+		Scope: ScopeMixed,
+		Why: "admin_request_timeout_minutes — политика тенанта, а не параметр " +
+			"инсталляции: подразделения вправе иметь разный таймаут согласования " +
+			"admin-прав. Строка без тенанта = значение по умолчанию, строка с " +
+			"тенантом = переопределение. См. контракт, §3.4",
+	},
+}
+
+// Scoped сообщает, требует ли таблица тенантного предиката в запросах.
+func Scoped(table string) bool {
+	t, ok := Tables[table]
+	if !ok {
+		return false
+	}
+	return t.Scope == ScopeOwn || t.Scope == ScopeDerived
+}

@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Floodww/RoutineOps/internal/agent/transport"
 	pb "github.com/Floodww/RoutineOps/proto"
@@ -28,7 +29,16 @@ type Heartbeater struct {
 	// индикатора статуса в трее (обновление status-файла). Должна быть
 	// неблокирующей. Может быть nil.
 	OnBeat func()
-	Log    *slog.Logger
+	// DegradedFunc отдаёт признак недоступности durable-очереди и причину
+	// (outbox.Queue.Unavailable). Может быть nil — тогда признак не шлётся.
+	//
+	// Почему это едет heartbeat'ом: об умершей очереди нельзя отчитаться через
+	// очередь. Когда outbox мёртв, разом и молча теряются результаты задач,
+	// статусы лока и security-события, а сервер видит живое устройство, у
+	// которого ничего не происходит. Heartbeat — единственный канал, не
+	// зависящий от неё.
+	DegradedFunc func() (bool, string)
+	Log          *slog.Logger
 }
 
 // Session обслуживает один Connect-стрим до обрыва. Сигнатура совпадает с
@@ -86,6 +96,14 @@ func (h *Heartbeater) send(stream transport.Stream) error {
 		IpAddress: h.IPFunc(),
 		Timestamp: time.Now().Unix(),
 	}
+	if h.DegradedFunc != nil {
+		if down, detail := h.DegradedFunc(); down {
+			hb.OutboxUnavailable = true
+			// Причина режется: heartbeat идёт каждые несколько секунд, и полный
+			// текст ошибки ФС в каждом кадре — это трафик и шум в логе сервера.
+			hb.DegradedDetail = truncateDetail(detail)
+		}
+	}
 	if err := stream.Send(hb); err != nil {
 		return err
 	}
@@ -94,4 +112,21 @@ func (h *Heartbeater) send(stream transport.Stream) error {
 		h.OnBeat()
 	}
 	return nil
+}
+
+// maxDetailBytes — потолок причины деградации в кадре heartbeat. Признак важен,
+// подробности — нет: полный текст ошибки ФС уезжал бы в каждом кадре.
+const maxDetailBytes = 200
+
+func truncateDetail(s string) string {
+	if len(s) <= maxDetailBytes {
+		return s
+	}
+	// По границе руны: proto3 string обязан быть валидным UTF-8, а сообщения
+	// Windows приезжают на русском.
+	cut := maxDetailBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

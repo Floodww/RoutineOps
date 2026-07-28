@@ -126,6 +126,13 @@ export interface Device {
   // Устройство может состоять в нескольких группах. Может отсутствовать: сервер старой
   // версии поля не отдаёт, а только что созданное pending-устройство держим локально.
   groups?: DeviceGroupRef[]
+  // Durable-очередь агента недоступна: отчёты, статусы лока и security-события с этой
+  // машины НЕ доходят. Приходит и в списке, и в карточке — в отличие от инвентарных
+  // полей. Отсутствует у сервера старой версии; трактуем отсутствие как «всё в порядке»
+  // (агент старой версии признак тоже не шлёт, и выдумывать деградацию нельзя).
+  outbox_unavailable?: boolean
+  degraded_detail?: string
+  degraded_since?: string | null
 }
 
 // Каталог (LDAP) — только enterprise-сборка; в open-core ручки /directory/* → 501, а
@@ -139,6 +146,11 @@ export interface DirectoryConfig {
   user_filter: string
   sync_interval_min: number
   has_password: boolean
+  // Транспорт. ldaps:// в url = неявный TLS; ldap:// + start_tls = апгрейд открытого
+  // соединения. Корневой сертификат отправляется write-only полем ca_cert_pem, наружу
+  // возвращается только признак has_ca_cert — как и bind-пароль.
+  start_tls: boolean
+  has_ca_cert: boolean
 }
 
 export interface DirectorySyncResult {
@@ -243,13 +255,50 @@ export interface Task {
   output: string | null
   error_log: string | null
   created_at: string
+  // Исход удаления ПО — отдельным полем, а не текстом в output: разные исходы требуют
+  // РАЗНЫХ действий оператора (обновить инвентарь / уточнить цель / делать нечего), и
+  // по прозе это не разбирается. Пусто — задача не про удаление либо отчёта ещё не было.
+  uninstall_outcome?: string
+  // Что именно сносили. Заполнено только у uninstall-задач.
+  uninstall?: {
+    software_name: string
+    version?: string
+    uninstall_id?: string
+    install_location?: string
+    uninstall_method?: string
+    scope?: string
+    reason?: string
+  }
 }
+
+// UNINSTALL_OUTCOME — человеческие подписи к исходам. 🔴 still_present против failed —
+// различие безопасности, а не формулировки: деинсталлятор мог отчитаться успехом, а ПО
+// осталось (msiexec возвращает 0 на снос, отложенный до перезагрузки; pkgutil --forget
+// чистит только квитанцию). Агент отчитывается по ПОВТОРНОМУ снимку, а не по коду
+// возврата, и подпись обязана это сохранить.
+export const UNINSTALL_OUTCOME: Record<string, { label: string; hint: string }> = {
+  removed:         { label: "Удалено",            hint: "Снято, подтверждено повторным снимком инвентаря." },
+  already_absent:  { label: "Уже отсутствует",    hint: "На машине не нашлось ничего с таким именем." },
+  target_changed:  { label: "Цель изменилась",    hint: "Имя есть, но версия, ключ или способ удаления разошлись со снимком. Обновите инвентарь и повторите." },
+  ambiguous:       { label: "Неоднозначная цель", hint: "Селектору подошло несколько записей — уточните цель." },
+  not_removable:   { label: "Снять нечем",        hint: "Тихого деинсталлятора нет: защищено системой либо установлено в чужой профиль." },
+  self_protected:  { label: "Это сам агент",      hint: "Целью оказался агент RoutineOps. Снос агента делается выводом из эксплуатации, а не удалением ПО." },
+  failed:          { label: "Ошибка удаления",    hint: "Деинсталлятор отработал с ошибкой." },
+  still_present:   { label: "Осталось на месте",  hint: "Деинсталлятор отчитался успехом, но ПО осталось в повторном снимке. Возможно, снос отложен до перезагрузки." },
+}
+
+export type AlertSeverity = "critical" | "high" | "medium" | "low"
 
 export interface Alert {
   id: string
   device_id: string
   device_hostname: string
   alert_type: string
+  // severity фиксируется сервером в момент создания (миграция 041). Тип строкой,
+  // а не AlertSeverity: сервер хранит её свободным TEXT под CHECK, и агент новее
+  // сервера может прислать событие, которому сервер выдаст значение вне шкалы.
+  // Клиент обязан это пережить, а не упасть на сужении типа.
+  severity: string
   details: string
   created_at: string
   acknowledged_at: string | null

@@ -70,6 +70,12 @@ check-escrow-tags:
 		echo "ОШИБКА: ESCROW_RECIPIENT/_FPR заданы без AGENT_TAGS=enterprise — escrow молча не попадёт в free-агент." >&2; \
 		exit 1; \
 	fi
+	@if [ "$(AGENT_TAGS)" = "enterprise" ] && { [ -z "$(ESCROW_RECIPIENT)" ] || [ -z "$(ESCROW_RECIPIENT_FPR)" ]; }; then \
+		echo "ОШИБКА: AGENT_TAGS=enterprise, но ESCROW_RECIPIENT/_FPR пусты." >&2; \
+		echo "-X по пустой строке линкер отработает МОЛЧА, и enterprise-агент уедет с выключенным FileVault-escrow." >&2; \
+		echo "Задай оба: ESCROW_RECIPIENT=age1... ESCROW_RECIPIENT_FPR=<fpr>." >&2; \
+		exit 1; \
+	fi
 
 .PHONY: help proto tidy fmt hooks agent mockserver build certs up down logs run-mock run-agent test clean \
         pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \

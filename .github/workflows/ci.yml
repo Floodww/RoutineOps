@@ -56,6 +56,13 @@ jobs:
       # с маршрутами в коде (руками написанная спека тихо расходится именно так).
       - name: guards (публичные доки · спецификация API)
         run: |
+          # PyYAML — зависимость check-openapi.sh, объявляем её ЯВНО. Раньше гард
+          # молча полагался на то, что она случайно есть в образе ubuntu-latest: при
+          # её отсутствии он печатал «ПРОПУСК» и выходил с кодом 0, то есть проверял
+          # ноль. Теперь скрипт fail-closed, и без этой строки любое обновление
+          # образа или добавление setup-python роняло бы весь пайплайн.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --disable-pip-version-check PyYAML
           # check-public-docs.sh и его whitelist вырезаются из Free-среза
           # (export-free.sh, шаг 4) — это мейнтейнерский тулинг. В срезе гард
           # и не нужен: он проверяет список, по которому срез и сделан.
@@ -65,6 +72,15 @@ jobs:
             echo "check-public-docs.sh отсутствует (Free-срез) — пропуск"
           fi
           bash scripts/check-openapi.sh
+
+      # Guard open-core: canary-либы (age → escrow, go-ldap → каталог) и enterprise-пакеты
+      # не должны попадать в граф зависимостей шипаемых free-бинарей. Job собирается БЕЗ
+      # -tags enterprise, то есть ровно в той конфигурации, которую гард и проверяет.
+      # До сих пор запускался только руками перед пушем (server/README.md), а пушим мы
+      # прямо в main — между «забыл прогнать» и enterprise-кодом в публичном репозитории
+      # не было ни одного автоматического барьера.
+      - name: leak-guard (enterprise → open-core)
+        run: sh scripts/check-oss-no-enterprise.sh
 
       - name: build
         run: go build ./...

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
-import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown } from "lucide-react"
-import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS, EscrowRecord, EscrowReveal, ESCROW_SECRET_TYPE } from "@/lib/api"
+import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown, Trash2 } from "lucide-react"
+import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS, EscrowRecord, EscrowReveal, ESCROW_SECRET_TYPE, UNINSTALL_OUTCOME } from "@/lib/api"
 import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -87,6 +87,10 @@ export default function DeviceDetail() {
   const { isAdmin } = useMe()
   const [device, setDevice] = useState<Device | null>(null)
   const [software, setSoftware] = useState<Software[]>([])
+  // Что сносим — держим всю запись: в подтверждении нужны имя, версия и метод, иначе
+  // оператор соглашается на «удалить ПО» вслепую, а одноимённых записей бывает две.
+  const [toUninstall, setToUninstall] = useState<Software | null>(null)
+  const [uninstalling, setUninstalling] = useState(false)
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [blocking, setBlocking] = useState(false)
@@ -237,6 +241,45 @@ export default function DeviceDetail() {
   // планировщик ОС принял команду, а не после того, как машина поднялась. Повторный
   // клик по той же машине попадает в ту же задачу (сервер не выдаёт новый task_id),
   // поэтому дополнительной защиты от двойного клика здесь не нужно.
+  // Удаление ПО. Повторный клик безопасен: сервер возвращает ТУ ЖЕ задачу, пока
+  // предыдущая не доставлена.
+  async function sendUninstall() {
+    if (!toUninstall) return
+    setUninstalling(true)
+    try {
+      await api.post(`/devices/${id}/software/uninstall`, {
+        software_name: toUninstall.name,
+        uninstall_id: toUninstall.uninstall_id ?? "",
+      })
+      setToUninstall(null)
+      toast({
+        title: "Задача на удаление поставлена",
+        description: "Агент снимет инвентарь заново, найдёт цель и отчитается по факту — исход появится в списке задач.",
+        variant: "success",
+      })
+      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(t.data ?? [])
+    } catch (e) {
+      const r = (e as { response?: { status?: number; data?: unknown } }).response
+      const text = typeof r?.data === "string" ? r.data.trim() : ""
+      toast({
+        // 402 — лицензия, 404 — свободная редакция (ручки физически нет), 409 —
+        // осмысленный отказ с причиной от сервера. Их важно различать: «попробуйте
+        // ещё раз» подходит ровно ни к одному из них.
+        title: r?.status === 404
+          ? "Удаление ПО доступно в редакции Enterprise"
+          : r?.status === 402
+            ? "Лицензия не покрывает удаление ПО"
+            : r?.status === 409 && text
+              ? text
+              : "Не удалось поставить задачу удаления",
+        variant: "destructive",
+      })
+    } finally {
+      setUninstalling(false)
+    }
+  }
+
   async function sendReboot() {
     if (!device) return
     setRebooting(true)
@@ -395,6 +438,18 @@ export default function DeviceDetail() {
           <Badge variant="outline" className="border-amber-500 text-amber-600 dark:text-amber-400"
                  title={lockDivergence(device)!.hint}>
             ⚠ {lockDivergence(device)!.label}
+          </Badge>
+        )}
+        {/* Очередь отчётов мертва: устройство на связи, но всё, что оно должно
+            рассказывать, теряется по дороге. Рисуем рядом со статусом именно потому,
+            что остальные признаки на этой карточке в такой момент недостоверны —
+            включая бейдж лока выше. */}
+        {device.outbox_unavailable && (
+          <Badge variant="outline" className="border-violet-500 text-violet-600 dark:text-violet-400"
+                 title={`Отчёты, статусы лока и security-события с устройства не доходят${
+                   device.degraded_detail ? `.\nПричина: ${device.degraded_detail}` : ""
+                 }${device.degraded_since ? `\nС ${new Date(device.degraded_since).toLocaleString("ru-RU")}` : ""}`}>
+            🕳 Агент ослеп
           </Badge>
         )}
         {device.groups?.map((g) => <GroupBadge key={g.id} group={g} />)}
@@ -733,8 +788,31 @@ export default function DeviceDetail() {
                   <Badge variant={taskStatusVariant[t.status]}>
                     {taskStatusLabel[t.status] ?? t.status}
                   </Badge>
-                  <span className="text-[13px] text-soft truncate">{t.platform}</span>
-                  <span className="text-xs text-muted-foreground">{t.priority}</span>
+                  {/* Исход удаления вместо платформы: у uninstall-задачи «linux/normal»
+                      не говорит ничего, а исход — единственное, что оператору нужно.
+                      Незнакомое значение показываем как есть: сервер хранит домен
+                      открытым, и новый исход агента должен быть виден, а не пропасть. */}
+                  {t.uninstall_outcome ? (
+                    <>
+                      <Badge
+                        variant="outline"
+                        title={UNINSTALL_OUTCOME[t.uninstall_outcome]?.hint}
+                        className={t.uninstall_outcome === "removed"
+                          ? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
+                          : "border-amber-500 text-amber-600 dark:text-amber-400"}
+                      >
+                        {UNINSTALL_OUTCOME[t.uninstall_outcome]?.label ?? t.uninstall_outcome}
+                      </Badge>
+                      <span className="text-[13px] text-soft truncate">
+                        {t.uninstall?.software_name}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[13px] text-soft truncate">{t.platform}</span>
+                      <span className="text-xs text-muted-foreground">{t.priority}</span>
+                    </>
+                  )}
                 </div>
                 <div className="flex items-center gap-4 flex-shrink-0">
                   <span className="text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</span>
@@ -816,12 +894,64 @@ export default function DeviceDetail() {
                     </div>
                   )}
                 </div>
-                <span className="text-xs text-muted-foreground flex-shrink-0">{s.version}</span>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <span className="text-xs text-muted-foreground">{s.version}</span>
+                  {/* Кнопку рисуем только там, где метод снятия ЕСТЬ. Пустой метод — не
+                      «попробуем и посмотрим»: коллектор агента оставляет его пустым
+                      ровно там, где снять нечем (per-user под Windows, защищённое SIP).
+                      Кнопка на такой записи гарантированно вернула бы NOT_REMOVABLE. */}
+                  {isAdmin && s.uninstall_method && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Удалить ${s.name}`}
+                      title="Удалить с устройства"
+                      onClick={() => setToUninstall(s)}
+                      className="text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="h-4 w-4" strokeWidth={2} />
+                    </Button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
         </div>
       )}
+
+      {/* Подтверждение удаления ПО. Показываем весь селектор, а не одно имя: одноимённых
+          записей на машине бывает две (разные версии, разные вендоры), и оператор должен
+          видеть, какую именно он сносит. */}
+      <Dialog open={toUninstall !== null} onOpenChange={(o) => { if (!o) setToUninstall(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Удалить программу с устройства?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="rounded-lg border border-border px-3 py-2 text-sm">
+              <div className="font-medium text-foreground">{toUninstall?.name}</div>
+              <div className="text-xs text-muted-foreground">
+                {[toUninstall?.version, toUninstall?.vendor, toUninstall?.uninstall_method]
+                  .filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Агент не выполняет присланную команду: он снимает инвентарь заново, находит
+              эту запись у себя и использует собственный способ удаления. Если за это время
+              программа обновилась или её ключ изменился, снос не состоится — вы увидите
+              «цель изменилась», а не удалённую по ошибке версию.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setToUninstall(null)} disabled={uninstalling}>
+                Отмена
+              </Button>
+              <Button variant="destructive" onClick={sendUninstall} disabled={uninstalling}>
+                {uninstalling ? "Отправка..." : "Удалить"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Task log dialog */}
       <Dialog open={!!logTask} onOpenChange={(o) => !o && setLogTask(null)}>

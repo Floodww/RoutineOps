@@ -26,6 +26,29 @@ mkdir -p "$CERTS_DIR"
 cd "$CERTS_DIR"
 
 # ---------- Root CA ----------
+# 🔴 FAIL-CLOSED. Условие выпуска — «в каталоге ещё ничего не выпущено», а не «нет ca.key».
+# Раньше проверялся только ca.key: потерянный (или не восстановленный из бэкапа) ключ при
+# живых ca.crt/server.key/агентских сертах МОЛЧА перевыпускал корень поверх старого,
+# перезаписывал ca.crt и отчитывался успехом с EXIT=0. Последствие — безвозвратная потеря
+# связи со всем парком: агенты доверяют только старому ca.crt, сервер проверяет mTLS старым
+# CA (docs/operations.md, «Потеря всего CA с перегенерацией»). Отказ громче тихой катастрофы.
+issued=""
+[[ -f ca.crt ]] && issued="ca.crt"
+[[ -f server.key || -f server.crt ]] && issued="${issued:+$issued, }server.*"
+[[ -d agents && -n "$(ls -A agents 2>/dev/null)" ]] && issued="${issued:+$issued, }agents/"
+if [[ ! -f ca.key && -n "$issued" ]]; then
+  echo "ОШИБКА: ca.key отсутствует, но в $CERTS_DIR уже есть выпущенное: $issued" >&2
+  echo "Перевыпуск корневого CA поверх работающего парка ОБОРВЁТ связь со всеми агентами" >&2
+  echo "безвозвратно. Восстанови ca.key из бэкапа (docs/disaster-recovery.md)." >&2
+  echo "Если это осознанная ротация CA с перерегистрацией парка — очисти каталог целиком." >&2
+  exit 1
+fi
+if [[ -f ca.key && ! -f ca.crt ]]; then
+  echo "ОШИБКА: есть ca.key, но нет ca.crt — половина CA. Восстанови ca.crt из бэкапа" >&2
+  echo "(он выводится из ключа только вместе с исходным subject/сроком)." >&2
+  exit 1
+fi
+
 if [[ ! -f ca.key ]]; then
   echo "[+] Generating Root CA (10 years)"
   openssl genrsa -out ca.key 4096 2>/dev/null

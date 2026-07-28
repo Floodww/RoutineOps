@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/notifier"
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -25,7 +26,12 @@ import (
 )
 
 type Notifier interface {
+	// NotifyITAdmins — рассылка без критичности: заявки на права администратора и
+	// служебные сообщения, которые нельзя «отфильтровать по важности».
 	NotifyITAdmins(ctx context.Context, text string)
+	// NotifyAlert — рассылка алерта с уважением порога доставки каждого получателя
+	// (users.notify_min_severity, миграция 041).
+	NotifyAlert(ctx context.Context, severity alerting.Severity, text string)
 }
 
 type Gateway struct {
@@ -145,6 +151,12 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 	}()
 
 	go func() {
+		// Признак деградации приезжает в КАЖДОМ кадре (раз в 30 с), а алерт нужен на
+		// переход. Помним предыдущее значение по стриму, а не спрашиваем БД: состояние
+		// и так живёт ровно столько, сколько соединение. Реконнекты и рестарт сервера
+		// подстрахованы дедупом внутри CreateAlert — непринятый такой же алерт повторно
+		// не создастся. Принятый создастся снова, и это правильно: причина ещё жива.
+		outboxWasDown := false
 		for {
 			req, err := stream.Recv()
 			if err != nil {
@@ -162,8 +174,15 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 				CertCN:          deviceID,
 				IPAddress:       req.IpAddress,
 				PublicIP:        clientIP(ctx),
+
+				OutboxUnavailable: req.GetOutboxUnavailable(),
+				DegradedDetail:    req.GetDegradedDetail(),
 			}); err != nil {
 				g.logger.Error("upsert heartbeat", "device_id", deviceID, "err", err)
+			}
+			if down := req.GetOutboxUnavailable(); down != outboxWasDown {
+				outboxWasDown = down
+				g.reportOutboxHealth(ctx, fingerprint, deviceID, down, req.GetDegradedDetail())
 			}
 			// locked ≠ blocked: заблокированное устройство удерживает Connect-стрим
 			// чтобы получить unlock-команду; рвём только по 'blocked'.
@@ -182,6 +201,49 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 	err = <-done
 	cancel()
 	return err
+}
+
+// reportOutboxHealth — реакция на ПЕРЕХОД признака outbox_unavailable в heartbeat.
+//
+// Мёртвая durable-очередь означает, что с этой машины больше не придут ни отчёты о
+// задачах, ни статусы лока, ни security-события: канал у них общий. То есть отсутствие
+// алертов с устройства перестаёт быть свидетельством того, что там всё спокойно, — и
+// узнать об этом можно ровно одним способом, из heartbeat, который идёт отдельным
+// стримом и от очереди не зависит.
+//
+// Строка в alerts, а не только лог: состояние требует вмешательства руками (на Windows
+// 2.5.1 это чинилось сбросом DACL каталога состояния), а значит обязано висеть в панели
+// и требовать подтверждения. Ошибки здесь НЕ рвут heartbeat: устройство живо, и потерять
+// его последний работающий канал из-за сбоя записи алерта — ровно та слепота, против
+// которой всё это и сделано.
+func (g *Gateway) reportOutboxHealth(ctx context.Context, fingerprint, deviceID string, down bool, detail string) {
+	if !down {
+		// Снятие флага само по себе алерта не требует: поле на устройстве уже очищено
+		// тем же heartbeat'ом, а висящий алерт оператор закрывает сам — он же проверяет,
+		// что за время слепоты на машине ничего не произошло.
+		g.logger.Info("agent outbox recovered", "device_id", deviceID)
+		return
+	}
+	g.logger.Warn("agent outbox unavailable", "device_id", deviceID, "detail", detail)
+
+	dbID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
+	if err != nil || dbID == "" {
+		if ctx.Err() == nil {
+			g.logger.Error("outbox alert: device lookup", "device_id", deviceID, "err", err)
+		}
+		return
+	}
+	created, err := g.db.CreateAlert(ctx, dbID, "outbox_unavailable", detail, "")
+	if err != nil {
+		g.logger.Error("create alert outbox_unavailable", "device_id", deviceID, "err", err)
+		return
+	}
+	if created && g.bot != nil {
+		hostname, _ := g.db.GetDeviceHostname(ctx, dbID)
+		text := notifier.HTMLf("🕳 <b>Агент ослеп: очередь отчётов недоступна</b>\nУстройство: <code>%s</code>\nОтчёты, статусы лока и security-события с него НЕ доходят — тишина больше не значит «всё спокойно».\nПричина: %s",
+			hostname, detail)
+		go g.bot.NotifyITAdmins(context.Background(), text)
+	}
 }
 
 func (g *Gateway) AckTaskReceived(ctx context.Context, req *pb.TaskReceivedAck) (*pb.TaskReceivedAckResponse, error) {
@@ -291,6 +353,19 @@ func (g *Gateway) ReportTaskResult(ctx context.Context, req *pb.TaskResult) (*pb
 		}
 		g.logger.Error("complete task", "task_id", req.TaskId, "err", err)
 		return &pb.TaskResultAck{Received: false}, nil
+	}
+	// Исход удаления ПО — отдельным полем, ДО остальной обработки: он значим и при
+	// completed, и при failed. Например NOT_REMOVABLE приезжает с ошибкой задачи, а
+	// TARGET_CHANGED — с успехом (агент отработал правильно, просто цель разъехалась).
+	// Ошибку записи не поднимаем наверх: сам результат задачи уже сохранён, и терять
+	// его из-за неудачной приписки исхода нельзя — агент отправил бы отчёт заново.
+	if taskType == "uninstall" && req.UninstallOutcome != pb.UninstallOutcome_UNINSTALL_OUTCOME_UNSPECIFIED {
+		outcome := uninstallOutcomeToString(req.UninstallOutcome)
+		if err := g.db.SetTaskUninstallOutcome(ctx, req.TaskId, deviceID, outcome); err != nil {
+			g.logger.Error("save uninstall outcome", "task_id", req.TaskId, "outcome", outcome, "err", err)
+		} else {
+			g.logger.Info("uninstall reported", "task_id", req.TaskId, "device_id", deviceID, "outcome", outcome)
+		}
 	}
 	// Задача уже была закрыта по таймауту (FailStaleAckedTasks), а результат приехал
 	// после — консоль какое-то время показывала 'failed' для задачи, которая на самом
@@ -402,6 +477,14 @@ func uninstallMethodToString(m pb.UninstallMethod) string {
 	return strings.ToLower(strings.TrimPrefix(m.String(), "UNINSTALL_METHOD_"))
 }
 
+// uninstallOutcomeToString — enum → канон БД (миграция 041), тем же приёмом, что и
+// uninstallMethodToString: из имени enum'а, а не из руками выписанной таблицы, которая
+// разъехалась бы с proto молча при добавлении нового исхода. UNSPECIFIED сюда не
+// доходит — вызывающий его отсекает (это «задача не про удаление», а не исход).
+func uninstallOutcomeToString(o pb.UninstallOutcome) string {
+	return strings.ToLower(strings.TrimPrefix(o.String(), "UNINSTALL_OUTCOME_"))
+}
+
 func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent) (*pb.SecurityEventAck, error) {
 	_, fingerprint, err := extractCertInfo(ctx)
 	if err != nil {
@@ -453,13 +536,18 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 			"lock_tamper":                  "Попытка обхода блокировки",
 			"filevault_secret_mismatch":    "FileVault: секрет не совпал с эскроу",
 			"filevault_revoke_failed":      "FileVault: revoke не завершён",
+			"outbox_unavailable":           "Агент ослеп: очередь отчётов недоступна",
 		}[alertType]
 		if alertLabel == "" {
 			alertLabel = alertType
 		}
-		text := notifier.HTMLf("🚨 <b>Алерт безопасности</b>\nТип: %s\nУстройство: <code>%s</code>\nДетали: %s",
-			alertLabel, hostname, req.Details)
-		go g.bot.NotifyITAdmins(context.Background(), text)
+		// Критичность берётся из той же чистой функции, что и в CreateAlert, —
+		// значение в строке БД и значение, по которому маршрутизируется уведомление,
+		// не могут разойтись.
+		severity := alerting.DefaultFor(alertType)
+		text := notifier.HTMLf("%s <b>Алерт безопасности</b>\nТип: %s\nКритичность: %s\nУстройство: <code>%s</code>\nДетали: %s",
+			alerting.Emoji(severity), alertLabel, alerting.Label(severity), hostname, req.Details)
+		go g.bot.NotifyAlert(context.Background(), severity, text)
 	}
 	return &pb.SecurityEventAck{Received: true}, nil
 }
@@ -751,7 +839,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🛑 <b>FileVault-лок: revoke НЕ завершён</b>\nУстройство: <code>%s</code>\nДеструктив мог примениться ЧАСТИЧНО — требуется ручной разбор IT.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyITAdmins(context.Background(), text)
+			go g.bot.NotifyAlert(context.Background(), alerting.DefaultFor("filevault_revoke_failed"), text)
 		}
 		g.logger.Warn("filevault revoke FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
@@ -859,7 +947,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🛑 <b>FileVault-лок: секрет не тот</b>\nУстройство: <code>%s</code>\nМашина НЕ тронута — расхождение поймано ДО деструктива.\nВооружили не тем секретом либо эскроу разъехалось.\nДействие: выгрузите АКТУАЛЬНУЮ строку эскроу и вооружите заново.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyITAdmins(context.Background(), text)
+			go g.bot.NotifyAlert(context.Background(), alerting.DefaultFor("filevault_secret_mismatch"), text)
 		}
 		g.logger.Warn("filevault SECRET MISMATCH reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil

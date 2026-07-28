@@ -102,12 +102,11 @@ func TestImportThenProvide(t *testing.T) {
 	label := fmt.Sprintf("MDM-CI-IMP-%d", randSuffix())
 	certPEM, keyPEM := genSelfSignedIdentity(t, label)
 
-	if err := Import(certPEM, keyPEM, "CurrentUser"); err != nil {
-		t.Skipf("Import в CurrentUser не удался (окружение): %v", err)
+	target := testProvisionTarget()
+	if err := Import(certPEM, keyPEM, target); err != nil {
+		t.Fatalf("Import в %s: %v", target, err)
 	}
-	t.Cleanup(func() {
-		_ = exec.Command("certutil", "-user", "-delstore", "My", label).Run()
-	})
+	t.Cleanup(func() { _ = delstoreCmd(target, label).Run() })
 
 	p := &certStoreProvider{label: label}
 	cert, err := p.ClientCertificate()
@@ -162,4 +161,29 @@ func randSuffix() uint32 {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
+
+// testProvisionTarget выбирает стор ТАК ЖЕ, как продакшн (ProvisionTarget):
+// под повышенными правами — LocalMachine\My, иначе CurrentUser\My.
+//
+// Раньше тесты жёстко били в CurrentUser, и из-за этого ветка LocalMachine —
+// та самая, в которой живёт служба под LocalSystem, — не проверялась НИКОГДА:
+// под SYSTEM импорт в CurrentUser вообще не поддерживается (certutil отдаёт
+// 0x80070032 ERROR_NOT_SUPPORTED), и тест уходил в skip. Пропущенная проверка
+// привилегированного пути неотличима от пройденной — ровно так у нас уже
+// оставался незакрытым гейт совместимости контракта.
+func testProvisionTarget() string { return ProvisionTarget() }
+
+// certutilScopeArgs — ключ области для certutil, парный выбранному стору.
+func certutilScopeArgs(target string) []string {
+	if target == "CurrentUser" {
+		return []string{"-user"}
+	}
+	return nil
+}
+
+// delstoreCmd собирает команду подчистки в той же области, куда клали.
+func delstoreCmd(target, label string) *exec.Cmd {
+	args := append(certutilScopeArgs(target), "-delstore", "My", label)
+	return exec.Command("certutil", args...)
 }

@@ -118,3 +118,82 @@ func TestRun_ReportsThenStops(t *testing.T) {
 		t.Fatal("Run не завершился после отмены контекста")
 	}
 }
+
+// Внеочередной снимок: агент сам изменил состав ПО (снял программу), и карточка
+// устройства обязана обновиться сразу, а не через Interval — иначе успешная
+// задача читается оператором как несработавшая.
+//
+// Проверяется именно ОТПРАВКА, а не факт получения сигнала: снимок между двумя
+// отправками разный (дедуп по хэшу), и молчаливый пропуск из-за него был бы
+// ровно тем поведением, ради устранения которого сигнал и заводился.
+func TestRun_NudgeSendsOutOfBand(t *testing.T) {
+	old := initialDelay
+	initialDelay = time.Hour // штатный цикл в этом тесте не должен сработать вовсе
+	defer func() { initialDelay = old }()
+
+	sent := make(chan struct{}, 4)
+	nudge := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var snapshot int
+	r := &Reporter{
+		Interval: time.Hour,
+		Log:      quietLog(),
+		Nudge:    nudge,
+		sendReport: func(context.Context, *pb.InventoryReport) (bool, error) {
+			mu.Lock()
+			snapshot++
+			mu.Unlock()
+			sent <- struct{}{}
+			return true, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.Run(ctx)
+
+	nudge <- struct{}{}
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("сигнал не вызвал внеочередную отправку")
+	}
+
+	mu.Lock()
+	got := snapshot
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("отправок = %d, ожидали ровно одну (штатный таймер стоит на час)", got)
+	}
+}
+
+// Репортер без подключённого сигнала обязан работать как раньше: чтение из
+// nil-канала в select просто никогда не срабатывает, а не блокирует цикл.
+func TestRun_NilNudgeDoesNotBlockCycle(t *testing.T) {
+	old := initialDelay
+	initialDelay = time.Millisecond
+	defer func() { initialDelay = old }()
+
+	sent := make(chan struct{}, 1)
+	r := &Reporter{
+		Interval: time.Hour,
+		Log:      quietLog(),
+		sendReport: func(context.Context, *pb.InventoryReport) (bool, error) {
+			select {
+			case sent <- struct{}{}:
+			default:
+			}
+			return true, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.Run(ctx)
+
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("без подключённого сигнала штатный цикл перестал отправлять")
+	}
+}

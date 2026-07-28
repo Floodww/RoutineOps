@@ -11,6 +11,16 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button"
 import { toast } from "@/lib/toast"
 
+// SEVERITY_CHOICES — порог доставки уведомлений, от самого шумного к самому тихому.
+// Порядок обратный шкале важности намеренно: пользователь читает слева направо и
+// выбирает, НАСКОЛЬКО ЕГО БЕСПОКОИТЬ, а не насколько серьёзен инцидент.
+const SEVERITY_CHOICES = [
+  { value: "low", label: "Все" },
+  { value: "medium", label: "Средние+" },
+  { value: "high", label: "Высокие+" },
+  { value: "critical", label: "Критичные" },
+]
+
 export default function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -25,6 +35,9 @@ export default function Layout() {
   const [tgLoading, setTgLoading] = useState(false)
   // Имя бота приходит с сервера (getMe): у каждого деплоя свой бот от @BotFather.
   const [tgBotUsername, setTgBotUsername] = useState("")
+  // Порог доставки уведомлений (users.notify_min_severity, миграция 041).
+  const [tgMinSeverity, setTgMinSeverity] = useState("low")
+  const [tgSevSaving, setTgSevSaving] = useState(false)
 
   useEffect(() => {
     api.get<{ linked: boolean }>("/profile/telegram")
@@ -58,12 +71,37 @@ export default function Layout() {
   async function openTelegramDialog() {
     setTgOpen(true)
     try {
-      const r = await api.get<{ linked: boolean; link_token: string | null; bot_username: string }>("/profile/telegram")
+      const r = await api.get<{
+        linked: boolean
+        link_token: string | null
+        bot_username: string
+        min_severity: string
+      }>("/profile/telegram")
       setTgLinked(r.data.linked)
       setTgToken(r.data.link_token)
       setTgBotUsername(r.data.bot_username ?? "")
+      // Пустое значение с сервера означает строку, не прошедшую миграцию 041, —
+      // трактуем как «всё как раньше», симметрично DEFAULT 'low' в схеме.
+      setTgMinSeverity(r.data.min_severity || "low")
     } catch {
       toast({ title: "Не удалось загрузить статус Telegram", variant: "destructive" })
+    }
+  }
+
+  // saveMinSeverity сохраняет порог сразу по клику: отдельная кнопка «Сохранить» для
+  // одного переключателя из четырёх значений — лишний шаг, на котором настройку
+  // забывают применить. Локальное состояние обновляется ТОЛЬКО после успеха, иначе
+  // при отказе сервера кнопка осталась бы подсвеченной, а порог — прежним.
+  async function saveMinSeverity(value: string) {
+    if (value === tgMinSeverity) return
+    setTgSevSaving(true)
+    try {
+      await api.post("/profile/notify-min-severity", { min_severity: value })
+      setTgMinSeverity(value)
+    } catch {
+      toast({ title: "Не удалось сохранить порог уведомлений", variant: "destructive" })
+    } finally {
+      setTgSevSaving(false)
     }
   }
 
@@ -264,6 +302,34 @@ export default function Layout() {
             <Button variant="outline" className="w-full" onClick={generateToken} disabled={tgLoading}>
               {tgLoading ? "Генерация..." : tgToken ? "Сгенерировать новый токен" : "Получить токен"}
             </Button>
+
+            {/* Порог доставки (миграция 041). Показывается всегда, а не только при
+                tgLinked: настроить его до привязки — нормальный порядок действий, и
+                прятать настройку за состоянием, которое пользователь как раз сейчас
+                меняет, значило бы заставить его открыть диалог второй раз. */}
+            <div className="space-y-2 border-t border-border pt-4">
+              <p className="text-sm font-medium text-foreground">Беспокоить начиная с уровня</p>
+              <div className="flex gap-1.5">
+                {SEVERITY_CHOICES.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    onClick={() => saveMinSeverity(c.value)}
+                    disabled={tgSevSaving}
+                    className={`flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                      tgMinSeverity === c.value
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Алерты ниже выбранного уровня не приходят в Telegram, но остаются в панели.
+              </p>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

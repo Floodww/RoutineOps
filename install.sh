@@ -31,7 +31,9 @@ echo "=== RoutineOps Server Install ==="
 # Чиним один раз на файл, ДО чтения — иначе каждый потребитель ниже пришлось бы латать
 # отдельно (два `.`-сорса, sed-парсер PUBLIC_WEB_URL, grep -qxF идемпотентности).
 for _f in install.env .env.prod; do
-  [ -f "$_f" ] && grep -q $'\r' "$_f" && { sed -i 's/\r$//' "$_f"; echo "!! $_f был в CRLF (Windows) — привёл к LF"; }
+  # `sed -i` без суффикса — GNU-форма (BSD/macOS требует `-i ''`), а запись через `cat >`
+  # ещё и сохраняет права и inode файла с секретами, чего `mv` временного не делает.
+  [ -f "$_f" ] && grep -q $'\r' "$_f" && { sed 's/\r$//' "$_f" > "$_f.lf" && cat "$_f.lf" > "$_f" && rm -f "$_f.lf"; echo "!! $_f был в CRLF (Windows) — привёл к LF"; }
 done
 
 # Быстрый старт: параметры берём из install.env (cp install.env.example install.env,
@@ -60,7 +62,10 @@ INTERNAL_IP=$(hostname -I | awk '{print $1}')
 # `hostname -I` — последний фолбэк. Без этого реконсиляция ниже перевыпустила бы серт
 # БЕЗ внешнего адреса в SAN и уронила бы весь парк ровно тем TLS-mismatch, который чиним.
 if [ -z "${PUBLIC_ADDR:-}" ] && [ -f .env.prod ]; then
-  PUBLIC_ADDR=$(sed -n 's#^PUBLIC_WEB_URL=https\?://##p' .env.prod | head -1 | cut -d/ -f1)
+  # `https*://`, а не `https\?://`: `\?` — расширение GNU BRE, BSD sed его не понимает и
+  # молча отдаёт пусто. Тогда публичный адрес деплоя терялся и в PUBLIC_IP уезжал
+  # ВНУТРЕННИЙ IP — ровно тот перевыпуск серта без внешнего SAN, который чинит этот блок.
+  PUBLIC_ADDR=$(sed -n 's#^PUBLIC_WEB_URL=https*://##p' .env.prod | head -1 | cut -d/ -f1)
   if [ -n "$PUBLIC_ADDR" ]; then
     echo "PUBLIC_ADDR не задан — беру публичный адрес из .env.prod: ${PUBLIC_ADDR}"
   fi
@@ -149,7 +154,7 @@ fi
 # штатно бывает доменом из SERVER_HOST (docs/install.md), и затирать его голым IP нельзя.
 # Не покрыт (та самая опечатка в адресе) — приводим к PUBLIC_IP. Серт к этому моменту
 # уже перевыпущен, так что сверяем с АКТУАЛЬНЫМ.
-web_host=$(sed -n 's#^PUBLIC_WEB_URL=https\?://##p' .env.prod | head -1 | cut -d/ -f1)
+web_host=$(sed -n 's#^PUBLIC_WEB_URL=https*://##p' .env.prod | head -1 | cut -d/ -f1)
 if [ -z "$web_host" ] || ! cert_covers "$web_host"; then
   grep -v '^PUBLIC_WEB_URL=' .env.prod > .env.prod.tmp
   echo "PUBLIC_WEB_URL=https://${PUBLIC_IP}" >> .env.prod.tmp

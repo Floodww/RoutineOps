@@ -259,6 +259,50 @@ paths:
                   linked: { type: boolean }
                   link_token: { type: string }
                   bot_username: { type: string }
+                  min_severity:
+                    type: string
+                    enum: [critical, high, medium, low]
+                    description: Порог доставки уведомлений владельца учётной записи.
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+
+  /api/v1/profile/notify-min-severity:
+    post:
+      tags: [Аутентификация]
+      summary: Порог доставки уведомлений
+      description: |
+        Меняет минимальную критичность алертов, о которых владелец учётной записи
+        получает уведомление в Telegram. Алерты ниже порога остаются в панели, но
+        не рассылаются.
+
+        Личная настройка, а не административная: решать за коллегу, каких алертов
+        ему не видеть, не должен никто. Отсюда же закрытость для сервисных токенов —
+        у токена нет личности, и он менял бы настройку создавшего его администратора.
+
+        Неизвестный уровень отклоняется с 400, а не подставляется значением по
+        умолчанию: молчаливая подстановка превратила бы опечатку в тихое отключение
+        части уведомлений, которое ничем себя не проявляет.
+      x-requires-human: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [min_severity]
+              properties:
+                min_severity:
+                  type: string
+                  enum: [critical, high, medium, low]
+      responses:
+        '200':
+          description: Порог сохранён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  min_severity: { type: string }
+        '400': { description: Неизвестный уровень критичности }
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
 
   /api/v1/profile/telegram-link:
@@ -1546,6 +1590,34 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/ForbiddenHuman' }
 
+  /api/v1/users/{id}:
+    delete:
+      tags: [Пользователи]
+      summary: Удаление учётной записи
+      description: |
+        Роль: `it_admin`. Отбирает доступ насовсем: активные сессии удалённого
+        отвергаются немедленно, выпущенные им сервисные токены удаляются вместе с ним.
+
+        Что переживает удаление: записи журнала аудита (ссылки на `users` у него нет
+        намеренно), выпущенные им приглашения, раскрытия эскроу и заявки на локальные
+        права — у них ссылка обнуляется, но строки остаются.
+
+        Два отказа со статусом `409`: удалить самого себя и удалить последнего
+        `it_admin`. Второй возможен только в гонке — двое удаляют друг друга
+        одновременно; проверка сериализована на стороне БД.
+      x-requires-human: true
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Удалён }
+        '403': { $ref: '#/components/responses/ForbiddenHuman' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Себя удалить нельзя либо это последний `it_admin`
+
   # ─────────────────────────── API-токены ───────────────────────────
   /api/v1/api-tokens:
     get:
@@ -1748,6 +1820,65 @@ paths:
         '404': { description: Роут отсутствует — сборка не Enterprise либо escrow не сконфигурирован }
         '409': { description: Нет активного FileVault-лока, лок без request_id либо лицензия не покрывает FileVault }
 
+  /api/v1/devices/{id}/software/uninstall:
+    x-enterprise: true
+    parameters: [{ $ref: '#/components/parameters/DeviceId' }]
+    post:
+      tags: [Устройства]
+      summary: Удаление установленного ПО
+      description: |
+        Роль: `it_admin`. Ставит задачу снятия ПО с устройства.
+
+        Тело содержит только ИДЕНТИФИКАЦИЮ цели. Остальной селектор (версия, путь,
+        метод, scope) сервер берёт из собственного снимка инвентаря — иначе клиент мог
+        бы прислать произвольный метод, и сверка метода на агенте проверяла бы
+        присланное против присланного.
+
+        Агент присланную строку деинсталлятора НЕ выполняет и вообще не принимает от
+        сервера команд ОС: он снимает инвентарь заново, находит запись по селектору в
+        своём свежем снимке и выполняет метод, который определил сам. Иначе канал задач
+        стал бы вторым путём произвольного исполнения — мимо подписи, аудита и потолков
+        скриптов.
+
+        Повторный вызов при живой недоставленной заявке возвращает ТУ ЖЕ задачу: новый
+        `task_id` агент считает новой командой.
+
+        Исход приезжает отдельным полем `uninstall_outcome` (см. `Task`), а не текстом:
+        `target_changed`, `ambiguous`, `not_removable`, `self_protected` требуют разных
+        действий оператора, а `still_present` против `failed` — различие безопасности
+        (msiexec отдаёт 0 на снос, отложенный до перезагрузки).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [software_name]
+              properties:
+                software_name: { type: string }
+                uninstall_id:
+                  type: string
+                  description: >
+                    Машинный ключ из инвентаря (ProductCode, имя пакета). Различает
+                    одноимённые записи разных вендоров. На macOS пуст — там ключом
+                    служит install_location.
+                reason: { type: string, description: Причина для журнала аудита }
+      responses:
+        '202':
+          description: Задача поставлена
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
+                  status: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '402': { description: Лицензия не покрывает удаление ПО }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Роут отсутствует — сборка не Enterprise }
+        '409': { description: Нет в инвентаре, снять нечем либо устройство не active }
+
   /api/v1/escrow/status:
     x-enterprise: true
     get:
@@ -1865,8 +1996,17 @@ paths:
       tags: [Каталог]
       summary: Сохранение конфигурации каталога
       description: |
-        Роль: `it_admin`. Пустой `bind_password` не меняет сохранённый пароль.
-        Пароль хранится вне БД и в аудит не пишется.
+        Роль: `it_admin`. Пустые `bind_password` и `ca_cert_pem` НЕ меняют сохранённые
+        значения — интерфейс не показывает ни пароль, ни сертификат и шлёт пустые
+        строки при правке соседних полей. Оба хранятся вне БД и в аудит не пишутся;
+        в журнал уходят только метаданные, включая факт замены сертификата.
+
+        Транспорт: `ldaps://` в `url` — неявный TLS; `ldap://` + `start_tls` — апгрейд
+        открытого соединения; `ldap://` без `start_tls` — открытый канал (боевой AD
+        обычно отклоняет по нему simple bind). Заданный `ca_cert_pem` ЗАМЕНЯЕТ
+        системные корни, а не дополняет их: доверие адресуется конкретному УЦ
+        организации, иначе подошёл бы сертификат любого публичного УЦ, выписанный на
+        имя контроллера домена.
       x-requires-human: true
       requestBody:
         required: true
@@ -1880,6 +2020,12 @@ paths:
                     bind_password:
                       type: string
                       description: Пустая строка = не менять существующий пароль
+                    ca_cert_pem:
+                      type: string
+                      description: >
+                        Корневой сертификат каталога в PEM (можно цепочкой). Пустая
+                        строка = не менять сохранённый. Разбирается при сохранении:
+                        битый PEM отвергается с 400, а не всплывает отказом синка позже.
       responses:
         '204': { description: Сохранено }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -1983,6 +2129,66 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/AuditEntry' }
         '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/audit-log/verify:
+    get:
+      tags: [Аудит]
+      summary: Проверка целостности журнала
+      description: |
+        Проверяет хеш-цепочку журнала аудита: каждую запись против её собственного
+        хеша, каждую связку с соседом, непрерывность номеров и совпадение с
+        сохранёнными якорями.
+
+        **Код ответа всегда 200, в том числе при обнаруженной подделке.** «Проверка
+        выполнена, результат — журнал подделан» это успешный ответ, а не ошибка
+        сервера; судить о результате надо по полю `ok`. Ответ 4xx/5xx на найденную
+        подделку был бы неотличим от недоступности сервера — то есть противнику
+        хватило бы уронить ручку, чтобы скрыть результат.
+
+        Обнаруживаются: правка поля (`reason: hash`), удаление записи из середины
+        (`gap`), перестановка или вставка (`link`), полный пересчёт цепочки после
+        подделки (`anchor_mismatch`). Удаление самых старых записей по сроку
+        хранения нарушением НЕ считается — оно лишь сдвигает `first_seq`.
+
+        Цепочка доказывает внутреннюю согласованность. Тот, кто может писать в БД,
+        пересчитает её целиком; поймать это позволяет только сверка `head_hash` с
+        внешней копией — сервер ежесуточно печатает голову в свой лог.
+      responses:
+        '200':
+          description: Результат проверки (в том числе отрицательный)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    description: false — цепочка нарушена; см. reason и broken_seq.
+                  chained:
+                    type: integer
+                    format: int64
+                    description: Сколько записей входит в цепочку и проверено.
+                  unchained:
+                    type: integer
+                    format: int64
+                    description: |
+                      Записи, сделанные до включения цепочки. Не покрыты ей и никогда
+                      не будут: ретроспективный пересчёт по возможно подделанным
+                      данным дал бы валидную цепочку над подделкой.
+                  first_seq:
+                    type: integer
+                    format: int64
+                    description: Начало уцелевшего участка; больше 1 = префикс усечён по сроку хранения.
+                  last_seq: { type: integer, format: int64 }
+                  head_hash:
+                    type: string
+                    description: Хеш последней записи — значение для сверки с внешней копией.
+                  reason:
+                    type: string
+                    enum: [hash, gap, link, anchor]
+                  broken_seq: { type: integer, format: int64 }
+                  anchor_mismatch: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   # ─────────────────────────── Служебное ───────────────────────────
   /healthz:
@@ -2273,6 +2479,27 @@ components:
         owner_person_email:
           type: string
           description: Почта владельца. Пусто — не задана.
+        outbox_unavailable:
+          type: boolean
+          description: >
+            Durable-очередь агента недоступна: отчёты о задачах, статусы блокировки и
+            security-события с устройства НЕ доходят. Признак приезжает в heartbeat —
+            единственном канале, не зависящем от очереди. Отдаётся и в списке, и в
+            карточке. `true` означает, что отсутствие событий с этого устройства
+            перестало быть свидетельством того, что на нём ничего не происходит.
+        degraded_detail:
+          type: string
+          description: >
+            Причина недоступности очереди (текст ошибки ввода-вывода), обрезанная агентом
+            до 200 байт. Пусто при `outbox_unavailable: true` допустимо — причину не
+            всегда удаётся получить.
+        degraded_since:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Момент, с которого очередь недоступна. `null` — очередь жива. Взводится один
+            раз и не обновляется каждым heartbeat.
         disk_encryption:
           type: string
           enum: ['enabled', 'disabled', '']
@@ -2327,6 +2554,17 @@ components:
         device_id: { type: string, format: uuid }
         device_hostname: { type: string }
         alert_type: { type: string }
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: |
+            Критичность, зафиксированная в момент создания алерта. Правка правил
+            по умолчанию не переписывает её у уже разобранных инцидентов — иначе
+            разбор постфактум («что мы тогда видели») стал бы невозможен.
+
+            Список отсортирован сначала по признаку принятости, затем по критичности,
+            затем по свежести: принятый critical уже разобран человеком и не должен
+            вытеснять непринятые из окна выдачи.
         details: { type: string }
         created_at: { type: string, format: date-time }
         acknowledged_at: { type: string, format: date-time, nullable: true }
@@ -2509,6 +2747,17 @@ components:
         has_password:
           type: boolean
           description: Только в ответе — задан ли bind-пароль
+        start_tls:
+          type: boolean
+          description: >
+            Поднять TLS на открытом `ldap://`-соединении (апгрейд до bind, чтобы
+            bind-пароль не шёл открытым текстом). Взаимоисключающ с `ldaps://` —
+            там TLS уже поднят, комбинация отбивается с 400.
+        has_ca_cert:
+          type: boolean
+          description: >
+            Только в ответе — задан ли корневой сертификат каталога. Сам PEM наружу
+            не возвращается никогда, передаётся write-only полем `ca_cert_pem`.
 
     DirectorySyncResult:
       type: object

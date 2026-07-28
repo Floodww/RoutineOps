@@ -3,10 +3,14 @@ services:
     build:
       context: .
       args:
-        # Open-core (free) образ: FileVault-escrow — enterprise-фича, здесь не собирается
-        # (ESCROW_RECIPIENT_FPR/escrow-ldflags убраны при carve-out). Enterprise-образ
-        # собирается отдельно (-tags enterprise).
         VERSION: ${VERSION:-dev}
+        # Пусто => open-core образ (обычный путь). Enterprise поднимается тем же
+        # compose'ом: BUILD_TAGS=enterprise + оба пина в окружении. Пины идут ldflags,
+        # а не env самого сервера — иначе их можно подменить в рантайме
+        # (docs/licensing.md).
+        BUILD_TAGS: ${BUILD_TAGS:-}
+        LICENSE_VENDOR_PUBKEY: ${LICENSE_VENDOR_PUBKEY:-}
+        ESCROW_RECIPIENT_FPR: ${ESCROW_RECIPIENT_FPR:-}
     restart: unless-stopped
     # Внешние форвардеры для встроенного Docker-DNS. Раньше стоял 127.0.0.11 —
     # это зацикливало резолвер на самого себя (ExtServers=[127.0.0.11]) → SERVFAIL

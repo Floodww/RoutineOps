@@ -20,8 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/agent/collector"
 	"github.com/Floodww/RoutineOps/internal/agent/outbox"
 	"github.com/Floodww/RoutineOps/internal/agent/transport"
+	"github.com/Floodww/RoutineOps/internal/agent/uninstall"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"google.golang.org/protobuf/proto"
 )
@@ -115,6 +117,15 @@ type Executor struct {
 	// nil = команда reboot отклоняется с ОШИБКОЙ (см. handleReboot), а не тихо
 	// игнорируется: иначе оператор видел бы «выполнено» на неперезагруженной машине.
 	rebooter Rebooter
+
+	// uninstaller снимает установленное ПО. nil = команда отклоняется с ОШИБКОЙ
+	// (та же логика, что у rebooter).
+	uninstaller Uninstaller
+
+	// inventoryNudge просит репортер снять инвентарь вне очереди — чтобы карточка
+	// устройства обновилась сразу после снятия ПО, а не через цикл. nil = не
+	// подключён (штатный цикл всё равно догонит).
+	inventoryNudge func()
 }
 
 // LockApplier применяет команды блокировки/разблокировки устройства (реализуется
@@ -166,6 +177,27 @@ type Rebooter interface {
 // reboot отчитывается ОШИБКОЙ, а не тихо игнорируется. Вызывать до старта приёма
 // задач.
 func (e *Executor) SetRebooter(r Rebooter) { e.rebooter = r }
+
+// Uninstaller снимает установленное ПО. Реализуется uninstall.Manager; вынесен
+// интерфейсом по тому же паттерну, что LockApplier и Rebooter.
+//
+// Ошибку не возвращает намеренно: у удаления ПО нет «просто ошибки» — есть
+// исход, который оператору нужно различать (снято / и так нет / цель разъехалась
+// с инвентарём / сносить нечем / это сам агент). Всё это едет в Result.
+type Uninstaller interface {
+	Run(ctx context.Context, req uninstall.Request) uninstall.Result
+}
+
+// SetUninstaller подключает исполнитель удаления ПО. nil (по умолчанию) →
+// команда отчитывается ОШИБКОЙ (см. handleUninstall), а не тихо игнорируется.
+// Вызывать до старта приёма задач.
+func (e *Executor) SetUninstaller(u Uninstaller) { e.uninstaller = u }
+
+// SetInventoryNudge подключает внеочередной пересбор инвентаря. Вызывается
+// ПОСЛЕ фактического снятия ПО: без него карточка устройства до пяти минут
+// показывала бы снятую программу как установленную, и оператор читал бы
+// успешную задачу как несработавшую. nil = штатный цикл (снимок раз в Interval).
+func (e *Executor) SetInventoryNudge(f func()) { e.inventoryNudge = f }
 
 // NewExecutor creates an executor. statePath — файл для персистентной идемпотентности
 // (""=только память). enqueue — durable-очередь доставки результатов (outbox);
@@ -306,7 +338,9 @@ func (e *Executor) handle(task *pb.Task) {
 	//  (б) connect тоже после слота — тысячи ждущих слот горутин иначе держали бы
 	//      открытые gRPC-соединения (исчерпание FD/памяти при bulk-push).
 	// lock/decommission/reboot (control-plane) семафором НЕ гейтим: не форк-бомба и
-	// не должны ждать за скриптами.
+	// не должны ждать за скриптами. Удаление ПО (Task.uninstall) в этот список
+	// НЕ входит осознанно — оно порождает процесс деинсталлятора и подчиняется
+	// тому же потолку, что скрипты.
 	if task.GetLock() == nil && task.GetDecommission() == nil && task.GetReboot() == nil {
 		select {
 		case e.sem <- struct{}{}:
@@ -362,6 +396,15 @@ func (e *Executor) handle(task *pb.Task) {
 	// Команда перезагрузки приезжает в Task.reboot.
 	if rc := task.GetReboot(); rc != nil {
 		e.handleReboot(client, id, rc)
+		return
+	}
+
+	// Команда удаления ПО приезжает в Task.uninstall. Семафор для неё УЖЕ взят
+	// выше (она не control-plane): деинсталлятор — такой же порождаемый процесс,
+	// как скрипт, и всплеск таких задач без потолка спавнил бы msiexec'ов
+	// столько же, сколько интерпретаторов.
+	if uc := task.GetUninstall(); uc != nil {
+		e.handleUninstall(client, id, uc)
 		return
 	}
 
@@ -644,6 +687,104 @@ func (e *Executor) reportBeforeReboot(client pb.AgentServiceClient, result *pb.T
 	e.log.Warn("reboot: прямой отчёт не доставлен — кладу в durable-очередь, доедет после загрузки",
 		slog.String("task_id", result.GetTaskId()), slog.Any("error", err))
 	e.deliver(client, result)
+}
+
+// handleUninstall снимает ПО и отчитывается обычным TaskResult, дополненным
+// машиночитаемым исходом (TaskResult.uninstall_outcome).
+//
+// Почему обычный TaskResult, а не отдельный отчёт-RPC (как у лока): удаление ПО —
+// разовая операция без желаемого состояния, которое надо сверять. Сервер не
+// держит для неё «desired», реконсилировать нечего, поэтому и отдельный канал
+// отчётов не нужен — задача с результатом закрывается штатным путём, а outcome
+// лишь уточняет причину для карточки и аудита.
+//
+// Соответствие исхода и TaskStatus: успех — только «снято» и «на машине и так
+// нет» (в обоих случаях намерение оператора выполнено). Всё остальное — ERROR,
+// потому что требует его решения: уточнить цель, обновить инвентарь, снять
+// вручную. Отдельно ALREADY_ABSENT НЕ схлопывается в успех молча — исход едет
+// явным кодом, иначе «удалено» и «нечего удалять» стали бы неразличимы, а с ними
+// и промах селектора, который выглядел бы как удачное удаление.
+func (e *Executor) handleUninstall(client pb.AgentServiceClient, taskID string, uc *pb.UninstallCommand) {
+	reqID := uc.GetRequestId()
+	if reqID == "" {
+		reqID = taskID
+	}
+	if e.uninstaller == nil {
+		// Misbuild/неподдержанная ОС. Отчитываемся ошибкой, а не молчим: иначе
+		// задача зависла бы в 'acked' до серверного sweep без всякой причины.
+		e.log.Error("uninstall: команда получена, но исполнитель не сконфигурирован",
+			slog.String("task_id", taskID), slog.String("request_id", reqID))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:           taskID,
+			Status:           pb.TaskStatus_TASK_STATUS_ERROR,
+			ErrorLog:         "удаление ПО недоступно на этом агенте (сборка/ОС не поддерживает)",
+			UninstallOutcome: pb.UninstallOutcome_UNINSTALL_OUTCOME_NOT_REMOVABLE,
+		})
+		return
+	}
+
+	e.log.Warn("uninstall: получена команда удаления ПО",
+		slog.String("task_id", taskID), slog.String("request_id", reqID),
+		slog.String("software", uc.GetSoftwareName()), slog.String("version", uc.GetVersion()))
+
+	// Тот же потолок, что у скриптов: он согласован с грейсом остановки агента
+	// (shutdownGrace), и отдельный, более длинный, потребовал бы поднимать грейс
+	// для всего парка. Деинсталлятор, не уложившийся в него, отчитывается FAILED
+	// с явной формулировкой — не «снято».
+	ctx, cancel := context.WithTimeout(e.execCtx, maxRuntime)
+	res := e.uninstaller.Run(ctx, uninstall.Request{
+		RequestID:       reqID,
+		Name:            uc.GetSoftwareName(),
+		Version:         uc.GetVersion(),
+		UninstallID:     uc.GetUninstallId(),
+		InstallLocation: uc.GetInstallLocation(),
+		Method:          uninstallMethodName(uc.GetUninstallMethod()),
+		Scope:           uc.GetScope(),
+		Reason:          uc.GetReason(),
+	})
+	cancel()
+
+	result := &pb.TaskResult{TaskId: taskID, UninstallOutcome: res.Outcome}
+	switch res.Outcome {
+	case pb.UninstallOutcome_UNINSTALL_OUTCOME_REMOVED, pb.UninstallOutcome_UNINSTALL_OUTCOME_ALREADY_ABSENT:
+		result.Status = pb.TaskStatus_TASK_STATUS_SUCCESS
+		result.Output = res.Detail
+	default:
+		result.Status = pb.TaskStatus_TASK_STATUS_ERROR
+		result.ErrorLog = res.Detail
+	}
+	e.deliver(client, result)
+
+	// Пересбор инвентаря — только когда список ПО на машине реально изменился.
+	if res.Outcome == pb.UninstallOutcome_UNINSTALL_OUTCOME_REMOVED && e.inventoryNudge != nil {
+		e.inventoryNudge()
+	}
+}
+
+// uninstallMethodName переводит метод из контракта во внутреннее имя коллектора.
+// Незнакомое значение (новый сервер, старый агент) отображается в пустую
+// строку — «сервер метода не назвал», и агент берёт метод из своего снимка.
+// Это безопасно ровно потому, что присланный метод и так только СВЕРЯЕТСЯ:
+// исполняется всегда тот, что определил сам агент.
+func uninstallMethodName(m pb.UninstallMethod) collector.UninstallMethod {
+	switch m {
+	case pb.UninstallMethod_UNINSTALL_METHOD_MSI:
+		return collector.UninstallMSI
+	case pb.UninstallMethod_UNINSTALL_METHOD_WINDOWS_QUIET:
+		return collector.UninstallWindowsQuiet
+	case pb.UninstallMethod_UNINSTALL_METHOD_MACOS_APP_BUNDLE:
+		return collector.UninstallMacAppBundle
+	case pb.UninstallMethod_UNINSTALL_METHOD_DPKG:
+		return collector.UninstallDpkg
+	case pb.UninstallMethod_UNINSTALL_METHOD_RPM:
+		return collector.UninstallRPM
+	case pb.UninstallMethod_UNINSTALL_METHOD_PACMAN:
+		return collector.UninstallPacman
+	case pb.UninstallMethod_UNINSTALL_METHOD_APK:
+		return collector.UninstallAPK
+	default:
+		return collector.UninstallNone
+	}
 }
 
 func (e *Executor) ack(client pb.AgentServiceClient, id string) {
