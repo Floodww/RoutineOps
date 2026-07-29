@@ -80,8 +80,11 @@ Enterprise adds on top of the features above:
 | FileVault recovery-key escrow (macOS) | ✅ |
 | Enforced FileVault device lock | ✅ |
 | User directory (LDAP / Active Directory): sync and automatic device-owner assignment | ✅ |
-| Software removal from the UI | in development |
-| Multi-tenancy | in development |
+| Panel login with directory password (LDAP/AD) | ✅ |
+| Alert severity levels and routing | ✅ |
+| Tamper-evident audit (hash chain) | ✅ |
+| Software removal from the UI | ✅ |
+| Multi-tenancy | ✅ |
 | SSO/OIDC, MFA, SCIM, SIEM export | in development |
 | Remote desktop | planned |
 
