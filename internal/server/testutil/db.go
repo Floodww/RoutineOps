@@ -97,6 +97,11 @@ func createTempDatabase(adminDSN string) (dsn string, drop func()) {
 	return dsn, drop
 }
 
+// appRoleTestPassword — пароль тестовой app-роли. Не секрет: роль создаётся в
+// одноразовой БД, которую cleanup дропает. Нужен потому, что внешний Postgres
+// (CI, локальный compose) требует аутентификацию, а свой контейнер поднимается с trust.
+const appRoleTestPassword = "mdm_app_test"
+
 // createAppRole создаёт роль mdm_app (NOSUPERUSER NOBYPASSRLS) в тестовой БД и
 // возвращает DSN с этой ролью. Зеркалит миграцию 049_app_role.sql: тесты ходят
 // под ограниченной ролью → RLS действует, rls_test не скипает.
@@ -124,6 +129,15 @@ func createAppRole(ctx context.Context, ownerDSN string) string {
 		// DefaultTenantID. На проде BindTenant вызывается всегда; ALTER ROLE SET —
 		// страховка от забытого скоупа (fail-safe → видеть только свой тенант, а не всё).
 		"ALTER ROLE mdm_app SET routineops.tenant_id = '" + tenancy.DefaultTenantID + "'",
+		// 🔴 Пароль обязателен, и вот почему его отсутствие пряталось. Свой контейнер мы
+		// поднимаем с POSTGRES_HOST_AUTH_METHOD=trust — там пароль не спрашивают, и
+		// беспарольная роль подключалась. А ВНЕШНИЙ сервер из TEST_POSTGRES_DSN (сервис
+		// postgres в CI, локальный docker compose) живёт с дефолтным scram-sha-256, и та
+		// же роль получала «password authentication failed for user mdm_app» — то есть
+		// весь пакет api падал в TestMain ещё до первого теста. Локально гейт при этом
+		// был зелёным: без TEST_POSTGRES_DSN путь уходит в testcontainers с trust.
+		// Секретом этот пароль не является: роль живёт в одноразовой тестовой БД.
+		"ALTER ROLE mdm_app PASSWORD '" + appRoleTestPassword + "'",
 	}
 	for _, s := range stmts {
 		if _, err := conn.Exec(ctx, s); err != nil {
@@ -136,7 +150,7 @@ func createAppRole(ctx context.Context, ownerDSN string) string {
 	if err != nil {
 		panic("createAppRole parse DSN: " + err.Error())
 	}
-	u.User = url.User("mdm_app")
+	u.User = url.UserPassword("mdm_app", appRoleTestPassword)
 	return u.String()
 }
 
