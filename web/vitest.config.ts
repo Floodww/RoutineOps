@@ -11,5 +11,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Язык интерфейса в тестах прибит явно — иначе LanguageDetector берёт его из
+    // окружения раннера, и проверки текста начинают зависеть от машины. См. setup.ts.
+    setupFiles: ["src/test/setup.ts"],
   },
 })
