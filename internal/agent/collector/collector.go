@@ -158,6 +158,12 @@ func InstalledSoftware() []Software {
 	return dedupeSoftware(installedSoftware())
 }
 
+// BootTime — unix-время загрузки машины; 0 = неизвестно. Отдельно от Collect(),
+// потому что нужно дёшево и точечно: аудит сессии админ-прав по нему отличает
+// ребут внутри сессии от его отсутствия, а собирать ради одного числа весь
+// снимок устройства (WMI, system_profiler, ioreg) — секунды на ровном месте.
+func BootTime() int64 { return bootTime() }
+
 func LocalIP() string {
 	ip, _ := NetworkInfo()
 	return ip

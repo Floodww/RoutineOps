@@ -1,4 +1,5 @@
 import { useState, FormEvent } from "react"
+import { useTranslation } from "react-i18next"
 import { Link } from "react-router-dom"
 import axios from "axios"
 import { Button } from "@/components/ui/button"
@@ -9,6 +10,7 @@ import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import SpotlightCard from "@/components/SpotlightCard"
 
 export default function ForgotPassword() {
+  const { t } = useTranslation()
   const [email, setEmail] = useState("")
   const [sent, setSent] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -33,16 +35,16 @@ export default function ForgotPassword() {
             <RoutineOpsLogo size={32} />
             <span className="text-lg font-semibold tracking-tight">RoutineOps</span>
           </CardTitle>
-          <p className="text-center text-xs text-muted-foreground">Восстановление пароля</p>
+          <p className="text-center text-xs text-muted-foreground">{t("auth.forgotTitle")}</p>
         </CardHeader>
         <CardContent className="px-5 pb-6">
           {sent ? (
             <div className="space-y-4">
               <p className="text-sm text-soft">
-                Если такой email зарегистрирован, на него отправлена ссылка для сброса пароля.
+                {t("auth.resetSent")}
               </p>
               <Link to="/login" className="block text-sm text-brand hover:underline">
-                Вернуться на страницу входа
+                {t("auth.backToLogin")}
               </Link>
             </div>
           ) : (
@@ -59,10 +61,10 @@ export default function ForgotPassword() {
                 />
               </div>
               <Button type="submit" className="w-full" disabled={loading}>
-                {loading ? "Отправка..." : "Отправить ссылку"}
+                {loading ? t("auth.sending") : t("auth.sendLink")}
               </Button>
               <Link to="/login" className="block text-center text-sm text-muted-foreground hover:text-foreground transition-colors">
-                Вернуться на страницу входа
+                {t("auth.backToLogin")}
               </Link>
             </form>
           )}

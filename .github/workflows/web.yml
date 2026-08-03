@@ -1,6 +1,15 @@
 name: web
 
+# 🔴 push в main здесь ОБЯЗАТЕЛЕН, а не «на всякий случай»: в этот репозиторий пушат
+# прямо в main, без PR. Пока триггер был только `pull_request`, веб-гейты на реальном
+# пути изменений не срабатывали НИ РАЗУ — фронт проверялся лишь в тех редких случаях,
+# когда кто-то заводил PR.
 on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/web.yml"
   pull_request:
     paths:
       - "web/**"
@@ -17,16 +26,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      # npm install (не ci): lockfile ещё не содержит vitest; после первого
-      # локального npm install + коммита package-lock можно перейти на npm ci.
+      # npm ci, а не npm install: lockfile давно содержит vitest (комментарий про
+      # «ещё не содержит» устарел), и установка обязана ставить ровно то, что в нём
+      # записано. `npm install` молча подтягивает более свежие версии — гейт тогда
+      # проверяет не тот набор зависимостей, что стоит у людей и в проде.
       - name: Install deps
-        run: npm install --no-audit --no-fund
-      # Главный гейт: tsc -b (типы) + vite build (сборка).
-      - name: Typecheck + build
+        run: npm ci --no-audit --no-fund
+      # Главный гейт — сборка vite. ВАЖНО: `tsc --noEmit` в этом репозитории NO-OP
+      # из-за конфигурации проекта и зеленеет на сломанных типах; полагаться на него
+      # нельзя, поэтому отдельного шага типов здесь нет.
+      - name: Build
         run: npm run build
       - name: Unit tests
         run: npm test
-      # Lint информативный — не блокируем PR на возможном существующем lint-долге.
+      # Lint информативный — не блокируем на существующем долге (7 warning'ов
+      # react-refresh в ui-примитивах на дату правки).
       - name: Lint
         run: npm run lint
         continue-on-error: true

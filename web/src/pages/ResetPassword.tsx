@@ -1,4 +1,5 @@
 import { useState, FormEvent } from "react"
+import { useTranslation } from "react-i18next"
 import { useNavigate, useSearchParams, Link } from "react-router-dom"
 import axios from "axios"
 import { Button } from "@/components/ui/button"
@@ -9,6 +10,7 @@ import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import SpotlightCard from "@/components/SpotlightCard"
 
 export default function ResetPassword() {
+  const { t } = useTranslation()
   const [searchParams] = useSearchParams()
   const token = searchParams.get("token") ?? ""
   const navigate = useNavigate()
@@ -22,11 +24,11 @@ export default function ResetPassword() {
     e.preventDefault()
     setError("")
     if (password !== confirm) {
-      setError("Пароли не совпадают")
+      setError(t("auth.passwordsMismatch"))
       return
     }
     if (password.length < 8) {
-      setError("Минимум 8 символов")
+      setError(t("auth.minChars"))
       return
     }
     setLoading(true)
@@ -34,7 +36,7 @@ export default function ResetPassword() {
       await axios.post("/api/v1/auth/reset-password", { token, password })
       navigate("/login")
     } catch {
-      setError("Ссылка недействительна или истекла")
+      setError(t("auth.linkExpired"))
     } finally {
       setLoading(false)
     }
@@ -54,8 +56,8 @@ export default function ResetPassword() {
           <CardContent className="px-5 pb-6">
             {/* --destructive в тёмной теме (45% светлоты) на стекле почти не читается —
                 берём тот же красный, что у алерт-цифры на дашборде. */}
-            <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">Неверная ссылка.</p>
-            <Link to="/login" className="mt-2 block text-sm text-brand hover:underline">На страницу входа</Link>
+            <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">{t("auth.badLink")}</p>
+            <Link to="/login" className="mt-2 block text-sm text-brand hover:underline">{t("auth.toLogin")}</Link>
           </CardContent>
         </SpotlightCard>
       </div>
@@ -71,12 +73,12 @@ export default function ResetPassword() {
             <RoutineOpsLogo size={32} />
             <span className="text-lg font-semibold tracking-tight">RoutineOps</span>
           </CardTitle>
-          <p className="text-center text-xs text-muted-foreground">Новый пароль</p>
+          <p className="text-center text-xs text-muted-foreground">{t("auth.newPassword")}</p>
         </CardHeader>
         <CardContent className="px-5 pb-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="password" className="text-soft">Новый пароль</Label>
+              <Label htmlFor="password" className="text-soft">{t("auth.newPassword")}</Label>
               <Input
                 id="password"
                 type="password"
@@ -87,7 +89,7 @@ export default function ResetPassword() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="confirm" className="text-soft">Подтвердите пароль</Label>
+              <Label htmlFor="confirm" className="text-soft">{t("auth.confirmPassword")}</Label>
               <Input
                 id="confirm"
                 type="password"
@@ -100,7 +102,7 @@ export default function ResetPassword() {
                 берём тот же красный, что у алерт-цифры на дашборде. */}
             {error && <p className="text-sm text-destructive dark:text-[hsl(0_72%_66%)]">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Сохранение..." : "Сохранить пароль"}
+              {loading ? t("auth.saving") : t("auth.savePassword")}
             </Button>
           </form>
         </CardContent>

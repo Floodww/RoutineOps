@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ func TestCreateEnrollmentToken_And_GetByToken(t *testing.T) {
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-enroll-%s", uniq(t)), "macos")
 	tok := fmt.Sprintf("tok-%s", uniq(t))
 
-	if err := db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
+	if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("CreateEnrollmentToken: %v", err)
 	}
 
@@ -51,11 +52,11 @@ func TestGetActiveEnrollmentToken_AfterExpiry_ReturnsNil(t *testing.T) {
 	tok := fmt.Sprintf("tok-exp-%s", uniq(t))
 
 	// use 25h to be safe against any timezone offset between Go and Postgres
-	if err := db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().UTC().Add(-25*time.Hour)); err != nil {
+	if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().UTC().Add(-25*time.Hour)); err != nil {
 		t.Fatalf("CreateEnrollmentToken: %v", err)
 	}
 
-	got, err := db.GetActiveEnrollmentToken(context.Background(), d.ID)
+	got, err := db.GetActiveEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetActiveEnrollmentToken: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestEnrollDevice_MarksTokenUsedAndDeviceEnrolled(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-enrolldev-%s", uniq(t)), "macos")
 	tok := fmt.Sprintf("tok-enroll-%s", uniq(t))
-	_ = db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().Add(1*time.Hour))
+	_ = db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour))
 
 	tokenRec, _ := db.GetEnrollmentToken(context.Background(), tok)
 
@@ -84,7 +85,7 @@ func TestEnrollDevice_MarksTokenUsedAndDeviceEnrolled(t *testing.T) {
 	}
 
 	// device should be enrolled
-	got, _, _ := db.GetDevice(context.Background(), d.ID)
+	got, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if got.Status != "enrolled" {
 		t.Errorf("device status = %q, want enrolled", got.Status)
 	}
@@ -112,14 +113,14 @@ func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
 			return db.MarkDeviceDecommissioned(context.Background(), id)
 		}},
 		{"blocked", func(db *storage.DB, id string) error {
-			return db.UpdateDeviceStatus(context.Background(), id, "blocked")
+			return db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "blocked")
 		}},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			db := newDB(t)
 			d := mustCreateDevice(t, db, fmt.Sprintf("host-enrollgate-%s", uniq(t)), "linux")
 			tok := fmt.Sprintf("tok-enrollgate-%s", uniq(t))
-			if err := db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
+			if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
 				t.Fatalf("CreateEnrollmentToken: %v", err)
 			}
 			tokenRec, _ := db.GetEnrollmentToken(context.Background(), tok)
@@ -131,7 +132,7 @@ func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
 			if !errors.Is(err, storage.ErrDeviceNotEnrollable) {
 				t.Fatalf("EnrollDevice = %v, want ErrDeviceNotEnrollable", err)
 			}
-			if st, _ := db.GetDeviceStatusByID(context.Background(), d.ID); st != tc.status {
+			if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, d.ID); st != tc.status {
 				t.Errorf("устройство воскрешено энроллом: status = %q, want %s", st, tc.status)
 			}
 			if after, _ := db.GetEnrollmentToken(context.Background(), tok); after == nil || after.UsedAt != nil {
@@ -148,7 +149,7 @@ func TestRevokeEnrollmentToken_KillsBulkToken(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 	tok := fmt.Sprintf("bulk-revoke-%s", uniq(t))
-	if err := db.CreateBulkEnrollmentToken(ctx, tok, "", nil, false, time.Now().Add(1*time.Hour)); err != nil {
+	if err := db.CreateBulkEnrollmentToken(ctx, tenancy.DefaultTenantID, tok, "", nil, false, time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("CreateBulkEnrollmentToken: %v", err)
 	}
 	rec, err := db.GetEnrollmentToken(ctx, tok)
@@ -156,26 +157,26 @@ func TestRevokeEnrollmentToken_KillsBulkToken(t *testing.T) {
 		t.Fatalf("GetEnrollmentToken: %v", err)
 	}
 
-	if _, _, err := db.BeginBulkEnroll(ctx, rec.ID, "host-before-revoke", "linux"); err != nil {
+	if _, _, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, rec.ID, "host-before-revoke", "linux"); err != nil {
 		t.Fatalf("до отзыва энролл обязан работать: %v", err)
 	}
 
-	revoked, err := db.RevokeEnrollmentToken(ctx, rec.ID)
+	revoked, err := db.RevokeEnrollmentToken(ctx, tenancy.DefaultTenantID, rec.ID)
 	if err != nil || !revoked {
 		t.Fatalf("RevokeEnrollmentToken = %v, %v; want true, nil", revoked, err)
 	}
-	if _, _, err := db.BeginBulkEnroll(ctx, rec.ID, "host-after-revoke", "linux"); !errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
+	if _, _, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, rec.ID, "host-after-revoke", "linux"); !errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
 		t.Errorf("после отзыва BeginBulkEnroll = %v, want ErrEnrollTokenAlreadyUsed", err)
 	}
 
 	// Повторный отзыв мёртвого токена — не ошибка, но и не «отозвали»: ручка отдаёт 409.
-	if again, err := db.RevokeEnrollmentToken(ctx, rec.ID); err != nil || again {
+	if again, err := db.RevokeEnrollmentToken(ctx, tenancy.DefaultTenantID, rec.ID); err != nil || again {
 		t.Errorf("повторный отзыв = %v, %v; want false, nil", again, err)
 	}
 
 	// Токен обязан остаться видимым в списке вместе со счётчиком использований —
 	// оператору важно, что им успели воспользоваться один раз до отзыва.
-	list, err := db.ListBulkEnrollmentTokens(ctx)
+	list, err := db.ListBulkEnrollmentTokens(ctx, tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListBulkEnrollmentTokens: %v", err)
 	}
@@ -200,10 +201,10 @@ func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-reenroll-%s", uniq(t)), "windows")
 	oldTok := fmt.Sprintf("tok-old-%s", uniq(t))
-	_ = db.CreateEnrollmentToken(context.Background(), d.ID, oldTok, time.Now().Add(1*time.Hour))
+	_ = db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, oldTok, time.Now().Add(1*time.Hour))
 
 	newTok := fmt.Sprintf("tok-new-%s", uniq(t))
-	if err := db.ResetDeviceForReenroll(context.Background(), d.ID, newTok, time.Now().Add(2*time.Hour)); err != nil {
+	if err := db.ResetDeviceForReenroll(context.Background(), tenancy.DefaultTenantID, d.ID, newTok, time.Now().Add(2*time.Hour)); err != nil {
 		t.Fatalf("ResetDeviceForReenroll: %v", err)
 	}
 
@@ -214,7 +215,7 @@ func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 	}
 
 	// new token must be the active one and resolvable by its plaintext (hash match, N6)
-	active, _ := db.GetActiveEnrollmentToken(context.Background(), d.ID)
+	active, _ := db.GetActiveEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if active == nil {
 		t.Fatal("expected new active token")
 	}
@@ -224,7 +225,7 @@ func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 	}
 
 	// device status should be pending again
-	got, _, _ := db.GetDevice(context.Background(), d.ID)
+	got, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if got.Status != "pending" {
 		t.Errorf("device status = %q, want pending", got.Status)
 	}

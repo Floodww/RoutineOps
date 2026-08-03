@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { UserCircle } from "lucide-react"
 import api, { Device, Person, errMessage } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
@@ -18,6 +19,7 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
   isAdmin: boolean
   onChanged: () => void
 }) {
+  const { t } = useTranslation()
   const [persons, setPersons] = useState<Person[]>([])
   const [selected, setSelected] = useState(device.owner_person_id ?? "")
   const [saving, setSaving] = useState(false)
@@ -38,10 +40,10 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
     setSaving(true)
     try {
       await api.put(`/devices/${device.id}/owner`, { person_id: personID })
-      toast({ title: personID ? "Владелец назначен" : "Владелец снят" })
+      toast({ title: personID ? t("owner.assigned") : t("owner.cleared") })
       onChanged()
     } catch (e) {
-      toast({ title: "Не удалось изменить владельца", description: errMessage(e), variant: "destructive" })
+      toast({ title: t("owner.changeFailed"), description: errMessage(e), variant: "destructive" })
     } finally {
       setSaving(false)
     }
@@ -57,12 +59,12 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
     try {
       const r = await api.post<Person>("/persons", { display_name: name, email: newEmail.trim() })
       await api.put(`/devices/${device.id}/owner`, { person_id: r.data.id })
-      toast({ title: "Владелец создан и назначен" })
+      toast({ title: t("owner.created") })
       setNewName(""); setNewEmail(""); setCreating(false)
       loadPersons()
       onChanged()
     } catch (e) {
-      toast({ title: "Не удалось создать владельца", description: errMessage(e), variant: "destructive" })
+      toast({ title: t("owner.createFailed"), description: errMessage(e), variant: "destructive" })
     } finally {
       setSaving(false)
     }
@@ -74,8 +76,7 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
     <div className="glass px-5 py-[18px]">
       <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2 mb-4">
         <UserCircle className="h-[17px] w-[17px] text-muted-foreground" strokeWidth={2} />
-        Владелец
-      </h2>
+{t("owner.title")}      </h2>
       <div className="flex items-center gap-2 mb-1">
         {device.owner_person_name ? (
           <>
@@ -83,10 +84,10 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
             {device.owner_person_email && (
               <span className="text-sm text-soft">{device.owner_person_email}</span>
             )}
-            {fromDirectory && <Badge variant="default">из каталога</Badge>}
+            {fromDirectory && <Badge variant="default">{t("owner.fromDirectory")}</Badge>}
           </>
         ) : (
-          <span className="text-sm text-soft">не назначен</span>
+          <span className="text-sm text-soft">{t("owner.none")}</span>
         )}
       </div>
 
@@ -95,9 +96,9 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
           <Select
             value={selected}
             onChange={setSelected}
-            placeholder="— не назначен —"
+            placeholder={t("owner.noneOption")}
             options={[
-              { value: "", label: "— не назначен —" },
+              { value: "", label: t("owner.noneOption") },
               ...persons.map((p) => ({
                 value: p.id,
                 label: p.email ? `${p.display_name} (${p.email})` : p.display_name,
@@ -106,33 +107,28 @@ export default function OwnerCard({ device, isAdmin, onChanged }: {
             className="max-w-xs"
           />
           <Button size="sm" disabled={saving || selected === (device.owner_person_id ?? "")} onClick={() => assign(selected)}>
-            Сохранить
+            {t("common.save")}
           </Button>
           {device.owner_person_id && (
             <Button size="sm" variant="ghost" disabled={saving} onClick={() => assign("")}>
-              Снять
-            </Button>
+{t("owner.unassign")}</Button>
           )}
           <Button size="sm" variant="ghost" disabled={saving} onClick={() => setCreating(true)}>
-            Создать владельца
-          </Button>
+{t("owner.create")}          </Button>
         </div>
       )}
 
       {isAdmin && creating && (
         <div className="mt-3 flex flex-col gap-2 max-w-md">
-          <Input placeholder="ФИО" value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus />
-          <Input placeholder="E-mail (необязательно)" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} />
+          <Input placeholder={t("owner.fullName")} value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus />
+          <Input placeholder={t("owner.emailOptional")} value={newEmail} onChange={(e) => setNewEmail(e.target.value)} />
           <p className="text-xs text-soft">
-            Владельцу не нужен вход в панель — приглашение не отправляется.
-          </p>
+{t("owner.noPanelAccess")}          </p>
           <div className="flex items-center gap-2">
             <Button size="sm" disabled={saving || !newName.trim()} onClick={createAndAssign}>
-              Создать и назначить
-            </Button>
+{t("owner.createAndAssign")}</Button>
             <Button size="sm" variant="ghost" disabled={saving} onClick={() => { setCreating(false); setNewName(""); setNewEmail("") }}>
-              Отмена
-            </Button>
+{t("common.cancel")}</Button>
           </div>
         </div>
       )}

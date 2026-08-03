@@ -100,6 +100,24 @@ func main() {
 		return
 	}
 
+	// screen-probe разбирается ДО config.Load намеренно: у него собственный набор флагов
+	// (-frames/-interval/-quality/-profile), которых в конфиге агента нет и быть не должно
+	// — это разовая диагностика, а не режим работы. Через общий FlagSet она падала бы на
+	// "flag provided but not defined" ещё до входа в switch.
+	//
+	// Разбор флагов живёт в screen_probe.go (enterprise) вместе с реализацией: удалённый
+	// стол — enterprise-фича, и в open-core пакета screen нет вовсе.
+	if cmd == "screen-probe" {
+		os.Exit(runScreenProbe(os.Stdout, os.Stderr, rest))
+	}
+
+	// screen-worker — по той же причине: это процесс захвата, который служба поднимает в
+	// сессии пользователя, со своим набором флагов (канал, профиль, область). Общий
+	// FlagSet агента о них не знает и знать не должен.
+	if cmd == "screen-worker" {
+		os.Exit(runScreenWorker(os.Stderr, rest))
+	}
+
 	cfg, err := config.Load(flag.NewFlagSet("agent", flag.ContinueOnError), rest)
 	if err != nil {
 		log.Error("конфигурация", slog.Any("error", err))
@@ -224,12 +242,26 @@ func main() {
 			log.Error("filevault-provision", slog.Any("error", err))
 			os.Exit(1)
 		}
+	case "filevault-dialog":
+		// Диалог запроса пароля у сотрудника. Запускается СЛУЖБОЙ в графической
+		// сессии (launchctl asuser) при исполнении задачи filevault_provision —
+		// руками её звать незачем. Пароль печатается в stdout и только туда;
+		// исход сообщается КОДОМ ВЫХОДА, чтобы в тот же поток не примешивалось
+		// ни одного служебного байта.
+		fs := flag.NewFlagSet("filevault-dialog", flag.ExitOnError)
+		reason := fs.String("reason", "", "текст оператора для сотрудника")
+		user := fs.String("user", "", "пользователь, чей пароль спрашиваем")
+		secs := fs.Int("dialog-timeout", 0, "сколько секунд ждать ответа (0 = по умолчанию)")
+		_ = fs.Parse(os.Args[2:])
+		os.Exit(runFileVaultDialog(*reason, *user, time.Duration(*secs)*time.Second))
 	default:
 		fmt.Fprintf(os.Stderr, "неизвестная команда: %q\n\n", cmd)
 		printUsage(os.Stderr)
 		os.Exit(2)
 	}
 }
+
+// runScreenProbe — Ф0 контракта удалённого стола: замер на живом железе.
 
 // hasHelpFlag сообщает, есть ли в аргументах флаг запроса справки.
 func hasHelpFlag(args []string) bool {
@@ -261,6 +293,8 @@ func printUsage(w io.Writer) {
 %s
   filevault-provision  дозавершить FileVault-provisioning (macOS, интерактивно,
                   для устройств, где enroll прошёл без TTY — postinstall)
+  filevault-dialog     служебная: диалог запроса пароля, служба поднимает её сама
+                  в сессии сотрудника при задаче из админки
   version         версия и параметры сборки
   help            эта справка
 
@@ -443,8 +477,8 @@ func printVersion(w io.Writer, cfg *config.Config) {
 	} else {
 		fmt.Fprintf(w, "  self-update: ВЫКЛЮЧЕНО (%s)\n", detail)
 	}
-	if ready, detail := escrowSealerStatus(); ready {
-		fmt.Fprintln(w, "  filevault escrow: sealer готов (recipient вшит и сверен)")
+	if ready, detail := escrowSealerStatus(cfg); ready {
+		fmt.Fprintf(w, "  filevault escrow: sealer готов (%s)\n", detail)
 	} else {
 		fmt.Fprintf(w, "  filevault escrow: выключен (%s)\n", detail)
 	}
@@ -529,6 +563,15 @@ func runEnroll(cfg *config.Config, log *slog.Logger) error {
 		log.Info("идентичность уже выдана — пропускаю энроллмент (идемпотентность)",
 			slog.String("device_id", deviceID))
 	} else {
+		// Каталог закрываем ДО выдачи, а не после: enroll создаёт его сам
+		// (MkdirAll 0755) и тут же пишет туда приватный ключ. Закрытие пост-фактум
+		// оставляло бы окно, в котором ключ уже на диске, а каталог ещё наследует
+		// от C:\Program Files право (Пользователи; ReadAndExecute; OI CI).
+		// MkdirAll на существующем каталоге прав не меняет, поэтому ключ ляжет
+		// сразу в защищённый.
+		if err := hardenSecretDir(cfg, log); err != nil {
+			return err
+		}
 		info := collector.Collect()
 		id, err := enroll.Run(context.Background(), enroll.Request{
 			EnrollURL:     cfg.EnrollURL,
@@ -1392,6 +1435,40 @@ func dispatchReport(ctx context.Context, dialer *transport.Dialer, kind string, 
 			return reportErr(err, kind, log)
 		}
 		return ackErr(ack.GetReceived())
+	case outbox.KindAdminChanges:
+		var req pb.ReportAdminSessionChangesRequest
+		if err := proto.Unmarshal(data, &req); err != nil {
+			log.Error("outbox: битое окно улик сессии отброшено", slog.Any("error", err))
+			return nil
+		}
+		// Повторная доставка того же окна безопасна и не требует у агента памяти
+		// об уже отправленном: строки улик пишутся append-only с ON CONFLICT DO
+		// NOTHING, а window_seq на сервере не работает фильтром отбрасывания
+		// (иначе одно окно с максимальным seq глушило бы все последующие).
+		// Сервер, не знающий этого RPC, отвечает Unimplemented — код НЕ
+		// терминальный, запись остаётся в очереди до апгрейда сервера. Само по
+		// себе это не блокирует отчётный канал: агент шлёт улики, только когда
+		// сервер сам попросил их флагом, то есть уже умеет их принимать.
+		ack, err := cl.ReportAdminSessionChanges(ctx, &req)
+		if err != nil {
+			return reportErr(err, kind, log)
+		}
+		return ackErr(ack.GetReceived())
+	case outbox.KindScreenSession, outbox.KindScreenTelemetry:
+		var ev pb.ScreenEvent
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			log.Error("outbox: битое событие сеанса отброшено", slog.Any("error", err))
+			return nil
+		}
+		// Оба вида едут одной ручкой и различаются только классом вытеснения в очереди
+		// (§9.20): терминальные события protected, телеметрия — вытесняемая. Сервер,
+		// не знающий этого RPC, отвечает Unimplemented — код не терминальный, запись
+		// дождётся апгрейда сервера.
+		ack, err := cl.ReportScreenEvent(ctx, &ev)
+		if err != nil {
+			return reportErr(err, kind, log)
+		}
+		return ackErr(ack.GetReceived())
 	default:
 		log.Error("outbox: неизвестный вид записи отброшен", slog.String("kind", kind))
 		return nil
@@ -1516,6 +1593,24 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		}
 	}
 
+	// Каталог приватного ключа на КАЖДОМ старте службы — в отличие от enroll,
+	// здесь это НЕ гейт.
+	//
+	// Причина асимметрии: на enroll отказ означает «идентичность только что
+	// выдана и легла бы в открытый каталог» — это стоит остановки установки,
+	// оператор рядом и увидит ошибку. На старте службы отказ означает лишь, что
+	// защиту не удалось подтвердить на уже работающей машине, и падение агента
+	// здесь стоило бы дороже самой проблемы: парк на 1000+ машин остался бы без
+	// управления из-за нестандартного ACL на одной из них, причём чинить пришлось
+	// бы ногами. Поэтому громкий ERROR — и продолжаем работу.
+	//
+	// Вызов идёт после applyStatePaths: cfg.KeyFile к этому моменту указывает на
+	// боевой каталог, а не на путь из аргументов запуска.
+	if err := hardenSecretDir(cfg, log); err != nil {
+		log.Error("каталог приватного ключа НЕ защищён — ключ устройства может быть доступен "+
+			"локальным пользователям машины", slog.Any("error", err))
+	}
+
 	// Подчистить остатки прошлого самообновления (<exe>.old на Windows).
 	selfupdate.CleanupOld()
 
@@ -1562,8 +1657,8 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// нужными ldflags или нет) — сама escrow-цепочка (internal/agent/filevault)
 	// пока без caller'а, захват секретов и revoke гейтятся физической
 	// тест-сессией (внутренний handoff-контракт FileVault, §8).
-	if ready, detail := escrowSealerStatus(); ready {
-		log.Info("filevault escrow: sealer готов (recipient вшит и сверен на старте)")
+	if ready, detail := escrowSealerStatus(cfg); ready {
+		log.Info("filevault escrow: sealer готов", slog.String("источник", detail))
 	} else {
 		log.Debug("filevault escrow выключен (recipient не вшит в эту сборку)", slog.String("detail", detail))
 	}
@@ -1625,13 +1720,23 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// Буфер 1: отправитель (executor после снятия ПО) шлёт неблокирующе, а
 	// репортер в этот момент может быть занят предыдущей отправкой — сигнал
 	// должен дождаться его, а не потеряться и не подвесить задачу.
+	// Удалённый рабочий стол (enterprise). Поднимается ДО репортера инвентаря: список
+	// способностей агента едет в инвентаре, а репортер стартует горутиной сразу и после
+	// этого его поля трогать нельзя.
+	//
+	// Канал «служба ↔ захватчик» кладём в машинный каталог состояния: через него идут
+	// кадры экрана сотрудника, и сокет в общем временном каталоге можно подменить.
+	screenExe, _ := os.Executable()
+	screenRT := wireScreen(durableUnlockDir(cfg, service.InstallLayout()), screenExe, dialer, ob.Enqueue, log)
+
 	inventoryNudge := make(chan struct{}, 1)
 	reporter := &inventory.Reporter{
-		Interval: cfg.InventoryInterval,
-		Dialer:   dialer,
-		Log:      log,
-		Version:  version,
-		Nudge:    inventoryNudge,
+		Interval:     cfg.InventoryInterval,
+		Dialer:       dialer,
+		Log:          log,
+		Version:      version,
+		Capabilities: screenRT.capabilities(),
+		Nudge:        inventoryNudge,
 	}
 	go reporter.Run(ctx)
 
@@ -1639,6 +1744,15 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	// уходит durable-путём через outbox (KindTask) — обрыв связи или рестарт
 	// агента больше не теряют его навсегда.
 	executor := command.NewExecutor(dialer, log, cfg.TaskStateFile, ob.Enqueue)
+	executor.SetAgentVersion(version) // попадёт в отказ по неизвестному типу задачи
+
+	// nil вне enterprise — исполнитель отчитается на приглашение отказом с кодом причины,
+	// а не промолчит.
+	executor.SetScreenSessioner(screenRT.sessioner())
+	// Дозавершение FileVault-provisioning по команде оператора: спрашивает пароль у
+	// сотрудника в его графической сессии. nil вне macOS/enterprise — executor
+	// отчитается ошибкой с причиной, а не промолчит.
+	executor.SetFileVaultProvisioner(newFileVaultProvisioner(cfg, deviceID, dialer, log))
 	// Блокировка устройства: состояние переживает рестарт/ребут (Load на старте
 	// поднимет замок). Команды lock/unlock приходят в Task.lock и применяются через
 	// executor. На Windows локер службы (NewPlatformLocker → SessionLocker) сам
@@ -1799,7 +1913,12 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 
 	// Admin Manager: поллит статус прав (FetchAdminStatus), применяет/снимает их
 	// и отчитывается (ReportAdminAccess через outbox); сброс при логауте/истечении.
-	adminMgr := admin.NewManager(dialer, ob.Enqueue, cfg.AdminPollInterval, log, cfg.AdminDryRun)
+	adminMgr := admin.NewManager(dialer, ob.Enqueue, cfg.AdminPollInterval, log, cfg.AdminDryRun,
+		// Состояние сессии кладётся туда же, где живут остальные состояния агента
+		// (на Windows — ProgramData\RoutineOps\state с admin-only DACL). Несовпадение
+		// с DataDir выключает устойчивость целиком: файл со списком ПО пользователя
+		// не должен уезжать туда, куда указал переопределяемый флаг политики.
+		admin.NewSessionStore(filepath.Dir(cfg.ForbiddenListFile), service.InstallLayout().DataDir))
 	go adminMgr.Run(ctx)
 
 	// Script Manager: поллит скрипт-политики (FetchScriptPolicies), исполняет их по
@@ -1826,10 +1945,22 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		if pub := loadUpdatePubKey(resolveUpdatePubKeyB64(cfg.UpdatePubKey, releaseKeyCandidates(cfg)...), log); pub != nil {
 			restart := func() { updating.Store(true); cancel() } // graceful → перезапуск супервизором
 			updater := selfupdate.New(version, cfg.UpdateInterval, pub, cfg.UpdateCheckURL, cfg.CAFile, cfg.UpdateFloorFile, restart, log)
+			// Манифест КАНАЛА этого устройства (Q-52). Идёт по mTLS, потому что
+			// канал — свойство групп устройства, и сервер обязан узнать устройство
+			// сам (ADR-1), а не поверить полю в запросе. Публичная HTTP-ручка
+			// остаётся запасным путём внутри Updater: она всегда отдаёт stable.
+			updater.SetChannelSource(func(ctx context.Context) (*selfupdate.Manifest, error) {
+				return fetchChannelManifest(ctx, dialer)
+			})
 			// Windows: провал замены бинаря оставляет трей убитым (taskkill в
 			// replaceExecutable), а рестарта службы при ошибке не будет — поднимаем
 			// иконку обратно. Вне Windows/SCM — no-op (см. relaunchTrayAtServiceStart).
 			updater.OnReplaceFail = func() { relaunchTrayAtServiceStart(log) }
+			// Активный интерактивный сеанс — ГЕЙТ обновления (§9.1 контракта удалёнки):
+			// taskkill /F /IM бьёт все процессы того же exe, включая захватчик, а на
+			// macOS замена бинаря оставляет worker'а на старом inode. Оба случая —
+			// протокольный разъезд посреди сеанса без единого события в журнале.
+			screenRT.holdUpdates(updater)
 			go updater.Run(ctx)
 		}
 	}
@@ -1925,6 +2056,30 @@ func resolveUpdatePubKeyB64(cfgKey string, storedPaths ...string) string {
 		}
 	}
 	return cfgKey
+}
+
+// hardenSecretDir закрывает каталог, в котором лежит приватный ключ mTLS.
+//
+// Применяется ТОЛЬКО в боевой раскладке (установка службы либо запуск под ней).
+// В dev-запуске ключ лежит в рабочем каталоге пользователя, и admin-only DACL
+// отрезал бы доступ самому разработчику — сценарий сломался бы ровно там, где
+// защищать нечего.
+//
+// Windows: protected DACL SYSTEM+Администраторы по хэндлу, открытому no-follow.
+// Unix: режим 0700 (там режим файла реален, и ключ уже пишется 0600).
+func hardenSecretDir(cfg *config.Config, log *slog.Logger) error {
+	if !cfg.EnrollInstall && !service.RunningAsService() {
+		return nil
+	}
+	dir := filepath.Dir(cfg.KeyFile)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := service.EnsureSecretDir(dir); err != nil {
+		return fmt.Errorf("каталог приватного ключа %s не защищён: %w", dir, err)
+	}
+	log.Info("каталог приватного ключа закрыт для обычных пользователей", slog.String("dir", dir))
+	return nil
 }
 
 // releasePubKeyPath — путь файла release-pubkey рядом с ТЕКУЩИМ cfg.CAFile. Внимание:

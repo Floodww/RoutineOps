@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"github.com/Floodww/RoutineOps/internal/server/testutil"
 )
 
@@ -31,43 +32,62 @@ func newDB(t *testing.T) *storage.DB {
 	return db
 }
 
-// uniq returns a unique suffix for the test — avoids unique-constraint collisions
-// across tests that share one DB.
 func uniq(t *testing.T) string {
 	t.Helper()
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
-// mustCreateUser inserts a user and returns it.
+// withCommittedTenant выполняет fn в tenant-tx и коммитит до возврата (видно другим вызовам storage).
+func withCommittedTenant(t *testing.T, db *storage.DB, fn func(ctx context.Context)) {
+	t.Helper()
+	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn(ctx)
+	finish(true)
+}
+
 func mustCreateUser(t *testing.T, db *storage.DB, email string) *storage.User {
 	t.Helper()
-	u, err := db.CreateUser(context.Background(), "Test User", email, "hash", "user")
-	if err != nil {
-		t.Fatalf("mustCreateUser %q: %v", email, err)
-	}
+	var u *storage.User
+	withCommittedTenant(t, db, func(ctx context.Context) {
+		var err error
+		u, err = db.CreateUser(ctx, tenancy.DefaultTenantID, "Test User", email, "hash", "user")
+		if err != nil {
+			t.Fatalf("mustCreateUser %q: %v", email, err)
+		}
+	})
 	return u
 }
 
-// mustCreateDevice inserts a pending device and returns it.
-func mustCreateDevice(t *testing.T, db *storage.DB, hostname, os string) *storage.Device {
+func mustCreateDevice(t *testing.T, db *storage.DB, hostname, osName string) *storage.Device {
 	t.Helper()
-	d, err := db.CreatePendingDevice(context.Background(), hostname, os)
-	if err != nil {
-		t.Fatalf("mustCreateDevice %q: %v", hostname, err)
-	}
+	var d *storage.Device
+	withCommittedTenant(t, db, func(ctx context.Context) {
+		var err error
+		d, err = db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, hostname, osName)
+		if err != nil {
+			t.Fatalf("mustCreateDevice %q: %v", hostname, err)
+		}
+	})
 	return d
 }
 
-// mustCreateActiveDevice — устройство сразу в 'active'. Нужно тестам задач/фан-аута:
-// скрипт-задачи создаются ТОЛЬКО для active-устройств (CreateTask/FanOutScriptToGroup
-// гейтят по статусу — скрипт-канал не должен уезжать на pending/pending_approval).
-func mustCreateActiveDevice(t *testing.T, db *storage.DB, hostname, os string) *storage.Device {
+func mustCreateActiveDevice(t *testing.T, db *storage.DB, hostname, osName string) *storage.Device {
 	t.Helper()
-	d := mustCreateDevice(t, db, hostname, os)
-	if err := db.UpdateDeviceStatus(context.Background(), d.ID, "active"); err != nil {
-		t.Fatalf("activate %q: %v", hostname, err)
-	}
-	d.Status = "active"
+	var d *storage.Device
+	withCommittedTenant(t, db, func(ctx context.Context) {
+		var err error
+		d, err = db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, hostname, osName)
+		if err != nil {
+			t.Fatalf("mustCreateDevice %q: %v", hostname, err)
+		}
+		if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, d.ID, "active"); err != nil {
+			t.Fatalf("activate %q: %v", hostname, err)
+		}
+		d.Status = "active"
+	})
 	return d
 }
 
@@ -84,8 +104,6 @@ func storageInventoryData(fingerprint, hostname, os, osVersion string, software 
 	return storageInventoryDataV(fingerprint, hostname, os, osVersion, "", software)
 }
 
-// storageInventoryDataV — вариант с явной версией агента (для проверки персистентности
-// agent_version и COALESCE-поведения при пустом значении от старого агента).
 func storageInventoryDataV(fingerprint, hostname, os, osVersion, agentVersion string, software []string) storage.InventoryData {
 	items := make([]storage.SoftwareItem, len(software))
 	for i, s := range software {

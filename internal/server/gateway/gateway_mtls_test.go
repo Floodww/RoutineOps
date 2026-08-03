@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"math/big"
 	"net"
 	"testing"
@@ -237,7 +238,7 @@ func TestMTLS_FetchPolicy_HappyPath(t *testing.T) {
 	client, deviceID := env.validClient(t, db, "device-mtls-policy")
 
 	// device-specific правило (не глобальное — чтобы не задеть другие тесты на общей БД)
-	if _, err := db.CreatePolicyRule(context.Background(), "BitTorrent", "forbidden", &deviceID, nil); err != nil {
+	if _, err := db.CreatePolicyRule(context.Background(), tenancy.DefaultTenantID, "BitTorrent", "forbidden", &deviceID, nil); err != nil {
 		t.Fatalf("CreatePolicyRule: %v", err)
 	}
 
@@ -275,23 +276,23 @@ func TestMTLS_FetchScriptPolicies_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
 	// скрипт → политика(schedule) → группа → устройство в группе → политика группе
-	script, err := db.CreateScript(ctx, "win-script", "Windows", "Write-Host hi")
+	script, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "win-script", "Windows", "Write-Host hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	policy, err := db.CreateScriptPolicy(ctx, "win-policy", script.ID, "schedule",
+	policy, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, "win-policy", script.ID, "schedule",
 		[]byte(`{"cron":"*/5 * * * *"}`), nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
-	group, err := db.CreateDeviceGroup(ctx, "mtls-group", "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "mtls-group", "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
-	if err := db.AddDeviceToGroup(ctx, deviceID, group.ID); err != nil {
+	if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, deviceID, group.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
-	if err := db.AssignPolicyToGroup(ctx, policy.ID, group.ID); err != nil {
+	if err := db.AssignPolicyToGroup(ctx, tenancy.DefaultTenantID, policy.ID, group.ID); err != nil {
 		t.Fatalf("AssignPolicyToGroup: %v", err)
 	}
 
@@ -333,11 +334,11 @@ func TestMTLS_ReportScriptResult_HappyPathAndDedup(t *testing.T) {
 	ctx := context.Background()
 
 	// нужен валидный policy_id (script_results.policy_id NOT NULL REFERENCES policies)
-	script, err := db.CreateScript(ctx, "res-script", "linux", "echo hi")
+	script, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "res-script", "linux", "echo hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	policy, err := db.CreateScriptPolicy(ctx, "res-policy", script.ID, "on_connect", nil, nil)
+	policy, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, "res-policy", script.ID, "on_connect", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}

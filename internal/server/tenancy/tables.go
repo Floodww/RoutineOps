@@ -71,6 +71,35 @@ var Tables = map[string]Table{
 	"directory_persons": {Scope: ScopeOwn},
 	"audit_log":         {Scope: ScopeOwn},
 
+	// oidc_providers — IdP заводит it_admin тенанта, и вход через него обязан
+	// приводить в ЭТОТ тенант. Глобальным его делать нельзя: провайдер сопоставляет
+	// пользователя по e-mail, а e-mail уникален лишь в пределах тенанта (045), то
+	// есть общий на инсталляцию IdP пускал бы в чужую учётку с тем же адресом.
+	// Резолв по id идёт до входа (callback), тенанта в GUC ещё нет — как и токены
+	// выше, строка находится через SECURITY DEFINER (auth_oidc_provider, 051),
+	// а тенант берётся из неё.
+	"oidc_providers":    {Scope: ScopeOwn},
+	"saml_providers":    {Scope: ScopeOwn},
+	"siem_integrations": {Scope: ScopeOwn},
+
+	// device_vulnerabilities — принадлежит тенанту через устройство. tenant_id
+	// денормализован в таблицу по контракту (§5, слой 1): предикат RLS не должен
+	// ходить по FK на каждую строку выборки, а строк тут по числу «устройство ×
+	// уязвимость», то есть на порядок больше самих устройств.
+	"device_vulnerabilities": {Scope: ScopeDerived, Parent: "devices"},
+
+	// Справочник CVE — ВНЕШНИЙ фид (БДУ ФСТЭК / NVD), одинаковый для всей
+	// инсталляции. Копия на тенанта означала бы N копий одного фида и их
+	// рассинхрон; тенантского содержания в описании уязвимости нет.
+	"cve_dictionary": {
+		Scope: ScopeGlobal,
+		Why:   "внешний справочник уязвимостей, один на инсталляцию, как и релизы агента",
+	},
+	"cve_affected_software": {
+		Scope: ScopeGlobal,
+		Why:   "часть того же внешнего справочника: какие версии ПО задевает CVE",
+	},
+
 	// audit_anchors — собственная колонка, а НЕ производная от audit_log, хотя
 	// логически это его голова. FK на audit_log здесь был бы прямо вреден: смысл
 	// якоря в том, что он ПЕРЕЖИВАЕТ удаление записей retention'ом, а каскад его бы
@@ -96,13 +125,27 @@ var Tables = map[string]Table{
 	"tasks":                 {Scope: ScopeDerived, Parent: "devices"},
 	"process_events":        {Scope: ScopeDerived, Parent: "devices"},
 	"admin_access_requests": {Scope: ScopeDerived, Parent: "devices"},
+	// admin_session_changes — улики сессии админ-прав. device_id денормализован
+	// намеренно (контракт §5.2): RLS-предикат без хода по FK. Parent = devices,
+	// не admin_access_requests: скоуп тенанта у устройства, заявка сама derived.
+	"admin_session_changes": {Scope: ScopeDerived, Parent: "devices"},
 	"recovery_key_escrow":   {Scope: ScopeDerived, Parent: "devices"},
+	// screen_sessions — журнал интерактивных сеансов (ADR-8). tenant_id
+	// денормализован по той же причине, что у admin_session_changes: RLS-предикат
+	// не должен ходить по FK на каждый кадр статистики.
+	"screen_sessions":       {Scope: ScopeDerived, Parent: "devices"},
 	"device_group_members":  {Scope: ScopeDerived, Parent: "device_groups"},
 	"policy_assignments":    {Scope: ScopeDerived, Parent: "policies"},
 	"script_results":        {Scope: ScopeDerived, Parent: "scripts"},
 	"password_reset_tokens": {Scope: ScopeDerived, Parent: "users"},
 
 	// --- Глобальные ----------------------------------------------------------
+	// tenants — реестр тенантов инсталляции. Сама таблица тенанту не принадлежит:
+	// иначе «кто видит список тенантов» закольцовывается.
+	"tenants": {
+		Scope: ScopeGlobal,
+		Why:   "реестр тенантов инсталляции; строка описывает тенант, а не принадлежит ему",
+	},
 	"agent_releases": {
 		Scope: ScopeGlobal,
 		Why: "деплойер публикует один набор подписанных бинарей на всю инсталляцию; " +
@@ -116,6 +159,19 @@ var Tables = map[string]Table{
 	"token_blocklist": {
 		Scope: ScopeGlobal,
 		Why:   "проверяется по jti в jwtMiddleware до того, как известен тенант",
+	},
+	"escrow_recipients": {
+		Scope: ScopeGlobal,
+		Why: "кастодия одна на инсталляцию, как и релизный ключ, которым получатель " +
+			"подписан; агент забирает его до того, как тенант вообще при чём — " +
+			"эскроу привязан к устройству, а не к подразделению",
+	},
+	"identities": {
+		Scope: ScopeGlobal,
+		Why: "человек, а не его членство (ADR-7, §11): по e-mail из этой таблицы " +
+			"происходит вход, то есть она резолвится ДО того, как тенант известен — " +
+			"тот же признак, что у §6.2. Принадлежность тенантам выражается строками " +
+			"users, и их у одной личности может быть несколько",
 	},
 
 	// --- Смешанная -----------------------------------------------------------

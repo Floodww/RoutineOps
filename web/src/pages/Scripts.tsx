@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { Plus, Trash2, ChevronDown, ChevronUp, Upload } from "lucide-react"
 import api, { Script, ScriptPlatform, scriptPlatformFromFilename } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
@@ -16,29 +17,32 @@ import { formatDistanceToNow } from "@/lib/time"
 const PLATFORM_PLACEHOLDER: Record<string, string> = {
   macOS:   "#!/bin/bash\necho \"Hello from macOS\"",
   Windows: "Write-Host \"Hello from Windows\"",
-  linux:   "#!/bin/bash\necho \"Hello from Linux\"",
+  Linux:   "#!/bin/bash\necho \"Hello from Linux\"",
 }
 
 const PLATFORM_OPTIONS = [
   { value: "macOS", label: "macOS" },
   { value: "Windows", label: "Windows" },
-  { value: "linux", label: "Linux" },
+  { value: "Linux", label: "Linux" },
 ]
 
 const PLATFORM_COLOR: Record<string, string> = {
   macOS:   "text-blue-600 dark:text-blue-400 bg-blue-500/10 border-blue-500/20",
   Windows: "text-violet-600 dark:text-violet-400 bg-violet-500/10 border-violet-500/20",
-  linux:   "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
+  Linux:   "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
 }
 
+// label «Все» — КЛЮЧ словаря (t() на уровне модуля нет); остальные подписи это
+// имена платформ, они одинаковы на любом языке.
 const FILTER_ITEMS: { value: "all" | ScriptPlatform; label: string; color: string }[] = [
-  { value: "all",     label: "Все",     color: "brand-gradient text-white dark:text-[hsl(224_14%_10%)]" },
+  { value: "all",     label: "scripts.all",     color: "brand-gradient text-white dark:text-[hsl(224_14%_10%)]" },
   { value: "macOS",   label: "macOS",   color: "bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/30" },
-  { value: "linux",   label: "Linux",   color: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30" },
+  { value: "Linux",   label: "Linux",   color: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30" },
   { value: "Windows", label: "Windows", color: "bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-500/30" },
 ]
 
 export default function Scripts() {
+  const { t } = useTranslation()
   const [scripts, setScripts] = useState<Script[]>([])
   const [loading, setLoading] = useState(true)
   const [editScript, setEditScript] = useState<Script | null>(null)
@@ -56,7 +60,7 @@ export default function Scripts() {
       const r = await api.get<Script[]>("/scripts")
       setScripts(r.data ?? [])
     } catch {
-      toast({ title: "Не удалось загрузить скрипты", variant: "destructive" })
+      toast({ title: t("scripts.failedToLoadScripts"), variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -71,9 +75,9 @@ export default function Scripts() {
       setCreateOpen(false)
       setForm({ name: "", platform: "macOS", content: "" })
       await load()
-      toast({ title: "Скрипт сохранён", variant: "success" })
+      toast({ title: t("scripts.scriptSaved"), variant: "success" })
     } catch {
-      toast({ title: "Не удалось создать скрипт", variant: "destructive" })
+      toast({ title: t("scripts.failedToCreateThe"), variant: "destructive" })
     } finally {
       setSubmitting(false)
     }
@@ -100,7 +104,7 @@ export default function Scripts() {
       setEditScript(null)
       await load()
     } catch {
-      toast({ title: "Не удалось обновить скрипт", variant: "destructive" })
+      toast({ title: t("scripts.failedToUpdateThe"), variant: "destructive" })
     } finally {
       setSubmitting(false)
     }
@@ -110,39 +114,41 @@ export default function Scripts() {
     try {
       await api.delete(`/scripts/${id}`)
       setScripts((prev) => prev.filter((s) => s.id !== id))
-      toast({ title: "Скрипт удалён", variant: "success" })
+      toast({ title: t("scripts.scriptDeleted"), variant: "success" })
     } catch {
-      toast({ title: "Не удалось удалить скрипт", variant: "destructive" })
+      toast({ title: t("scripts.failedToDeleteThe"), variant: "destructive" })
     }
   }
 
-  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("scripts.loading")}</div>
 
   const q = query.trim().toLowerCase()
   const visible = scripts
-    .filter((s) => osFilter === "all" || s.platform === osFilter)
+    // Сравнение регистронезависимое: до одноразовой миграции данных в БД остаются
+    // скрипты со старым значением "linux", и выпадать из списка они не должны.
+    .filter((s) => osFilter === "all" || s.platform.toLowerCase() === osFilter.toLowerCase())
     .filter((s) => !q || s.name.toLowerCase().includes(q))
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-foreground">Скрипты</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("scripts.scripts")}</h1>
         <div className="flex items-center gap-2">
           <input
             ref={fileInputRef}
             type="file"
             accept=".sh,.py,.ps1"
-            aria-label="Загрузить файл скрипта"
+            aria-label={t("scripts.uploadAScriptFile")}
             className="hidden"
             onChange={handleFileSelected}
           />
           <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()}>
             <Upload className="h-4 w-4 mr-1.5" />
-            Загрузить
+            {t("scripts.upload")}
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" />
-            Новый скрипт
+            {t("scripts.newScript")}
           </Button>
         </div>
       </div>
@@ -160,12 +166,12 @@ export default function Scripts() {
                 osFilter === value ? color : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              {label}
+              {value === "all" ? t(label) : label}
             </button>
           ))}
         </div>
         <Input
-          placeholder="Поиск по названию..."
+          placeholder={t("scripts.searchByName")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="ml-auto max-w-xs"
@@ -176,9 +182,9 @@ export default function Scripts() {
         <Table>
           <TableHeader>
             <TableRow className="border-t-0 hover:bg-transparent">
-              <TableHead className="text-xs">Название</TableHead>
-              <TableHead className="text-xs">Платформа</TableHead>
-              <TableHead className="text-xs">Обновлён</TableHead>
+              <TableHead className="text-xs">{t("scripts.name")}</TableHead>
+              <TableHead className="text-xs">{t("scripts.platform")}</TableHead>
+              <TableHead className="text-xs">{t("scripts.updated")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -186,7 +192,7 @@ export default function Scripts() {
             {visible.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-8">
-                  Нет скриптов
+                  {t("scripts.empty")}
                 </TableCell>
               </TableRow>
             )}
@@ -212,7 +218,7 @@ export default function Scripts() {
                         onClick={(e) => { e.stopPropagation(); setEditScript(s) }}
                         className="text-muted-foreground hover:text-foreground transition-colors text-xs"
                       >
-                        Изменить
+                        {t("common.edit")}
                       </button>
                       <button
                         type="button"
@@ -249,20 +255,20 @@ export default function Scripts() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Новый скрипт</DialogTitle>
+            <DialogTitle>{t("scripts.newScript")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <Label>Название</Label>
+                <Label>{t("scripts.name")}</Label>
                 <Input
-                  placeholder="Обновление Chrome"
+                  placeholder={t("scripts.chromeUpdate")}
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Платформа</Label>
+                <Label>{t("scripts.platform")}</Label>
                 <Select
                   value={form.platform}
                   onChange={(v) => setForm({ ...form, platform: v as ScriptPlatform })}
@@ -271,7 +277,7 @@ export default function Scripts() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="script-content-new">Содержимое</Label>
+              <Label htmlFor="script-content-new">{t("scripts.content")}</Label>
               <textarea
                 id="script-content-new"
                 className="flex min-h-48 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
@@ -285,7 +291,7 @@ export default function Scripts() {
               onClick={handleCreate}
               disabled={submitting || !form.name || !form.content}
             >
-              {submitting ? "Сохранение..." : "Создать"}
+              {submitting ? t("scripts.saving") : t("scripts.create")}
             </Button>
           </div>
         </DialogContent>
@@ -295,20 +301,20 @@ export default function Scripts() {
       <Dialog open={!!editScript} onOpenChange={(o) => !o && setEditScript(null)}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Редактировать скрипт</DialogTitle>
+            <DialogTitle>{t("scripts.editScript")}</DialogTitle>
           </DialogHeader>
           {editScript && (
             <div className="space-y-4 pt-2">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <Label>Название</Label>
+                  <Label>{t("scripts.name")}</Label>
                   <Input
                     value={editScript.name}
                     onChange={(e) => setEditScript({ ...editScript, name: e.target.value })}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Платформа</Label>
+                  <Label>{t("scripts.platform")}</Label>
                   <Select
                     value={editScript.platform}
                     onChange={(v) => setEditScript({ ...editScript, platform: v as ScriptPlatform })}
@@ -317,7 +323,7 @@ export default function Scripts() {
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="script-content-edit">Содержимое</Label>
+                <Label htmlFor="script-content-edit">{t("scripts.content")}</Label>
                 <textarea
                   id="script-content-edit"
                   className="flex min-h-48 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
@@ -330,7 +336,7 @@ export default function Scripts() {
                 onClick={handleUpdate}
                 disabled={submitting || !editScript.name || !editScript.content}
               >
-                {submitting ? "Сохранение..." : "Сохранить"}
+                {submitting ? t("scripts.saving") : t("scripts.save")}
               </Button>
             </div>
           )}
@@ -340,9 +346,9 @@ export default function Scripts() {
       <ConfirmDialog
         open={!!confirmDelete}
         onOpenChange={(o) => !o && setConfirmDelete(null)}
-        title="Удалить скрипт?"
-        description={confirmDelete ? `«${confirmDelete.name}» будет удалён без возможности восстановления.` : ""}
-        confirmLabel="Удалить"
+        title={t("scripts.deleteTheScript")}
+        description={confirmDelete ? t("scripts.deleteWarn", { name: confirmDelete.name }) : ""}
+        confirmLabel={t("scripts.delete")}
         destructive
         onConfirm={() => { if (confirmDelete) handleDelete(confirmDelete.id) }}
       />

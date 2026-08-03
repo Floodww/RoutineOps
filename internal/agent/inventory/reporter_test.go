@@ -3,9 +3,11 @@ package inventory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,17 +18,38 @@ func quietLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// fakeBuild — «сбор» для тестов РАСПИСАНИЯ, не для тестов дедупа.
+//
+// Настоящий build обходит реестр установленного ПО и список служб: на живой
+// Windows это секунды, и тесты первого отчёта, внеочередного сигнала и отмены
+// контекста укладывались в свои две секунды только на macOS. Падали они с
+// диагнозом «Run не отправил первый отчёт», хотя расписание работало — просто
+// сбор не успевал.
+//
+// Каждый вызов отдаёт РАЗНЫЙ снимок: одинаковый проглотил бы дедуп reportOnce, и
+// тест внеочередного сигнала ждал бы вторую отправку, которой по построению не
+// случилось бы. Тесты дедупа, наоборот, сознательно продолжают ходить в
+// настоящий build — там проверяется именно его стабильность.
+func fakeBuild() func(string) *pb.InventoryReport {
+	var n atomic.Int64
+	return func(version string) *pb.InventoryReport {
+		return &pb.InventoryReport{
+			DeviceInfo: &pb.DeviceInfo{AgentVersion: fmt.Sprintf("%s-%d", version, n.Add(1))},
+		}
+	}
+}
+
 // build собирает отчёт из реального коллектора: DeviceInfo должен быть заполнен,
 // а повторный build — давать тот же хэш (детерминизм для дедупа).
 func TestBuild_PopulatesDeviceInfo(t *testing.T) {
-	rep := build("1.2.3")
+	rep := build("1.2.3", nil)
 	if rep.GetDeviceInfo() == nil {
 		t.Fatal("build вернул отчёт без DeviceInfo")
 	}
 	if got := rep.GetDeviceInfo().GetAgentVersion(); got != "1.2.3" {
 		t.Errorf("agent_version = %q, want 1.2.3", got)
 	}
-	if mustHash(t, rep) != mustHash(t, build("1.2.3")) {
+	if mustHash(t, rep) != mustHash(t, build("1.2.3", nil)) {
 		t.Error("два последовательных build дали разный хэш — дедуп сломается")
 	}
 }
@@ -90,8 +113,9 @@ func TestRun_ReportsThenStops(t *testing.T) {
 
 	sent := make(chan struct{}, 1)
 	r := &Reporter{
-		Interval: time.Hour,
-		Log:      quietLog(),
+		Interval:    time.Hour,
+		Log:         quietLog(),
+		buildReport: fakeBuild(),
 		sendReport: func(context.Context, *pb.InventoryReport) (bool, error) {
 			select {
 			case sent <- struct{}{}:
@@ -136,9 +160,10 @@ func TestRun_NudgeSendsOutOfBand(t *testing.T) {
 	var mu sync.Mutex
 	var snapshot int
 	r := &Reporter{
-		Interval: time.Hour,
-		Log:      quietLog(),
-		Nudge:    nudge,
+		Interval:    time.Hour,
+		Log:         quietLog(),
+		Nudge:       nudge,
+		buildReport: fakeBuild(),
 		sendReport: func(context.Context, *pb.InventoryReport) (bool, error) {
 			mu.Lock()
 			snapshot++
@@ -176,8 +201,9 @@ func TestRun_NilNudgeDoesNotBlockCycle(t *testing.T) {
 
 	sent := make(chan struct{}, 1)
 	r := &Reporter{
-		Interval: time.Hour,
-		Log:      quietLog(),
+		Interval:    time.Hour,
+		Log:         quietLog(),
+		buildReport: fakeBuild(),
 		sendReport: func(context.Context, *pb.InventoryReport) (bool, error) {
 			select {
 			case sent <- struct{}{}:

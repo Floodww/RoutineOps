@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-page-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-page-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
@@ -25,7 +26,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 	ids := map[string]bool{}
 	for i := 0; i < want; i++ {
 		id := activeDevice(t, db, fmt.Sprintf("page-%d-%s", i, suffix), "Windows 11")
-		if err := db.AddDeviceToGroup(ctx, id, group.ID); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, id, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup: %v", err)
 		}
 		ids[id] = true
@@ -33,7 +34,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 
 	seen := map[string]bool{}
 	for offset := 0; offset < want; offset += 2 {
-		page, total, err := db.ListEnrolledDevices(ctx, "", group.ID, 2, offset)
+		page, total, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", group.ID, 2, offset)
 		if err != nil {
 			t.Fatalf("ListEnrolledDevices(offset=%d): %v", offset, err)
 		}
@@ -55,7 +56,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 	// вместе со строками (см. paging.go). Это осознанный контракт, а не потеря данных:
 	// признак «промахнулись offset'ом, а не пусто по фильтру» — сам offset > 0, по нему
 	// интерфейс возвращается на первую страницу.
-	page, total, err := db.ListEnrolledDevices(ctx, "", group.ID, 2, 999)
+	page, total, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", group.ID, 2, 999)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(offset=999): %v", err)
 	}
@@ -64,7 +65,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 	}
 
 	// Потолок limit'а: запрос «отдай всё» не должен материализовать таблицу.
-	if _, _, err := db.ListEnrolledDevices(ctx, "", group.ID, 1_000_000, 0); err != nil {
+	if _, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", group.ID, 1_000_000, 0); err != nil {
 		t.Fatalf("ListEnrolledDevices(limit=1e6): %v", err)
 	}
 }
@@ -94,7 +95,7 @@ func TestListAuditLog_ServerSideFilters(t *testing.T) {
 	// Пагинация внутри действия.
 	seen := map[string]bool{}
 	for offset := 0; offset < 5; offset += 2 {
-		page, total, err := db.ListAuditLog(ctx, storage.AuditFilter{Action: action}, 2, offset)
+		page, total, err := db.ListAuditLog(ctx, tenancy.DefaultTenantID, storage.AuditFilter{Action: action}, 2, offset)
 		if err != nil {
 			t.Fatalf("ListAuditLog(offset=%d): %v", offset, err)
 		}
@@ -113,7 +114,7 @@ func TestListAuditLog_ServerSideFilters(t *testing.T) {
 	}
 
 	// Кто: подстрока по email, а не точное совпадение — оператор ищет по имени.
-	if _, total, err := db.ListAuditLog(ctx, storage.AuditFilter{Action: action, Who: "alice-" + suffix}, 50, 0); err != nil {
+	if _, total, err := db.ListAuditLog(ctx, tenancy.DefaultTenantID, storage.AuditFilter{Action: action, Who: "alice-" + suffix}, 50, 0); err != nil {
 		t.Fatalf("ListAuditLog(who): %v", err)
 	} else if total != 3 {
 		t.Errorf("who=alice: total = %d, want 3", total)
@@ -121,12 +122,12 @@ func TestListAuditLog_ServerSideFilters(t *testing.T) {
 
 	// Период: нижняя граница до записей — все, после записей — ни одной.
 	after := time.Now().Add(time.Minute)
-	if _, total, err := db.ListAuditLog(ctx, storage.AuditFilter{Action: action, From: &before, To: &after}, 50, 0); err != nil {
+	if _, total, err := db.ListAuditLog(ctx, tenancy.DefaultTenantID, storage.AuditFilter{Action: action, From: &before, To: &after}, 50, 0); err != nil {
 		t.Fatalf("ListAuditLog(period): %v", err)
 	} else if total != 5 {
 		t.Errorf("период вокруг записей: total = %d, want 5", total)
 	}
-	if _, total, err := db.ListAuditLog(ctx, storage.AuditFilter{Action: action, From: &after}, 50, 0); err != nil {
+	if _, total, err := db.ListAuditLog(ctx, tenancy.DefaultTenantID, storage.AuditFilter{Action: action, From: &after}, 50, 0); err != nil {
 		t.Fatalf("ListAuditLog(from=future): %v", err)
 	} else if total != 0 {
 		t.Errorf("период в будущем: total = %d, want 0", total)

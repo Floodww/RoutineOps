@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 func seedAdmin(t *testing.T, db *storage.DB, prefix string) string {
 	t.Helper()
-	u, err := db.CreateUser(context.Background(), "Test", fmt.Sprintf("%s-%s@example.com", prefix, uniq(t)), "hash", "it_admin")
+	u, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Test", fmt.Sprintf("%s-%s@example.com", prefix, uniq(t)), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -22,7 +23,7 @@ func seedAdmin(t *testing.T, db *storage.DB, prefix string) string {
 
 func adminIDs(t *testing.T, db *storage.DB) []string {
 	t.Helper()
-	users, err := db.ListUsers(context.Background())
+	users, err := db.ListUsers(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestDeleteUser_LastAdminGuard(t *testing.T) {
 	// Приводим базу к одному администратору: тест обязан быть независимым от того,
 	// что оставили соседи по пакету.
 	for ids := adminIDs(t, db); len(ids) > 1; ids = adminIDs(t, db) {
-		if _, err := db.DeleteUser(ctx, ids[0]); err != nil {
+		if _, err := db.DeleteUser(ctx, tenancy.DefaultTenantID, ids[0]); err != nil {
 			t.Fatalf("подготовка: %v", err)
 		}
 	}
@@ -61,7 +62,7 @@ func TestDeleteUser_LastAdminGuard(t *testing.T) {
 
 	// 1. Единственного администратора удалить нельзя.
 	last := adminIDs(t, db)[0]
-	if _, err := db.DeleteUser(ctx, last); !errors.Is(err, storage.ErrLastAdmin) {
+	if _, err := db.DeleteUser(ctx, tenancy.DefaultTenantID, last); !errors.Is(err, storage.ErrLastAdmin) {
 		t.Fatalf("удаление последнего дало %v, ожидалась ErrLastAdmin", err)
 	}
 	if got := adminIDs(t, db); len(got) != 1 {
@@ -88,7 +89,7 @@ func TestDeleteUser_LastAdminGuard(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { _, e := db.DeleteUser(ctx, second); done <- e }()
+	go func() { _, e := db.DeleteUser(ctx, tenancy.DefaultTenantID, second); done <- e }()
 
 	select {
 	case e := <-done:
@@ -136,7 +137,7 @@ func TestDeleteUser_AdminAccessRequestSurvivesAsNull(t *testing.T) {
 		t.Fatalf("заявка не привязалась к пользователю: %q", req.RequestedBy)
 	}
 
-	deleted, err := db.DeleteUser(ctx, victim)
+	deleted, err := db.DeleteUser(ctx, tenancy.DefaultTenantID, victim)
 	if err != nil || !deleted {
 		t.Fatalf("удаление пользователя с заявкой: deleted=%v err=%v", deleted, err)
 	}
@@ -158,7 +159,7 @@ func TestDeleteUser_UnknownIDIsNotAnError(t *testing.T) {
 	// Несуществующий и заведомо кривой UUID: оба обязаны дать «не найдено», а не 500.
 	// id::text в запросе именно для второго случая — голое сравнение с uuid даёт 22P02.
 	for _, id := range []string{"00000000-0000-0000-0000-000000000000", "не-uuid"} {
-		deleted, err := db.DeleteUser(context.Background(), id)
+		deleted, err := db.DeleteUser(context.Background(), tenancy.DefaultTenantID, id)
 		if err != nil || deleted {
 			t.Errorf("id=%q: deleted=%v err=%v, ожидалось (false, nil)", id, deleted, err)
 		}

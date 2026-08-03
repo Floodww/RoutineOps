@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -165,7 +166,7 @@ func TestListDeviceTasks_ReturnsMostRecent(t *testing.T) {
 	db.CreateTask(context.Background(), d.ID, "cmd1", "macos", "normal")
 	db.CreateTask(context.Background(), d.ID, "cmd2", "macos", "normal")
 
-	tasks, err := db.ListDeviceTasks(context.Background(), d.ID)
+	tasks, err := db.ListDeviceTasks(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("ListDeviceTasks: %v", err)
 	}
@@ -239,13 +240,13 @@ func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 	// Подтверждение статуса приходит ПОСЛЕ того, как lock-эндпоинт выставил desired
 	// вместе с хешем — воспроизводим боевой порядок. Без него UpdateDeviceLockStatus
 	// справедливо откажет (ErrNoDesiredLock), см. тест ниже.
-	if err := db.SetDeviceLockState(ctx, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+	if err := db.SetDeviceLockState(ctx, tenancy.DefaultTenantID, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
 		t.Fatalf("SetDeviceLockState(locked): %v", err)
 	}
 	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "locked"); err != nil {
 		t.Fatalf("UpdateDeviceLockStatus(locked): %v", err)
 	}
-	d1, _, err := db.GetDevice(ctx, d.ID)
+	d1, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -256,7 +257,7 @@ func TestUpdateDeviceLockStatus_LockedThenUnlocked(t *testing.T) {
 	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "unlocked"); err != nil {
 		t.Fatalf("UpdateDeviceLockStatus(unlocked): %v", err)
 	}
-	d2, _, err := db.GetDevice(ctx, d.ID)
+	d2, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -276,17 +277,17 @@ func TestUpdateDeviceLockStatus_StaleLockedAfterUnlock_Refused(t *testing.T) {
 	d := mustCreateActiveDevice(t, db, "host-stalelock-"+uniq(t), "windows")
 
 	// Полный боевой цикл: заперли (hash есть) → сняли (hash вычищен).
-	if err := db.SetDeviceLockState(ctx, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+	if err := db.SetDeviceLockState(ctx, tenancy.DefaultTenantID, d.ID, "locked", testLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
 		t.Fatalf("SetDeviceLockState(locked): %v", err)
 	}
-	if err := db.SetDeviceLockState(ctx, d.ID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
+	if err := db.SetDeviceLockState(ctx, tenancy.DefaultTenantID, d.ID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
 		t.Fatalf("SetDeviceLockState(unlocked): %v", err)
 	}
 
 	if err := db.UpdateDeviceLockStatus(ctx, d.ID, "locked"); !errors.Is(err, storage.ErrNoDesiredLock) {
 		t.Fatalf("UpdateDeviceLockStatus(locked) без lock_hash = %v, want ErrNoDesiredLock", err)
 	}
-	got, _, err := db.GetDevice(ctx, d.ID)
+	got, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -366,4 +367,35 @@ func TestFailStaleAckedTasks(t *testing.T) {
 	if s := statusOf(pending.ID); s != "pending" {
 		t.Errorf("pending-задача = %q, want pending", s)
 	}
+}
+
+func TestListPendingTasksWithDeviceCN_IncludesPendingTask(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	cn := "recon-cn-" + uniq(t)
+	fp := "fp-recon-" + uniq(t)
+	devID := "dev-recon-" + uniq(t)
+	if err := db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
+		CertFingerprint: fp, DeviceID: devID, CertCN: cn, IPAddress: "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
+	}
+	id, _ := db.GetDeviceIDByFingerprint(ctx, fp)
+	task, err := db.CreateTask(ctx, id, "echo", "linux", "normal")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	refs, err := db.ListPendingTasksWithDeviceCN(ctx, 500)
+	if err != nil {
+		t.Fatalf("ListPendingTasksWithDeviceCN: %v", err)
+	}
+	for _, r := range refs {
+		if r.TaskID == task.ID {
+			if r.DeviceCN != cn {
+				t.Errorf("DeviceCN = %q, want %q", r.DeviceCN, cn)
+			}
+			return
+		}
+	}
+	t.Fatalf("pending task %s not in reconciler list", task.ID)
 }

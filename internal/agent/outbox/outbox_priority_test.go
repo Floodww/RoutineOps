@@ -159,3 +159,62 @@ func TestEnqueue_ParallelEvictableIntoProtectedFullQueue_AllError(t *testing.T) 
 		}
 	}
 }
+
+// Улики сессии админ-прав вытесняются РАНЬШЕ ИБ-сигнала, а не наоборот.
+//
+// Окна улик кумулятивны: вытесненное окно целиком содержится в следующем.
+// Security-событие невосстановимо. Поэтому аудит-фича не имеет права выдавить
+// сигнал безопасности из очереди — проверяем оба следствия сразу: имя вида
+// доживает до файла неискажённым (иначе класс вытеснения потерялся бы молча) и
+// сама расстановка приоритетов.
+func TestAdminChangesEvictedBeforeSecurity(t *testing.T) {
+	dir := t.TempDir()
+	q, err := New(dir, 2, time.Hour, discardLog(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := q.Enqueue(KindAdminChanges, []byte("окно улик")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := q.list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if fileKind(f) != KindAdminChanges {
+			t.Fatalf("вид записи не дожил до имени файла (потерян класс вытеснения): %q", f)
+		}
+	}
+
+	if err := q.Enqueue(KindSecurity, []byte("alert")); err != nil {
+		t.Fatalf("ИБ-событие не встало в очередь, забитую уликами: %v", err)
+	}
+	files, err = q.list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range files {
+		if fileKind(f) == KindSecurity {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ИБ-событие вытеснено уликами: %v", files)
+	}
+
+	// И обратно: улики в очередь, забитую ИБ-событиями, не лезут.
+	dir2 := t.TempDir()
+	q2, err := New(dir2, 1, time.Hour, discardLog(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q2.Enqueue(KindSecurity, []byte("alert")); err != nil {
+		t.Fatal(err)
+	}
+	if err := q2.Enqueue(KindAdminChanges, []byte("окно улик")); err == nil {
+		t.Fatal("улики вытеснили ИБ-событие")
+	}
+}

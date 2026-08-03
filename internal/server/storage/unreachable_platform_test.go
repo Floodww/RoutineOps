@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -130,13 +131,13 @@ func TestFetchPolicyRules_PlatformFilter(t *testing.T) {
 	winName := "WinApp-" + uniq(t)
 	macName := "MacApp-" + uniq(t)
 	allName := "AllApp-" + uniq(t)
-	if _, err := db.CreatePolicyRule(ctx, winName, "forbidden", nil, []string{"Windows"}); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, winName, "forbidden", nil, []string{"Windows"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreatePolicyRule(ctx, macName, "forbidden", nil, []string{"macOS"}); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, macName, "forbidden", nil, []string{"macOS"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreatePolicyRule(ctx, allName, "forbidden", nil, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, allName, "forbidden", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 

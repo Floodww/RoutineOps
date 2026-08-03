@@ -12,6 +12,7 @@ import (
 
 type EnrollmentToken struct {
 	ID              string
+	TenantID        string
 	DeviceID        string // "" для bulk-токена (device_id NULL — не привязан к устройству)
 	GroupID         string // "" если партия без группы
 	MaxUses         *int   // nil = безлимит до ExpiresAt
@@ -49,23 +50,47 @@ var ErrDeviceNotEnrollable = errors.New("device status forbids enroll")
 // закрытая в одном месте дверь остаётся открытой в другом.
 var notEnrollableStatuses = []string{"pending_approval", "rejected", "decommissioned", "blocked"}
 
-func (db *DB) CreatePendingDevice(ctx context.Context, hostname, os string) (*Device, error) {
+func (db *DB) CreatePendingDevice(ctx context.Context, tenantID, hostname, os string) (*Device, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var d Device
-	err := db.pool.QueryRow(ctx, `
-		INSERT INTO devices (hostname, os, status)
-		VALUES ($1, $2, 'pending')
+	err = db.Q(ctx).QueryRow(ctx, `
+		INSERT INTO devices (tenant_id, hostname, os, status)
+		VALUES ($1, $2, $3, 'pending')
 		RETURNING id, hostname, os, COALESCE(os_version, ''), COALESCE(ip_address, ''),
 		          status, last_seen_at, created_at
-	`, hostname, os).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
+	`, tenantID, hostname, os).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LastSeenAt, &d.CreatedAt)
 	return &d, err
 }
 
-func (db *DB) CreateEnrollmentToken(ctx context.Context, deviceID, token string, expiresAt time.Time) error {
-	_, err := db.pool.Exec(ctx, `
-		INSERT INTO enrollment_tokens (device_id, token_hash, expires_at)
-		VALUES ($1, $2, $3)
-	`, deviceID, hashEnrollToken(token), expiresAt)
+func (db *DB) CreateEnrollmentToken(ctx context.Context, tenantID, deviceID, token string, expiresAt time.Time) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `
+		INSERT INTO enrollment_tokens (tenant_id, device_id, token_hash, expires_at)
+		SELECT $1, d.id, $3, $4 FROM devices d WHERE d.id = $2 AND d.tenant_id = $1
+	`, tenantID, deviceID, hashEnrollToken(token), expiresAt)
 	return err
 }
 
@@ -73,11 +98,11 @@ func (db *DB) GetEnrollmentToken(ctx context.Context, token string) (*Enrollment
 	var t EnrollmentToken
 	// device_id теперь nullable (bulk-токен): COALESCE(::text,'') → "" для bulk.
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, COALESCE(device_id::text, ''), COALESCE(group_id::text, ''),
-		       max_uses, uses, require_approval, expires_at, used_at, created_at
-		FROM enrollment_tokens WHERE token_hash = $1
-	`, hashEnrollToken(token)).Scan(&t.ID, &t.DeviceID, &t.GroupID,
-		&t.MaxUses, &t.Uses, &t.RequireApproval, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+		SELECT id, tenant_id::text, COALESCE(device_id::text, ''), COALESCE(group_id::text, ''),
+		       max_uses, uses, require_approval, expires_at, used_at
+		FROM auth_enrollment_by_hash($1)
+	`, hashEnrollToken(token)).Scan(&t.ID, &t.TenantID, &t.DeviceID, &t.GroupID,
+		&t.MaxUses, &t.Uses, &t.RequireApproval, &t.ExpiresAt, &t.UsedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -90,15 +115,27 @@ func (db *DB) GetEnrollmentToken(ctx context.Context, token string) (*Enrollment
 // CreateBulkEnrollmentToken выпускает многоразовый токен, НЕ привязанный к устройству
 // (device_id NULL). groupID/maxUses опциональны ("" / nil). requireApproval решает
 // вызывающий (дефолт политики — в ручке). Устройства создаются сами при энролле.
-func (db *DB) CreateBulkEnrollmentToken(ctx context.Context, token, groupID string, maxUses *int, requireApproval bool, expiresAt time.Time) error {
+func (db *DB) CreateBulkEnrollmentToken(ctx context.Context, tenantID, token, groupID string, maxUses *int, requireApproval bool, expiresAt time.Time) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
 	var gid *string
 	if groupID != "" {
 		gid = &groupID
 	}
-	_, err := db.pool.Exec(ctx, `
-		INSERT INTO enrollment_tokens (device_id, group_id, token_hash, max_uses, require_approval, expires_at)
-		VALUES (NULL, $1, $2, $3, $4, $5)
-	`, gid, hashEnrollToken(token), maxUses, requireApproval, expiresAt)
+	_, err = db.Q(ctx).Exec(ctx, `
+		INSERT INTO enrollment_tokens (tenant_id, device_id, group_id, token_hash, max_uses, require_approval, expires_at)
+		VALUES ($1, NULL, $2, $3, $4, $5, $6)
+	`, tenantID, gid, hashEnrollToken(token), maxUses, requireApproval, expiresAt)
 	return err
 }
 
@@ -120,16 +157,28 @@ type BulkEnrollmentToken struct {
 // ListBulkEnrollmentTokens — выпущенные массовые токены, свежие сверху. Истёкшие тоже
 // отдаём: оператору важно видеть, чем энроллили парк последнее время.
 // ponytail: LIMIT 100 вместо пагинации — токены выпускают штуками, не тысячами.
-func (db *DB) ListBulkEnrollmentTokens(ctx context.Context) ([]BulkEnrollmentToken, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListBulkEnrollmentTokens(ctx context.Context, tenantID string) ([]BulkEnrollmentToken, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT t.id::text, COALESCE(t.group_id::text, ''), COALESCE(g.name, ''),
 		       t.max_uses, t.uses, t.require_approval, t.expires_at, t.created_at
 		FROM enrollment_tokens t
 		LEFT JOIN device_groups g ON g.id = t.group_id
-		WHERE t.device_id IS NULL
+		WHERE t.tenant_id = $1 AND t.device_id IS NULL
 		ORDER BY t.created_at DESC
 		LIMIT 100
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +204,22 @@ func (db *DB) ListBulkEnrollmentTokens(ctx context.Context) ([]BulkEnrollmentTok
 // false = токена нет или он уже мёртв (истёк/отозван), повторный отзыв не нужен.
 // ponytail: отозванный в списке неотличим от истёкшего сам; понадобится различать —
 // добавить revoked_at и показывать причину.
-func (db *DB) RevokeEnrollmentToken(ctx context.Context, id string) (bool, error) {
-	ct, err := db.pool.Exec(ctx,
-		`UPDATE enrollment_tokens SET expires_at = now() WHERE id = $1 AND expires_at > now()`, id)
+func (db *DB) RevokeEnrollmentToken(ctx context.Context, tenantID, id string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+	ct, err := db.Q(ctx).Exec(ctx,
+		`UPDATE enrollment_tokens SET expires_at = now()
+		 WHERE id = $1 AND tenant_id = $2 AND expires_at > now()`, id, tenantID)
 	if err != nil {
 		return false, err
 	}
@@ -170,32 +232,42 @@ func (db *DB) RevokeEnrollmentToken(ctx context.Context, id string) (bool, error
 // устройства и require_approval. ErrEnrollTokenAlreadyUsed = лимит исчерпан / срок
 // вышел / это не bulk-токен (device_id задан).
 //
+// tenantID — из токена (GetEnrollmentToken / auth_enrollment_by_hash): устройство
+// обязано родиться в том же тенанте, что и токен (ADR-6, WITH CHECK RLS).
+//
 // Устройство создаётся ДО подписи CSR, потому что CN серта = id устройства
 // (SignCSR(csr, deviceID)); статус и серт доставляет FinalizeBulkEnroll после подписи.
 // ⚠ ponytail: если SignCSR упадёт между Begin и Finalize (битый CSR — ошибка клиента),
 // останется осиротевшее 'pending'-устройство + одно израсходованное использование.
 // Это тот же осадок, что от любого недоведённого энролла; редко и не деструктивно.
-func (db *DB) BeginBulkEnroll(ctx context.Context, tokenID, hostname, os string) (deviceID string, requireApproval bool, err error) {
+func (db *DB) BeginBulkEnroll(ctx context.Context, tenantID, tokenID, hostname, os string) (deviceID string, requireApproval bool, err error) {
+	tenantID, err = requireTenant(tenantID)
+	if err != nil {
+		return "", false, err
+	}
 	if hostname == "" {
 		hostname = "unknown" // первый ReportInventory перепишет (pending_approval шлёт инвентарь)
 	}
 	if os == "" {
 		os = "unknown"
 	}
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		return "", false, err
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return "", false, err
+		}
+		defer func() { finish(err == nil) }()
 	}
-	defer tx.Rollback(ctx)
 
 	var groupID *string
-	err = tx.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
 		UPDATE enrollment_tokens SET uses = uses + 1
-		WHERE id = $1 AND device_id IS NULL
+		WHERE id = $1 AND tenant_id = $2 AND device_id IS NULL
 		  AND (max_uses IS NULL OR uses < max_uses)
 		  AND expires_at > now()
 		RETURNING group_id::text, require_approval
-	`, tokenID).Scan(&groupID, &requireApproval)
+	`, tokenID, tenantID).Scan(&groupID, &requireApproval)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", false, ErrEnrollTokenAlreadyUsed
@@ -203,21 +275,18 @@ func (db *DB) BeginBulkEnroll(ctx context.Context, tokenID, hostname, os string)
 		return "", false, err
 	}
 
-	if err = tx.QueryRow(ctx,
-		`INSERT INTO devices (hostname, os, status) VALUES ($1, $2, 'pending') RETURNING id`,
-		hostname, os).Scan(&deviceID); err != nil {
+	if err = db.Q(ctx).QueryRow(ctx,
+		`INSERT INTO devices (tenant_id, hostname, os, status) VALUES ($1, $2, $3, 'pending') RETURNING id`,
+		tenantID, hostname, os).Scan(&deviceID); err != nil {
 		return "", false, err
 	}
 
 	if groupID != nil && *groupID != "" {
-		if _, err = tx.Exec(ctx,
-			`INSERT INTO device_group_members (device_id, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-			deviceID, *groupID); err != nil {
+		if _, err = db.Q(ctx).Exec(ctx,
+			`INSERT INTO device_group_members (tenant_id, device_id, group_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+			tenantID, deviceID, *groupID); err != nil {
 			return "", false, err
 		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", false, err
 	}
 	return deviceID, requireApproval, nil
 }
@@ -226,24 +295,49 @@ func (db *DB) BeginBulkEnroll(ctx context.Context, tokenID, hostname, os string)
 // 'pending_approval' (ждёт одобрения, gateway гейтит политики/скрипты), иначе
 // 'enrolled' (обычный heartbeat поднимет в 'active'). certFingerprint — как в
 // EnrollDevice: чтобы первый heartbeat обновил ЭТУ строку, а не создал дубль.
-func (db *DB) FinalizeBulkEnroll(ctx context.Context, deviceID, certSerial, certFingerprint string, requireApproval bool) error {
+func (db *DB) FinalizeBulkEnroll(ctx context.Context, tenantID, deviceID, certSerial, certFingerprint string, requireApproval bool) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
 	status := "enrolled"
 	if requireApproval {
 		status = "pending_approval"
 	}
-	_, err := db.pool.Exec(ctx, `
+	_, err = db.Q(ctx).Exec(ctx, `
 		UPDATE devices SET status = $2, cert_serial = $3, enrolled_at = now(),
 		    certificate_fingerprint = COALESCE(NULLIF($4, ''), certificate_fingerprint)
-		WHERE id = $1
-	`, deviceID, status, certSerial, certFingerprint)
+		WHERE id = $1 AND tenant_id = $5
+	`, deviceID, status, certSerial, certFingerprint, tenantID)
 	return err
 }
 
 // ApproveDevice одобряет устройство из очереди: pending_approval → active. Возвращает
 // false, если устройство не было в очереди (guarded — идемпотентно, не трогает чужие статусы).
-func (db *DB) ApproveDevice(ctx context.Context, deviceID string) (bool, error) {
-	ct, err := db.pool.Exec(ctx,
-		`UPDATE devices SET status = 'active' WHERE id = $1 AND status = 'pending_approval'`, deviceID)
+func (db *DB) ApproveDevice(ctx context.Context, tenantID, deviceID string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+	ct, err := db.Q(ctx).Exec(ctx,
+		`UPDATE devices SET status = 'active'
+		 WHERE id = $1 AND tenant_id = $2 AND status = 'pending_approval'`, deviceID, tenantID)
 	if err != nil {
 		return false, err
 	}
@@ -252,9 +346,22 @@ func (db *DB) ApproveDevice(ctx context.Context, deviceID string) (bool, error) 
 
 // RejectDevice отклоняет устройство из очереди: pending_approval → rejected (терминальный,
 // gateway режет Connect/heartbeat/все RPC как blocked). false = не было в очереди.
-func (db *DB) RejectDevice(ctx context.Context, deviceID string) (bool, error) {
-	ct, err := db.pool.Exec(ctx,
-		`UPDATE devices SET status = 'rejected' WHERE id = $1 AND status = 'pending_approval'`, deviceID)
+func (db *DB) RejectDevice(ctx context.Context, tenantID, deviceID string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+	ct, err := db.Q(ctx).Exec(ctx,
+		`UPDATE devices SET status = 'rejected'
+		 WHERE id = $1 AND tenant_id = $2 AND status = 'pending_approval'`, deviceID, tenantID)
 	if err != nil {
 		return false, err
 	}
@@ -263,12 +370,26 @@ func (db *DB) RejectDevice(ctx context.Context, deviceID string) (bool, error) {
 
 // ApprovePendingDevices — batch-одобрение: все pending_approval (groupID "" ) или только
 // члены группы (groupID = uuid). Возвращает число одобренных.
-func (db *DB) ApprovePendingDevices(ctx context.Context, groupID string) (int64, error) {
-	ct, err := db.pool.Exec(ctx, `
+func (db *DB) ApprovePendingDevices(ctx context.Context, tenantID, groupID string) (int64, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return 0, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return 0, err
+		}
+		defer finish(true)
+	}
+	ct, err := db.Q(ctx).Exec(ctx, `
 		UPDATE devices SET status = 'active'
-		WHERE status = 'pending_approval'
-		  AND ($1 = '' OR id IN (SELECT device_id FROM device_group_members WHERE group_id::text = $1))
-	`, groupID)
+		WHERE tenant_id = $1 AND status = 'pending_approval'
+		  AND ($2 = '' OR id IN (
+		    SELECT device_id FROM device_group_members
+		    WHERE tenant_id = $1 AND group_id::text = $2))
+	`, tenantID, groupID)
 	if err != nil {
 		return 0, err
 	}
@@ -276,21 +397,41 @@ func (db *DB) ApprovePendingDevices(ctx context.Context, groupID string) (int64,
 }
 
 // RejectPendingDevices — batch-отклонение (симметрично ApprovePendingDevices).
-func (db *DB) RejectPendingDevices(ctx context.Context, groupID string) (int64, error) {
-	ct, err := db.pool.Exec(ctx, `
+func (db *DB) RejectPendingDevices(ctx context.Context, tenantID, groupID string) (int64, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return 0, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return 0, err
+		}
+		defer finish(true)
+	}
+	ct, err := db.Q(ctx).Exec(ctx, `
 		UPDATE devices SET status = 'rejected'
-		WHERE status = 'pending_approval'
-		  AND ($1 = '' OR id IN (SELECT device_id FROM device_group_members WHERE group_id::text = $1))
-	`, groupID)
+		WHERE tenant_id = $1 AND status = 'pending_approval'
+		  AND ($2 = '' OR id IN (
+		    SELECT device_id FROM device_group_members
+		    WHERE tenant_id = $1 AND group_id::text = $2))
+	`, tenantID, groupID)
 	if err != nil {
 		return 0, err
 	}
 	return ct.RowsAffected(), nil
 }
 
-func (db *DB) GetActiveEnrollmentToken(ctx context.Context, deviceID string) (*EnrollmentToken, error) {
+func (db *DB) GetActiveEnrollmentToken(ctx context.Context, tenantID, deviceID string) (*EnrollmentToken, error) {
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(false)
+
 	var t EnrollmentToken
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
 		SELECT id, device_id, expires_at, used_at, created_at
 		FROM enrollment_tokens
 		WHERE device_id = $1 AND used_at IS NULL AND expires_at > now()
@@ -311,11 +452,13 @@ func (db *DB) GetActiveEnrollmentToken(ctx context.Context, deviceID string) (*E
 // ЭТУ же строку, а не создал дубль устройства (БАГ 4). Пустой отпечаток не трогает
 // колонку — обратная совместимость со старыми вызовами.
 func (db *DB) EnrollDevice(ctx context.Context, tokenID, deviceID, certSerial, certFingerprint string) error {
-	tx, err := db.pool.Begin(ctx)
+	tx, owned, err := db.beginScoped(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	if owned {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
 
 	ct, err := tx.Exec(ctx,
 		`UPDATE enrollment_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL`, tokenID)
@@ -341,11 +484,14 @@ func (db *DB) EnrollDevice(ctx context.Context, tokenID, deviceID, certSerial, c
 	if ct.RowsAffected() == 0 {
 		return ErrDeviceNotEnrollable
 	}
-	return tx.Commit(ctx)
+	if owned {
+		return tx.Commit(ctx)
+	}
+	return nil
 }
 
 func (db *DB) UpdatePendingDeviceInfo(ctx context.Context, deviceID, hostname, os string) error {
-	_, err := db.pool.Exec(ctx, `
+	_, err := db.Q(ctx).Exec(ctx, `
 		UPDATE devices SET
 		  hostname = CASE WHEN $2 != '' THEN $2 ELSE hostname END,
 		  os       = CASE WHEN $3 != '' THEN $3 ELSE os END
@@ -354,12 +500,20 @@ func (db *DB) UpdatePendingDeviceInfo(ctx context.Context, deviceID, hostname, o
 	return err
 }
 
-func (db *DB) ResetDeviceForReenroll(ctx context.Context, deviceID, newToken string, expiresAt time.Time) error {
-	tx, err := db.pool.Begin(ctx)
+func (db *DB) ResetDeviceForReenroll(ctx context.Context, tenantID, deviceID, newToken string, expiresAt time.Time) error {
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer finish(true)
+
+	tx, owned, err := db.beginScoped(ctx)
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE enrollment_tokens SET used_at = now() WHERE device_id = $1 AND used_at IS NULL`,
@@ -388,5 +542,8 @@ func (db *DB) ResetDeviceForReenroll(ctx context.Context, deviceID, newToken str
 	`, deviceID, hashEnrollToken(newToken), expiresAt); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if owned {
+		return tx.Commit(ctx)
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"testing"
 
@@ -164,7 +165,7 @@ func TestUpdateDeviceStatus_Unauthenticated_Returns401(t *testing.T) {
 // а /devices показывает только не-pending (ListEnrolledDevices).
 func activateDevice(t *testing.T, db *storage.DB, id string) {
 	t.Helper()
-	if err := db.UpdateDeviceStatus(context.Background(), id, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "active"); err != nil {
 		t.Fatalf("UpdateDeviceStatus %s: %v", id, err)
 	}
 }

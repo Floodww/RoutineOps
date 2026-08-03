@@ -156,7 +156,9 @@ chmod 600 .env.prod
 
 ```env
 POSTGRES_PASSWORD=<придумайте_пароль>
-DATABASE_DSN=postgres://mdm:<тот_же_пароль>@postgres:5432/mdm?sslmode=disable
+# Сервер ходит ролью приложения (без права обходить RLS), миграции — владельцем базы.
+DATABASE_DSN=postgres://mdm_app:<пароль_приложения>@postgres:5432/mdm?sslmode=disable
+MIGRATION_DSN=postgres://mdm:<тот_же_пароль>@postgres:5432/mdm?sslmode=disable
 REDIS_ADDR=redis:6379
 SERVER_CERT=certs/server.crt
 SERVER_KEY=certs/server.key
@@ -173,6 +175,15 @@ COOKIE_SECURE=true
 > начало переменной в env-файлах и приведёт к ошибке аутентификации.
 >
 > **Хост в `DATABASE_DSN`** — `postgres` (имя сервиса в compose), а не `localhost`.
+>
+> **Две роли, а не одна.** `DATABASE_DSN` — роль приложения `mdm_app`
+> (`NOSUPERUSER NOBYPASSRLS`), `MIGRATION_DSN` — владелец базы. Изоляция тенантов
+> держится на `ROW LEVEL SECURITY`, а владелец базы её обходит: один DSN под владельцем
+> означает, что изоляция существует на бумаге. При этом миграции обязан катить именно
+> владелец — роль без прав DDL не выполнит. Обе строки заполняет `install.sh` сам; пароль
+> `mdm_app` ставится после наката миграции `049`, потому что пароль в SQL-файле = утечка.
+> Гейт: `migrate` **отказывается** катить DDL, если `MIGRATION_DSN` не задан, а сервер уже
+> переведён на роль приложения. Подробно — [self-hosted-deploy.md](self-hosted-deploy.md).
 >
 > **`PUBLIC_WEB_URL`** — с `https://`: nginx редиректит 80 → 443. Это значение
 > используется в генерируемых installer-скриптах и ссылках на загрузку агентов.
@@ -213,7 +224,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 | Переменная | Дефолт | Назначение |
 |---|---|---|
 | `POSTGRES_PASSWORD` | — | Пароль суперпользователя postgres-контейнера. Без него postgres не стартует. Без `$` в значении |
-| `DATABASE_DSN` | `postgres://mdm:mdm_dev_password@localhost:5432/mdm?sslmode=prefer` | DSN базы. В проде задавать явно, хост — `postgres` |
+| `DATABASE_DSN` | `postgres://mdm:mdm_dev_password@localhost:5432/mdm?sslmode=prefer` | DSN сервера — роль приложения `mdm_app` без права обходить RLS. В проде задавать явно, хост — `postgres` |
+| `MIGRATION_DSN` | — (fallback на `DATABASE_DSN`) | DSN владельца базы: под ним катятся миграции (DDL). Заполняется `install.sh`; при переводе сервера на `mdm_app` обязателен |
 | `REDIS_ADDR` | `localhost:6379` | Адрес Redis. В compose — `redis:6379` |
 | `JWT_SECRET` | `dev-secret-change-in-production` | Корень доверия админ-сессий. `openssl rand -hex 32`. Ротация — [jwt-secret-rotation.md](jwt-secret-rotation.md) |
 | `PUBLIC_WEB_URL` | `https://localhost:8081` | Внешний URL сервера. Подставляется в installer-скрипты, ссылки на загрузку и инвайты |
@@ -269,6 +281,11 @@ docker compose -f docker-compose.prod.yml up -d --build
 | `AUDIT_RETENTION_DAYS` | `365` | Отдельный, длинный срок хранения `audit_log`. `0` = бессрочно |
 | `AGENT_UNREACHABLE_MINUTES` | `10080` (7 суток) | Сколько минут без heartbeat до алерта `agent_unreachable` |
 | `AGENT_UNREACHABLE_COOLDOWN_MINUTES` | `360` (6 часов) | Окно подавления повторных `agent_unreachable` по одному устройству |
+| `AUDIT_ARCHIVE_DIR` | — (пусто) | **[Enterprise]** Каталог архива журнала: записи выгружаются в `JSONL.gz` **перед** удалением по сроку. Пусто = архива нет; тогда `AUDIT_RETENTION_DAYS` уничтожает записи безвозвратно вместе с цепочкой, ради которой журнал и заведён |
+| `ALERT_ESCALATE_AFTER_MINUTES` | `30` | **[Enterprise]** Через сколько минут неподтверждённый алерт эскалируется |
+| `ALERT_ESCALATE_REPEAT_MINUTES` | `60` | **[Enterprise]** Период повторной эскалации, пока алерт не подтверждён |
+| `ALERT_ESCALATE_MIN_SEVERITY` | `critical` | **[Enterprise]** С какого уровня критичности включается эскалация |
+| `SCREEN_DIR` | `./screen-recordings` | **[Enterprise]** Каталог записей сеансов удалённого стола. Отдельный том: записи **невосстановимы**, в отличие от `releases/`, который пересоздаётся из БД. Ретеншен — 30 дней |
 
 ### Почта и уведомления
 

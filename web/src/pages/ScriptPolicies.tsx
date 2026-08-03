@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { Plus, Trash2, ScrollText } from "lucide-react"
 import api, { Script, ScriptPolicy, ScriptResult, DeviceGroup, ScriptPolicyCompliance } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -11,10 +12,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { formatDistanceToNow } from "@/lib/time"
 import { toast } from "@/lib/toast"
 
+// Значения — КЛЮЧИ словаря: t() на уровне модуля недоступен.
 const triggerLabel: Record<string, string> = {
-  schedule: "По расписанию",
-  event_trigger: "По событию",
-  on_connect: "При подключении",
+  schedule: "scriptPolicies.onASchedule",
+  event_trigger: "scriptPolicies.onAnEvent",
+  on_connect: "scriptPolicies.onConnect",
 }
 
 const triggerVariant: Record<string, "default" | "secondary" | "outline"> = {
@@ -27,25 +29,26 @@ const triggerVariant: Record<string, "default" | "secondary" | "outline"> = {
 // Pass = exit_code 0. Хвост «·N» — устройства, где политика назначена, но результата
 // ещё нет; без него сумма pass+fail не сходилась бы с охватом и это выглядело бы багом.
 function PassFail({ c }: { c?: ScriptPolicyCompliance }) {
+  const { t } = useTranslation()
   if (!c) return <span className="text-muted-foreground text-xs">…</span>
   if (c.in_scope === 0) {
     return (
-      <span className="text-muted-foreground text-xs" title="Политика не назначена ни на одну группу с устройствами">
+      <span className="text-muted-foreground text-xs" title={t("scriptPolicies.thePolicyIsNot2")}>
         —
       </span>
     )
   }
   return (
     <span className="flex items-center gap-2 text-sm tabular-nums">
-      <span className="text-emerald-600 dark:text-emerald-400 font-medium" title="Последний прогон завершился с кодом 0">
+      <span className="text-emerald-600 dark:text-emerald-400 font-medium" title={t("scriptPolicies.theLastRunFinished2")}>
         {c.pass}
       </span>
       <span className="text-muted-foreground/40">/</span>
-      <span className={c.fail > 0 ? "text-red-600 dark:text-red-400 font-semibold" : "text-muted-foreground"} title="Последний прогон завершился с ненулевым кодом">
+      <span className={c.fail > 0 ? "text-red-600 dark:text-red-400 font-semibold" : "text-muted-foreground"} title={t("scriptPolicies.theLastRunFinished")}>
         {c.fail}
       </span>
       {c.unknown > 0 && (
-        <span className="text-muted-foreground/70 text-xs" title="Устройств ещё не отчиталось">
+        <span className="text-muted-foreground/70 text-xs" title={t("scriptPolicies.noDeviceHasReported")}>
           ·{c.unknown}
         </span>
       )}
@@ -54,6 +57,7 @@ function PassFail({ c }: { c?: ScriptPolicyCompliance }) {
 }
 
 export default function ScriptPolicies() {
+  const { t } = useTranslation()
   const [policies, setPolicies] = useState<ScriptPolicy[]>([])
   const [scripts, setScripts] = useState<Script[]>([])
   const [groups, setGroups] = useState<DeviceGroup[]>([])
@@ -85,7 +89,7 @@ export default function ScriptPolicies() {
       const r = await api.get<ScriptResult[]>(`/script-policies/${p.id}/results`)
       setResults(r.data ?? [])
     } catch {
-      toast({ title: "Не удалось загрузить результаты", variant: "destructive" })
+      toast({ title: t("scriptPolicies.failedToLoadThe"), variant: "destructive" })
     } finally {
       setResultsLoading(false)
     }
@@ -102,7 +106,7 @@ export default function ScriptPolicies() {
       setScripts(s.data ?? [])
       setGroups(g.data ?? [])
     } catch {
-      toast({ title: "Не удалось загрузить данные", variant: "destructive" })
+      toast({ title: t("scriptPolicies.failedToLoadThe2"), variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -148,7 +152,7 @@ export default function ScriptPolicies() {
       setPolicyForm({ name: "", script_id: "", trigger_type: "schedule", schedule_cron: "", event_name: "login", group_id: "" })
       await load()
     } catch {
-      toast({ title: "Не удалось создать политику", variant: "destructive" })
+      toast({ title: t("scriptPolicies.failedToCreateThe"), variant: "destructive" })
     } finally {
       setSubmitting(false)
     }
@@ -159,7 +163,7 @@ export default function ScriptPolicies() {
       await api.delete(`/script-policies/${id}`)
       setPolicies((prev) => prev.filter((p) => p.id !== id))
     } catch {
-      toast({ title: "Не удалось удалить политику", variant: "destructive" })
+      toast({ title: t("scriptPolicies.failedToDeleteThe"), variant: "destructive" })
     }
   }
 
@@ -168,7 +172,7 @@ export default function ScriptPolicies() {
       await api.patch(`/script-policies/${id}/toggle`, { active })
       setPolicies((prev) => prev.map((p) => p.id === id ? { ...p, is_active: active } : p))
     } catch {
-      toast({ title: "Не удалось изменить статус политики", variant: "destructive" })
+      toast({ title: t("scriptPolicies.failedToChangeThe"), variant: "destructive" })
     }
   }
 
@@ -177,26 +181,26 @@ export default function ScriptPolicies() {
     ? policies.filter((p) => p.name.toLowerCase().includes(q) || p.script_name.toLowerCase().includes(q))
     : policies
 
-  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("scriptPolicies.loading")}</div>
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-foreground">Политики скриптов</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("scriptPolicies.scriptPolicies")}</h1>
         <Button size="sm" onClick={() => setCreatePolicyOpen(true)} disabled={scripts.length === 0}>
           <Plus className="h-4 w-4 mr-1.5" />
-          Новая политика
+          {t("scriptPolicies.newPolicy")}
         </Button>
       </div>
       {scripts.length === 0 && (
-        <p className="text-sm text-muted-foreground">Сначала создайте скрипты в разделе «Скрипты».</p>
+        <p className="text-sm text-muted-foreground">{t("scriptPolicies.createScriptsFirstIn")}</p>
       )}
 
       {/* Поиск — отдельная стеклянная панель, как на «Скриптах»: карте таблицы нужен
           overflow-hidden, и он обрезал бы всплывающие элементы фильтров. */}
       <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
         <Input
-          placeholder="Поиск по названию..."
+          placeholder={t("scriptPolicies.searchByName")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="max-w-xs"
@@ -207,13 +211,13 @@ export default function ScriptPolicies() {
         <Table>
           <TableHeader>
             <TableRow className="border-t-0 hover:bg-transparent">
-              <TableHead className="text-xs">Название</TableHead>
-              <TableHead className="text-xs">Скрипт</TableHead>
-              <TableHead className="text-xs" title="Устройств прошло / не прошло по последнему прогону">Pass / Fail</TableHead>
-              <TableHead className="text-xs">Триггер</TableHead>
-              <TableHead className="text-xs">Назначение</TableHead>
-              <TableHead className="text-xs">Активна</TableHead>
-              <TableHead className="text-xs">Создана</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.name")}</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.script")}</TableHead>
+              <TableHead className="text-xs" title={t("scriptPolicies.devicesPassedFailedOn")}>Pass / Fail</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.trigger")}</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.assignment")}</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.active")}</TableHead>
+              <TableHead className="text-xs">{t("scriptPolicies.created")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -221,7 +225,7 @@ export default function ScriptPolicies() {
             {visiblePolicies.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
-                  {policies.length === 0 ? "Нет политик" : "Ничего не найдено"}
+                  {policies.length === 0 ? t("scriptPolicies.noPolicies") : t("scriptPolicies.nothingFound")}
                 </TableCell>
               </TableRow>
             )}
@@ -234,16 +238,16 @@ export default function ScriptPolicies() {
                 </TableCell>
                 <TableCell className="px-4 py-3">
                   <Badge variant={triggerVariant[p.trigger_type] ?? "default"}>
-                    {triggerLabel[p.trigger_type] ?? p.trigger_type}
+                    {triggerLabel[p.trigger_type] ? t(triggerLabel[p.trigger_type]) : p.trigger_type}
                   </Badge>
                 </TableCell>
                 <TableCell className="px-4 py-3">
                   {p.group_names.length === 0 ? (
                     <Badge
                       variant="secondary"
-                      title="Политика не назначена ни одной группе — она не выполнится. Назначьте группу в разделе «Группы»."
+                      title={t("scriptPolicies.thePolicyIsNot")}
                     >
-                      ⚠ Не назначена
+                      {t("scriptPolicies.unassigned")}
                     </Badge>
                   ) : (
                     <div className="flex flex-wrap gap-1">
@@ -258,7 +262,7 @@ export default function ScriptPolicies() {
                       нейтральной. Зелёный тут читался бы как статус устройства. */}
                   <button
                     type="button"
-                    aria-label={p.is_active ? "Деактивировать политику" : "Активировать политику"}
+                    aria-label={p.is_active ? t("scriptPolicies.deactivateThePolicy") : t("scriptPolicies.activateThePolicy")}
                     onClick={() => handleTogglePolicy(p.id, !p.is_active)}
                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${p.is_active ? "brand-gradient-h" : "bg-input"}`}
                   >
@@ -272,7 +276,7 @@ export default function ScriptPolicies() {
                   <div className="flex items-center gap-3 justify-end">
                     <button
                       type="button"
-                      aria-label="Результаты запусков"
+                      aria-label={t("scriptPolicies.runResults")}
                       onClick={() => openResults(p)}
                       className="text-muted-foreground hover:text-foreground transition-colors"
                     >
@@ -280,7 +284,7 @@ export default function ScriptPolicies() {
                     </button>
                     <button
                       type="button"
-                      aria-label="Удалить политику"
+                      aria-label={t("scriptPolicies.deleteThePolicy")}
                       onClick={() => handleDeletePolicy(p.id)}
                       className="text-muted-foreground hover:text-destructive transition-colors"
                     >
@@ -298,76 +302,76 @@ export default function ScriptPolicies() {
       <Dialog open={createPolicyOpen} onOpenChange={setCreatePolicyOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Новая политика скрипта</DialogTitle>
+            <DialogTitle>{t("scriptPolicies.newScriptPolicy")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="space-y-1.5">
-              <Label>Название</Label>
+              <Label>{t("scriptPolicies.name")}</Label>
               <Input
-                placeholder="Обновление Chrome по расписанию"
+                placeholder={t("scriptPolicies.scheduledChromeUpdate")}
                 value={policyForm.name}
                 onChange={(e) => setPolicyForm({ ...policyForm, name: e.target.value })}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Скрипт</Label>
+              <Label>{t("scriptPolicies.script")}</Label>
               <Select
                 value={policyForm.script_id}
                 onChange={(v) => setPolicyForm({ ...policyForm, script_id: v })}
-                placeholder="Выберите скрипт..."
+                placeholder={t("scriptPolicies.chooseAScript")}
                 options={scripts.map((s) => ({ value: s.id, label: `${s.name} (${s.platform})` }))}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Триггер</Label>
+              <Label>{t("scriptPolicies.trigger")}</Label>
               <Select
                 value={policyForm.trigger_type}
                 onChange={(v) => setPolicyForm({ ...policyForm, trigger_type: v as typeof policyForm.trigger_type })}
                 options={[
-                  { value: "schedule",      label: "По расписанию"         },
-                  { value: "event_trigger", label: "По событию"             },
-                  { value: "on_connect",    label: "При подключении к сети" },
+                  { value: "schedule",      label: t("scriptPolicies.onASchedule")         },
+                  { value: "event_trigger", label: t("scriptPolicies.onAnEvent")             },
+                  { value: "on_connect",    label: t("scriptPolicies.onNetworkConnect") },
                 ]}
               />
             </div>
             {policyForm.trigger_type === "schedule" && (
               <div className="space-y-1.5">
-                <Label>Cron-выражение</Label>
+                <Label>{t("scriptPolicies.cronExpression")}</Label>
                 <Input
                   placeholder="0 9 * * 1-5"
                   value={policyForm.schedule_cron}
                   onChange={(e) => setPolicyForm({ ...policyForm, schedule_cron: e.target.value })}
                 />
-                <p className="text-xs text-muted-foreground">Пример: <code>0 9 * * 1-5</code> — каждый будний день в 9:00</p>
-                <p className="text-xs text-muted-foreground">Время — локальное на устройстве, не серверное.</p>
+                <p className="text-xs text-muted-foreground">{t("scriptPolicies.example")} <code>0 9 * * 1-5</code> {t("scriptPolicies.everyWeekdayAt9")}</p>
+                <p className="text-xs text-muted-foreground">{t("scriptPolicies.theTimeIsLocal")}</p>
               </div>
             )}
             {policyForm.trigger_type === "event_trigger" && (
               <div className="space-y-1.5">
-                <Label>Событие</Label>
+                <Label>{t("scriptPolicies.event")}</Label>
                 <Select
                   value={policyForm.event_name}
                   onChange={(v) => setPolicyForm({ ...policyForm, event_name: v })}
                   options={[
-                    { value: "login",          label: "Вход пользователя"  },
-                    { value: "logout",         label: "Выход пользователя" },
-                    { value: "network_change", label: "Смена сети"         },
+                    { value: "login",          label: t("scriptPolicies.userSignIn")  },
+                    { value: "logout",         label: t("scriptPolicies.userSignOut") },
+                    { value: "network_change", label: t("scriptPolicies.networkChange")         },
                   ]}
                 />
               </div>
             )}
             <div className="space-y-1.5">
-              <Label>Группа устройств</Label>
+              <Label>{t("scriptPolicies.deviceGroup")}</Label>
               <Select
                 value={policyForm.group_id}
                 onChange={(v) => setPolicyForm({ ...policyForm, group_id: v })}
-                placeholder={groups.length === 0 ? "Сначала создайте группу" : "Выберите группу..."}
+                placeholder={groups.length === 0 ? t("scriptPolicies.createAGroupFirst") : t("scriptPolicies.chooseAGroup")}
                 options={groups.map((g) => ({ value: g.id, label: g.name }))}
               />
               <p className="text-xs text-muted-foreground">
                 {policyForm.group_id
-                  ? "Политика будет применяться к устройствам этой группы."
-                  : "⚠ Без группы политика не выполняется. Можно назначить позже в разделе «Группы»."}
+                  ? t("scriptPolicies.thePolicyWillApply")
+                  : t("scriptPolicies.withoutAGroupThe")}
               </p>
             </div>
             <Button
@@ -375,7 +379,7 @@ export default function ScriptPolicies() {
               onClick={handleCreatePolicy}
               disabled={submitting || !policyForm.name || !policyForm.script_id}
             >
-              {submitting ? "Создание..." : "Создать"}
+              {submitting ? t("scriptPolicies.creating") : t("scriptPolicies.create")}
             </Button>
           </div>
         </DialogContent>
@@ -385,13 +389,13 @@ export default function ScriptPolicies() {
       <Dialog open={resultsPolicy !== null} onOpenChange={(o) => { if (!o) setResultsPolicy(null) }}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Результаты запусков: {resultsPolicy?.name}</DialogTitle>
+            <DialogTitle>{t("scriptPolicies.resultsFor", { name: resultsPolicy?.name ?? "" })}</DialogTitle>
           </DialogHeader>
           <div className="pt-2 max-h-[70vh] overflow-auto">
             {resultsLoading ? (
-              <p className="text-sm text-muted-foreground">Загрузка...</p>
+              <p className="text-sm text-muted-foreground">{t("scriptPolicies.loading")}</p>
             ) : results.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Запусков пока не было.</p>
+              <p className="text-sm text-muted-foreground">{t("scriptPolicies.noRunsYet")}</p>
             ) : (
               <div className="space-y-3">
                 {results.map((r) => (
@@ -399,10 +403,10 @@ export default function ScriptPolicies() {
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2">
                         <Badge variant={r.exit_code === 0 ? "success" : "destructive"}>
-                          {r.exit_code === 0 ? "Успех" : `Код ${r.exit_code}`}
+                          {r.exit_code === 0 ? t("scriptPolicies.success") : t("scriptPolicies.exitCode", { code: r.exit_code })}
                         </Badge>
                         <span className="text-sm font-medium text-foreground">{r.device_hostname || r.device_id}</span>
-                        <Badge variant="outline">{triggerLabel[r.trigger] ?? r.trigger}</Badge>
+                        <Badge variant="outline">{triggerLabel[r.trigger] ? t(triggerLabel[r.trigger]) : r.trigger}</Badge>
                       </div>
                       <span className="text-xs text-muted-foreground">{formatDistanceToNow(r.finished_at)}</span>
                     </div>

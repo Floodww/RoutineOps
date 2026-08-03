@@ -65,8 +65,20 @@ func TestHashReportChangesOnAgentVersion(t *testing.T) {
 // расширение switch дешевле молчаливо непокрытого поля.
 func setNonZero(t *testing.T, m protoreflect.Message, fd protoreflect.FieldDescriptor) {
 	t.Helper()
-	if fd.IsList() || fd.IsMap() {
-		t.Fatalf("поле %s: repeated/map в DeviceInfo не ожидалось — расширь setNonZero", fd.Name())
+	if fd.IsMap() {
+		t.Fatalf("поле %s: map в DeviceInfo не ожидался — расширь setNonZero", fd.Name())
+	}
+	// Repeated-поле покрывается одним ненулевым элементом: хэш строится
+	// детерминированным маршалингом всего сообщения, поэтому список влияет на него
+	// так же, как скалярное поле. Строкового списка сейчас ровно один (capabilities);
+	// список другого типа обязан упасть здесь, а не разойтись с хэшем молча.
+	if fd.IsList() {
+		if fd.Kind() != protoreflect.StringKind {
+			t.Fatalf("поле %s: repeated %s не покрыт setNonZero — расширь switch", fd.Name(), fd.Kind())
+		}
+		l := m.Mutable(fd).List()
+		l.Append(protoreflect.ValueOfString("probe"))
+		return
 	}
 	switch fd.Kind() {
 	case protoreflect.StringKind:

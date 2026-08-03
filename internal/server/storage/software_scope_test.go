@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -46,7 +47,7 @@ func TestInventorySoftware_ScopeAndFields(t *testing.T) {
 		t.Fatalf("GetDeviceIDByFingerprint: id=%q err=%v", deviceID, err)
 	}
 
-	_, software, err := db.GetDevice(ctx, deviceID)
+	_, software, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -73,11 +74,11 @@ func TestInventorySoftware_ScopeAndFields(t *testing.T) {
 
 	// Правило запрещённого ПО видит нарушение, и в примере — machine-установка:
 	// из двух совпадений оператору полезнее то, которое можно снять.
-	rule, err := db.CreatePolicyRule(ctx, "telegram", "forbidden", nil, nil)
+	rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "telegram", "forbidden", nil, nil)
 	if err != nil {
 		t.Fatalf("CreatePolicyRule: %v", err)
 	}
-	rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, rule.ID)
+	rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, rule.ID)
 	if err != nil {
 		t.Fatalf("ListSoftwarePolicyDeviceCompliance: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestInventorySoftware_ScopeAndFields(t *testing.T) {
 	if err != nil || userDeviceID == "" {
 		t.Fatalf("GetDeviceIDByFingerprint user: id=%q err=%v", userDeviceID, err)
 	}
-	rows, err = db.ListSoftwarePolicyDeviceCompliance(ctx, rule.ID)
+	rows, err = db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, rule.ID)
 	if err != nil {
 		t.Fatalf("ListSoftwarePolicyDeviceCompliance (2): %v", err)
 	}

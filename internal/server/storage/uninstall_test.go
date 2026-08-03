@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -26,7 +27,7 @@ func activeDeviceWithSoftware(t *testing.T, db *storage.DB, item storage.Softwar
 	t.Helper()
 	fp := "fp-uninst-" + uniq(t)
 	id := enrollDevice(t, db, "host-uninst-"+uniq(t), fp)
-	if err := db.UpdateDeviceStatus(context.Background(), id, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "active"); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
 	seedSoftware(t, db, fp, item)
@@ -117,7 +118,7 @@ func TestCreateUninstallTask_BlockedDeviceRefused(t *testing.T) {
 	db := newDB(t)
 	item := storage.SoftwareItem{Name: "Продукт", UninstallID: "{G}", UninstallMethod: "msi", Scope: "machine"}
 	deviceID := activeDeviceWithSoftware(t, db, item)
-	if err := db.UpdateDeviceStatus(context.Background(), deviceID, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, deviceID, "blocked"); err != nil {
 		t.Fatalf("blocked: %v", err)
 	}
 	_, err := db.CreateUninstallTask(context.Background(), deviceID, item.Name, item.UninstallID, "")

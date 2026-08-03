@@ -14,6 +14,346 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.8.0 — 3 August 2026
+
+Product (server + web) **2.8.0** and agent **2.6.0** — both move: the agent binary changed
+too (capability advertisement in the inventory, accepting an interactive-session
+invitation, a self-update hold while a session is running). Product and agent numbers
+diverging is normal since 2.5.0.
+
+Minor, not a patch: the batch is additive — new endpoints, fields and columns, no breaking
+API changes. The upgrade applies **six migrations** (`062`…`067`); there are no down
+migrations, so a rollback means restoring the backup `update.sh` takes automatically.
+
+**What to check when upgrading.** 🔴 If your installation predates this release, verify
+that the server connects to the database as `mdm_app` and not as the owner: `install.sh`
+used to write a single DSN under the owner, and row-level security does not apply to the
+owner — tenant isolation existed on paper only. Fresh installs fix themselves, existing
+ones — see [`docs/self-hosted-deploy.md`](./docs/self-hosted-deploy.md). Also: if you
+enable the remote desktop, decide up front where session recordings live — there is no
+volume for `SCREEN_DIR` in `docker-compose.prod.yml`, so recreating the container wipes
+them.
+
+### User interface
+
+- **English UI.** The panel is fully translated — screens, dialogs, device status labels,
+  audit action names, relative time and the non-compliance reasons in the report. The
+  switch lives in the sidebar and the choice is remembered; on first visit the language
+  comes from the browser. The compliance report export and the screen use the exact same
+  wording — otherwise there is nothing to reconcile the export against.
+- **Page language attribute.** `<html lang>` was pinned to `en` and never changed even
+  though the default UI is Russian: screen readers read Russian text with English rules
+  and dates were formatted for the wrong locale. The page language now follows the switch.
+- **Translation completeness is guarded by the build, not by eye.** Two gates: the `ru`
+  and `en` dictionaries are compared by key set and for empty values (they drift
+  silently — i18next falls back to Russian, so an English-speaking operator sees a
+  Russian string with no console error), and a second gate hunts for leftover Russian
+  text in sources, separating it from comments. Both were verified by a failing run.
+
+### Agent updates
+
+- **Update channels and canary rollout.** A device group now carries a channel —
+  `stable` (default) or `beta` — and so does a release. A canary group is just a group on
+  `beta`: soak the new version there, then move the release to `stable` and the whole
+  fleet picks it up. Previously a publish went out to the ENTIRE fleet at once, with no
+  way back per device: self-update does not roll back, anti-rollback forbids going
+  backwards, and a bad build could only be fixed by a new version forward — i.e. by
+  rolling out to an already broken fleet.
+- Two rules worth knowing: `beta` is a superset of `stable` (a canary is never older than
+  the fleet), and a device in several groups resolves by maximum — one beta group is
+  enough.
+- **The "Rollout" screen** shows which versions run where, broken down by channel and
+  group; before it, "did it land?" was answered by eyeballing the device list.
+
+### Identity (Enterprise)
+
+- **[Enterprise] SAML providers are configured from the panel.** The SAML login
+  endpoints existed before, but a provider could only be created by inserting a row into
+  the database — so from the outside the capability did not exist. Now: list, create,
+  edit, delete, export of our own SP metadata and a check of the IdP metadata **before**
+  enabling.
+- **[Enterprise] Service tokens gained a scope.** SCIM provisioning is a machine
+  protocol, so the "humans only" gate cannot apply to it — and without a scope any
+  service token with the admin role could create and delete console users, including a
+  token issued for builds or monitoring. SCIM now requires a token issued specifically
+  for SCIM, and such a token goes nowhere else.
+
+### Compliance (Enterprise)
+
+- **[Enterprise] SIEM export is configured and verified from the panel.** A receiver is
+  created in the UI (syslog/CEF or webhook) with a signing secret and an event filter,
+  next to a test-send button and the last delivery status with counters. Previously a
+  wrong address only showed up as events silently not arriving, and silence is
+  indistinguishable from "nothing happened".
+- **[Enterprise] Vulnerabilities are matched by version, not by substring.** The old
+  matcher compared a version to a pattern with "contains", which produced both false
+  positives and misses on any non-standard versioning scheme. Versions are now compared
+  properly, and "could not compare" became a **separate status**: it used to look like
+  "clean", i.e. the report was green where no check happened at all. The card shows whose
+  side it is on: the software version came from the device (fixed by inventory) or the
+  pattern came from the dictionary (fixed by the feed provider).
+
+### Remote desktop (Enterprise, first stage)
+
+- **[Enterprise] Viewing a device screen from the panel.** An operator requests a session
+  from the device page, **stating a reason (mandatory)**, and sees a live picture in the
+  browser. The stream goes agent → server → browser: no new outbound network path, the
+  employee's NAT and firewall are untouched, and the recording is made by the server —
+  the party with no interest in forging it.
+- **Viewing only.** No keyboard, mouse or file transfer in this stage. The Windows secure
+  desktop (login screen, UAC, Ctrl+Alt+Del), Wayland on Linux and a machine with nobody
+  logged in are operating-system ceilings, not missing work; each such refusal is shown
+  to the operator as a distinct reason rather than a blank screen.
+- **A session that leaves no trace is impossible.** The audit record is written in the
+  same transaction as the session: if it fails, there is no session. Every endpoint is
+  restricted to a live human with the admin role — a service token cannot watch an
+  employee. Viewing a recording is a separate revocable grant, and the act of viewing is
+  itself audited.
+- **A session does not survive what should end it:** screen lock, logoff, user switch,
+  the operator closing the tab, revocation of their rights, the device being blocked or
+  decommissioned, an agent self-update, or the duration ceiling — each outcome has its own
+  reason on the session card. A self-update waits for the session to finish (up to half an
+  hour) instead of killing the capture mid-observation.
+- **Recordings are kept for 30 days** and are deleted along with the tenant or when a
+  device is moved — personal data does not travel to a different controller. This is the
+  first unrecoverable artifact in the product: plan disk space, a 20-minute session is
+  tens to hundreds of megabytes.
+- **Field acceptance has not been done on any platform.** The code builds for all three
+  operating systems and is covered by tests, but acceptance on live machines (Windows,
+  Linux/X11, a Mac with screen-recording permission granted) is a separate item, and
+  until then no platform counts as accepted.
+
+### Agent (2.6.0)
+
+- **The agent advertises its capabilities, not just its version.** The server used to
+  infer what a device can do from the version number — but a free build of the same
+  version physically does not contain the remote desktop (files are stripped at build
+  time, not disabled by a flag), so a session would have been dispatched to a machine
+  that cannot run it. The agent now sends a capability list in the inventory, and a task
+  is not created until the device advertises it.
+- **An unknown task still ends in an error, not in silence.** A session invitation
+  arriving at an agent without that capability reports a refusal with a reason code: an
+  operator waiting for frames must see the refusal, not a blank screen.
+- **Self-update no longer interrupts a running session** — the check happens before the
+  download, the hold is capped at half an hour, and the shutdown is graceful.
+- 🔴 **Installers lag one train behind:** the MSI and the macOS package in this release
+  are built as 2.5.9. They are bootstrappers — the agent pulls 2.6.0 itself at the first
+  update check. Version skew across platforms is normal.
+
+### Install and operations
+
+- 🔴 **A fresh install no longer ships with decorative tenant isolation.** `install.sh`
+  wrote a single DSN under the database owner and knew nothing about the application
+  role — and row-level security does not apply to the owner. Which means every new
+  install had tenant isolation on paper only. The installer now sets up two roles: the
+  server connects with a role that cannot bypass RLS, migrations run as the owner.
+  Verified against a live Postgres by a dedicated script.
+- **An invitation now places the person into the tenant they were invited to.** Accepting
+  an invitation created the user in the default tenant regardless of where they were
+  invited.
+- **A device-bound enrollment token enrolls into that device's tenant**, not the default
+  one.
+- **The API specification caught up with reality:** the guard comparing
+  `docs/openapi.yaml` against the routes did not see the whole picture, and 12 endpoints
+  were living undocumented. The spec is complete now, and drift is caught in both
+  directions.
+- **Gates run on push, not on trust:** the enterprise test set and the image build are
+  executed automatically.
+
+## 2.5.9 — 31 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### FileVault (Enterprise)
+
+- **[Enterprise] Disk-encryption setup can now be finished from the admin panel
+  without visiting the machine.** The agent needs the employee's password, and a silent
+  install has no terminal to ask from, so setup was quietly skipped and the only way
+  left was walking up to every Mac. An operator now presses a button on the device
+  card, the employee gets a dialog with the stated reason and types the password, and
+  the service finishes the setup. The password stays on the machine: only the encrypted
+  recovery key and service password leave it.
+- **[Enterprise] The task can no longer end in a silent skip.** If the employee
+  cancelled, did not answer within ten minutes, nobody is at the machine, or encryption
+  is off — the operator sees exactly that reason instead of "completed".
+
+### Deployment
+
+- **[Enterprise] The escrow-recipient publishing command no longer takes the
+  fingerprint on faith.** A typo produced a signed record that agents silently
+  rejected: the rotation never happened while the publication looked successful. The
+  fingerprint is now derived from the key itself, and a mismatch with a manually passed
+  one cancels the publication.
+
+- **[Enterprise] The self-update channel can no longer hand out an agent of the wrong
+  edition.** On an enterprise installation, publishing the macOS agent from the
+  repository is now rejected: the binary there is the free build, where FileVault is not
+  disabled but absent, and a Mac that updated to it would refuse encryption commands
+  forever. The enterprise binary comes from the private delivery channel
+  (`DARWIN_AGENT`), and Windows/Linux builds inherit the installation's edition. The
+  reverse case — a free installation with an enterprise build — is rejected too.
+
+## 2.5.8 — 30 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### Tasks
+
+- **A task of an unknown type is no longer reported as done.** When the server sent a
+  task type this agent version does not know, the agent ran an empty script and
+  reported success — the operator saw "completed" while nothing happened on the
+  device. Such a task now fails with "task type is not supported by this agent version
+  (version) — the task was NOT executed", so a lagging agent is visible immediately
+  instead of looking like finished work.
+
+### FileVault (Enterprise)
+
+- **[Enterprise] The escrow recipient can now be rotated without rebuilding the agent.** The
+  recipient used to be baked in at build time, so changing it meant a release and a
+  fleet-wide rollout. The agent now takes the recipient from the server, verifying the
+  release-key signature and rejecting rollbacks to an older publication; the baked-in
+  recipient remains the fallback, and the accepted record is cached so escrow keeps
+  working offline.
+
+## 2.5.7 — 30 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+On macOS this release is also the first to carry the 2.5.6 changes: the mac build lags
+a version behind because it is produced on the maintainer's Mac, not on the server.
+
+### Updates
+
+- **The agent checks for updates right after the service starts, not six hours
+  later.** The first check used to wait a full interval
+  (`ROUTINEOPS_UPDATE_INTERVAL`, 6h by default), so a fresh release reached a machine
+  up to six hours after a service restart or reboot: the agent was alive, the link was
+  up, the version simply did not move. The check now runs shortly after start, with a
+  random delay of up to `min(interval/10, 5 min)` so a large fleet powering on at once
+  does not fetch the update simultaneously. The service log line is `selfupdate:
+  первая проверка после старта`.
+
+## 2.5.6 — 30 July 2026
+
+Agent release. The product (server + web) is unchanged. Published for Windows and
+Linux; on macOS these changes arrive with 2.5.7 (the mac build lagged a version).
+
+### Linux
+
+- **Lock screen on Linux.** Previously "Lock" on Linux only persisted the state: the
+  device counted as locked while nothing happened on the employee's screen. The
+  service now raises a full-screen lock with a password field in the active graphical
+  session, following the same model as Windows and macOS (only the service may
+  unlock; the window merely hands it the password). The window covers the screen,
+  grabs keyboard and pointer, re-raises itself every second and disables screen
+  blanking.
+- **Wayland sessions are honestly unsupported.** Only the compositor can cover the
+  screen and grab input under Wayland, so the agent skips the overlay and says so in
+  the log instead of faking protection. Details and limits:
+  [docs/lock-linux.md](docs/lock-linux.md).
+
+## 2.5.5 — 29 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### Security
+
+- **Hardening the Windows certs directory now also covers files already on disk.**
+  In 2.5.4 the protected DACL was applied only to the directory. Ordinary users
+  have bypass-traverse privilege by default, so denying access to the directory
+  did not stop them opening `agent.key` by full path while the file itself still
+  carried an inherited Users RX ACE. Confirmed on a test bench after the
+  2.5.4 update: `icacls` on the directory failed, but a normal user could still
+  read the key. Service start now applies the same admin-only DACL to existing
+  files inside certs.
+
+## 2.5.4 — 29 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### Security
+
+- **The mTLS private key on Windows is no longer readable by ordinary local users.**
+  With `cert-source=file` (the MSI default) the key is a file under the install
+  directory. Nobody set permissions on it: the installer inherited the ACL from
+  `C:\Program Files`, and mode `0600` on Windows only sets the read-only flag. Any
+  local user could copy the key+certificate pair — and per ADR-1 that pair *is* the
+  device identity.
+
+  The agent now hardens the certs directory with an admin-only DACL (SYSTEM +
+  Administrators) before enrollment writes the key, and again on every service
+  start. Outside Windows the directory mode is `0700`. Failure during enroll
+  aborts installation; on service start it logs ERROR and continues, so a bad ACL
+  on one machine does not leave the fleet unmanaged.
+
+## 2.5.3 — 28 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### Temporary administrator rights
+
+- **A request for a user who is already an administrator no longer stalls.** When asked
+  to add someone who is already in the group, Windows answers with an error — and the
+  agent read that as a failed grant: the request stayed unmarked and no session evidence
+  was collected at all. That answer now means "the rights are already in place": the
+  request closes normally and the session is accounted for like any other.
+
+  The decision is made on the fact — the agent checks actual group membership instead of
+  parsing the error message. The wording differs per system language, and on Russian
+  Windows text parsing has failed us before.
+
+---
+
+## 2.5.2 — 28 July 2026
+
+Agent release. The product (server + web) is unchanged.
+
+### Temporary administrator rights
+
+- **A temporary grant no longer becomes permanent after an agent restart.** The state of
+  granted rights lived only in the service's memory. After a restart — an agent update, a
+  reboot, a crash — the agent forgot about the request, saw the user already in the
+  administrators group and recorded that as "they were an administrator all along". The
+  request then expired without the rights ever being revoked: as far as the agent was
+  concerned, there was nothing to revoke. The only way to notice was to log into the
+  machine and look.
+
+  The session trace now survives both a service restart and a reboot. A second change
+  follows from that: **if the trace cannot be written, the rights are not granted at
+  all.** Refusing the grant is better than leaving rights on a machine that nobody will
+  know about after a restart.
+
+- **Rights no longer drop because a probe failed.** To know who the rights belong to, the
+  agent determines the logged-in user. That probe sometimes does not answer — the OS
+  service is busy, the session is switching. An empty answer used to read as "nobody is at
+  the machine", and the rights were revoked with the reason "user logged out": someone in
+  the middle of their work lost administrator, and the log kept a false reason. "Unknown"
+  and "nobody" are now distinguished: on a failed probe the rights are held, while the
+  request's expiry is checked independently and still revokes them exactly as before.
+
+  On Windows the same place fixes a hidden defect: when the probe failed, the account the
+  service runs under was substituted — a non-empty but knowingly wrong answer.
+
+### Under the hood
+
+- Administrator-session accountability is now complete on the device side: the agent
+  captures a snapshot of installed software and service definitions at the moment rights
+  are granted, computes the session delta against it and reports that delta to the
+  server — periodically, and always when the rights are revoked. Collection and
+  reporting are **off** until the server enables them, so device behaviour is unchanged
+  for now. Whether to collect is decided once, when rights are granted: flipping the
+  server setting does not change sessions already in flight, in either direction —
+  otherwise turning it off mid-session would look like missing evidence, and turning it
+  on like evidence with nothing to compare against.
+
+  Evidence reports never crowd out anything else: in the delivery queue they yield to
+  security signals and lock statuses rather than displacing them. Reports are
+  cumulative, so a dropped intermediate one is caught up by the next; the session's
+  final report, if the queue will not take it, is sent directly — it gets no second
+  chance.
+
+---
+
 ## 2.7.0 — 27 July 2026
 
 ### Devices

@@ -40,7 +40,7 @@ func TestRunNoGoroutineLeakAtScale(t *testing.T) {
 			interval:    5 * time.Millisecond,
 			log:         quietLog(),
 			priv:        &fakePriv{},
-			consoleUser: func() string { return "alice" },
+			consoleUser: func() (string, bool) { return "alice", true },
 			fetch: func(context.Context) (*pb.FetchAdminStatusResponse, error) {
 				return &pb.FetchAdminStatusResponse{}, nil // активной заявки нет
 			},

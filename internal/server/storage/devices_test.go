@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ func TestGetDevice_Found(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-get-%s", uniq(t)), "macos")
 
-	got, sw, err := db.GetDevice(context.Background(), d.ID)
+	got, sw, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestGetDevice_Found(t *testing.T) {
 
 func TestGetDevice_NotFound_ReturnsNil(t *testing.T) {
 	db := newDB(t)
-	got, _, err := db.GetDevice(context.Background(), "00000000-0000-0000-0000-000000000000")
+	got, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -44,10 +45,10 @@ func TestUpdateDeviceStatus(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-status-%s", uniq(t)), "macos")
 
-	if err := db.UpdateDeviceStatus(context.Background(), d.ID, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, d.ID, "blocked"); err != nil {
 		t.Fatalf("UpdateDeviceStatus: %v", err)
 	}
-	got, _, err := db.GetDevice(context.Background(), d.ID)
+	got, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -60,14 +61,14 @@ func TestDeleteDevice_RemovesAndReports(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-del-%s", uniq(t)), "windows")
 
-	found, err := db.DeleteDevice(context.Background(), d.ID)
+	found, err := db.DeleteDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("DeleteDevice: %v", err)
 	}
 	if !found {
 		t.Fatal("found = false, want true для существующего устройства")
 	}
-	got, _, err := db.GetDevice(context.Background(), d.ID)
+	got, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetDevice после удаления: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestDeleteDevice_RemovesAndReports(t *testing.T) {
 
 func TestDeleteDevice_NotFound(t *testing.T) {
 	db := newDB(t)
-	found, err := db.DeleteDevice(context.Background(), "00000000-0000-0000-0000-000000000000")
+	found, err := db.DeleteDevice(context.Background(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		t.Fatalf("DeleteDevice: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestDeleteDevice_RevokesFingerprint(t *testing.T) {
 	if revoked, _ := db.IsFingerprintRevoked(context.Background(), fp); revoked {
 		t.Fatal("fingerprint отозван ДО удаления — не должен")
 	}
-	if _, err := db.DeleteDevice(context.Background(), id); err != nil {
+	if _, err := db.DeleteDevice(context.Background(), tenancy.DefaultTenantID, id); err != nil {
 		t.Fatalf("DeleteDevice: %v", err)
 	}
 	if revoked, err := db.IsFingerprintRevoked(context.Background(), fp); err != nil || !revoked {
@@ -141,7 +142,7 @@ func enrollDevice(t *testing.T, db *storage.DB, hostname, fp string) string {
 	t.Helper()
 	d := mustCreateDevice(t, db, hostname, "macos")
 	tok := fmt.Sprintf("tok-%s", uniq(t))
-	if err := db.CreateEnrollmentToken(context.Background(), d.ID, tok, time.Now().Add(time.Hour)); err != nil {
+	if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateEnrollmentToken: %v", err)
 	}
 	et, err := db.GetEnrollmentToken(context.Background(), tok)
@@ -186,7 +187,7 @@ func TestUpsertDeviceHeartbeat_PromotesPendingToActive(t *testing.T) {
 	fp := fmt.Sprintf("fp-pending-%s", uniq(t))
 	id := enrollDevice(t, db, fmt.Sprintf("host-pending-%s", uniq(t)), fp)
 
-	if err := db.UpdateDeviceStatus(context.Background(), id, "pending"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "pending"); err != nil {
 		t.Fatalf("UpdateDeviceStatus: %v", err)
 	}
 	if err := db.UpsertDeviceHeartbeat(context.Background(), storageHeartbeatData(fp, "agent-pd", "agent-pd", "1.2.3.4")); err != nil {
@@ -207,7 +208,7 @@ func TestUpsertDeviceHeartbeat_KeepsBlocked(t *testing.T) {
 	fp := fmt.Sprintf("fp-blocked-%s", uniq(t))
 	id := enrollDevice(t, db, fmt.Sprintf("host-blocked-%s", uniq(t)), fp)
 
-	if err := db.UpdateDeviceStatus(context.Background(), id, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "blocked"); err != nil {
 		t.Fatalf("UpdateDeviceStatus: %v", err)
 	}
 	if err := db.UpsertDeviceHeartbeat(context.Background(), storageHeartbeatData(fp, "agent-b", "agent-b", "1.2.3.4")); err != nil {
@@ -253,7 +254,7 @@ func TestUpsertInventory_UpdatesAndReplacesSoftware(t *testing.T) {
 		t.Fatalf("UpsertInventory: %v", err)
 	}
 
-	got, sw, err := db.GetDevice(context.Background(), deviceID)
+	got, sw, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestUpsertInventory_UpdatesAndReplacesSoftware(t *testing.T) {
 	if err := db.UpsertInventory(context.Background(), inv2); err != nil {
 		t.Fatalf("UpsertInventory (replace): %v", err)
 	}
-	_, sw2, err := db.GetDevice(context.Background(), deviceID)
+	_, sw2, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice after replace: %v", err)
 	}
@@ -291,7 +292,7 @@ func TestUpsertInventory_PersistsAgentVersion(t *testing.T) {
 	if err := db.UpsertInventory(context.Background(), storageInventoryDataV(fp, "ver-host", "macos", "14.0", "2.3.0", nil)); err != nil {
 		t.Fatalf("UpsertInventory: %v", err)
 	}
-	got, _, err := db.GetDevice(context.Background(), deviceID)
+	got, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestUpsertInventory_PersistsAgentVersion(t *testing.T) {
 	if err := db.UpsertInventory(context.Background(), storageInventoryDataV(fp, "ver-host", "macos", "14.1", "", nil)); err != nil {
 		t.Fatalf("UpsertInventory (empty version): %v", err)
 	}
-	got2, _, err := db.GetDevice(context.Background(), deviceID)
+	got2, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -334,7 +335,7 @@ func TestUpsertInventory_ExtendedFields(t *testing.T) {
 	if err := db.UpsertInventory(ctx, full); err != nil {
 		t.Fatalf("UpsertInventory (full): %v", err)
 	}
-	got, _, err := db.GetDevice(ctx, deviceID)
+	got, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -363,7 +364,7 @@ func TestUpsertInventory_ExtendedFields(t *testing.T) {
 	if err := db.UpsertInventory(ctx, empty); err != nil {
 		t.Fatalf("UpsertInventory (empty): %v", err)
 	}
-	got2, _, err := db.GetDevice(ctx, deviceID)
+	got2, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice after empty: %v", err)
 	}
@@ -383,7 +384,7 @@ func TestUpsertInventory_ExtendedFields(t *testing.T) {
 	if err := db.UpsertInventory(ctx, big); err != nil {
 		t.Fatalf("UpsertInventory (boot_time ≥ 2^31): %v", err)
 	}
-	got3, _, err := db.GetDevice(ctx, deviceID)
+	got3, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice after big boot_time: %v", err)
 	}
@@ -421,7 +422,7 @@ func TestUpsertInventory_LegacyFieldsAreSticky(t *testing.T) {
 	if err := db.UpsertInventory(ctx, degraded); err != nil {
 		t.Fatalf("UpsertInventory (degraded): %v", err)
 	}
-	got, _, err := db.GetDevice(ctx, deviceID)
+	got, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -450,7 +451,7 @@ func TestUpsertInventory_LegacyFieldsAreSticky(t *testing.T) {
 	if err := db.UpsertInventory(ctx, upgraded); err != nil {
 		t.Fatalf("UpsertInventory (upgraded): %v", err)
 	}
-	got2, _, err := db.GetDevice(ctx, deviceID)
+	got2, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice after upgrade: %v", err)
 	}
@@ -462,7 +463,7 @@ func TestUpsertInventory_LegacyFieldsAreSticky(t *testing.T) {
 	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "sticky-host", "sticky-host", "")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat (empty ip): %v", err)
 	}
-	got3, _, err := db.GetDevice(ctx, deviceID)
+	got3, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, deviceID)
 	if err != nil {
 		t.Fatalf("GetDevice after empty-ip heartbeat: %v", err)
 	}
@@ -503,7 +504,7 @@ func TestListEnrolledDevices_Search(t *testing.T) {
 
 	found := func(query string) bool {
 		t.Helper()
-		devices, _, err := db.ListEnrolledDevices(ctx, query, "", 0, 0)
+		devices, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, query, "", 0, 0)
 		if err != nil {
 			t.Fatalf("ListEnrolledDevices(%q): %v", query, err)
 		}
@@ -544,7 +545,7 @@ func TestListEnrolledDevices_Search(t *testing.T) {
 	}
 
 	// Пустой запрос = весь парк.
-	all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
+	all, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(\"\"): %v", err)
 	}
@@ -560,23 +561,23 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-filter-"+suffix, "#aabbcc")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-filter-"+suffix, "#aabbcc", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
-	empty, err := db.CreateDeviceGroup(ctx, "grp-filter-empty-"+suffix, "")
+	empty, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-filter-empty-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup empty: %v", err)
 	}
 
 	member := activeDevice(t, db, "fmember-"+suffix, "Windows 11")
 	activeDevice(t, db, "foutsider-"+suffix, "Windows 11")
-	if err := db.AddDeviceToGroup(ctx, member, group.ID); err != nil {
+	if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, member, group.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
 
 	// Пустой groupID — весь парк, включая устройство вне группы.
-	all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
+	all, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(all): %v", err)
 	}
@@ -585,7 +586,7 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	}
 
 	// Реальная группа — только её члены.
-	inGroup, _, err := db.ListEnrolledDevices(ctx, "", group.ID, 0, 0)
+	inGroup, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", group.ID, 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices(group): %v", err)
 	}
@@ -594,14 +595,14 @@ func TestListEnrolledDevices_GroupFilter(t *testing.T) {
 	}
 
 	// Группа без членов — пусто, а не «весь парк».
-	if got, _, err := db.ListEnrolledDevices(ctx, "", empty.ID, 0, 0); err != nil {
+	if got, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", empty.ID, 0, 0); err != nil {
 		t.Fatalf("ListEnrolledDevices(empty group): %v", err)
 	} else if len(got) != 0 {
 		t.Errorf("пустая группа вернула %d устройств, want 0", len(got))
 	}
 
 	// Кривой UUID из URL сравнивается как group_id::text: пустая выдача, а не 22P02 → 500.
-	if got, _, err := db.ListEnrolledDevices(ctx, "", "не-uuid-вовсе", 0, 0); err != nil {
+	if got, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", "не-uuid-вовсе", 0, 0); err != nil {
 		t.Errorf("кривой group_id: err = %v, want nil", err)
 	} else if len(got) != 0 {
 		t.Errorf("кривой group_id вернул %d устройств, want 0", len(got))
@@ -617,11 +618,11 @@ func TestListEnrolledDevices_AttachesGroups(t *testing.T) {
 
 	// Имена подобраны так, чтобы алфавитный порядок отличался от порядка вставки:
 	// Groups сортируется по имени группы, а не по тому, куда устройство добавили раньше.
-	zeta, err := db.CreateDeviceGroup(ctx, "zeta-"+suffix, "#0000ff")
+	zeta, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "zeta-"+suffix, "#0000ff", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup zeta: %v", err)
 	}
-	alpha, err := db.CreateDeviceGroup(ctx, "alpha-"+suffix, "#ff0000")
+	alpha, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "alpha-"+suffix, "#ff0000", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup alpha: %v", err)
 	}
@@ -629,12 +630,12 @@ func TestListEnrolledDevices_AttachesGroups(t *testing.T) {
 	both := activeDevice(t, db, "gboth-"+suffix, "Windows 11")
 	lonely := activeDevice(t, db, "glonely-"+suffix, "Windows 11")
 	for _, g := range []string{zeta.ID, alpha.ID} {
-		if err := db.AddDeviceToGroup(ctx, both, g); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, both, g); err != nil {
 			t.Fatalf("AddDeviceToGroup %s: %v", g, err)
 		}
 	}
 
-	devices, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
+	devices, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("ListEnrolledDevices: %v", err)
 	}
@@ -667,16 +668,16 @@ func TestGetDevice_AttachesGroups(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-card-"+suffix, "#00ff00")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-card-"+suffix, "#00ff00", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
 	dev := mustCreateDevice(t, db, "card-host-"+suffix, "windows")
-	if err := db.AddDeviceToGroup(ctx, dev.ID, group.ID); err != nil {
+	if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, dev.ID, group.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
 
-	got, _, err := db.GetDevice(ctx, dev.ID)
+	got, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, dev.ID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -689,7 +690,7 @@ func TestGetDevice_AttachesGroups(t *testing.T) {
 
 	// Устройство без групп — [] , не null.
 	solo := mustCreateDevice(t, db, "solo-host-"+suffix, "windows")
-	gotSolo, _, err := db.GetDevice(ctx, solo.ID)
+	gotSolo, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, solo.ID)
 	if err != nil {
 		t.Fatalf("GetDevice solo: %v", err)
 	}

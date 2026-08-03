@@ -14,7 +14,7 @@ import (
 // токен энролла/receipt переживали бы снос без единого сигнала (симптом
 // неотличим от исходного бага). Тест без build-тега — сверка на любом `go test`.
 func TestEnrollArtifactsContract(t *testing.T) {
-	root := filepath.Join("..", "..", "..")
+	root := skipOutsideRepo(t)
 
 	checks := []struct {
 		script string

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestAPIToken_ExpiredRejected(t *testing.T) {
 	_ = authToken(t, rtr, db) // заводит пользователя, от чьего имени выпускаем
 
 	ctx := context.Background()
-	user, err := db.GetUserByEmail(ctx, "admin_"+t.Name()+"@test.com")
+	user, err := db.GetUserByEmailInTenant(ctx, tenancy.DefaultTenantID, "admin_"+t.Name()+"@test.com")
 	if err != nil {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestAPIToken_ExpiredRejected(t *testing.T) {
 		t.Fatalf("NewAPITokenSecret: %v", err)
 	}
 	past := time.Now().Add(-time.Hour)
-	if _, err := db.CreateAPIToken(ctx, "expired", "it_admin", user.ID, secret, &past); err != nil {
+	if _, err := db.CreateAPIToken(ctx, tenancy.DefaultTenantID, "expired", "it_admin", "", user.ID, secret, &past); err != nil {
 		t.Fatalf("CreateAPIToken: %v", err)
 	}
 
@@ -300,7 +301,7 @@ func TestAPIToken_CannotInviteUsers(t *testing.T) {
 		t.Errorf("в отказе не должно быть приглашения: %s", w.Body)
 	}
 	// Учётной записи возникнуть не должно — иначе цепочка живёт, несмотря на 403.
-	if u, err := db.GetUserByEmail(context.Background(), "attacker@evil.tld"); err == nil && u != nil {
+	if u, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "attacker@evil.tld"); err == nil && u != nil {
 		t.Error("приглашение всё-таки создало пользователя")
 	}
 }

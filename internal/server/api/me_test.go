@@ -14,15 +14,20 @@ func TestMe_ReturnsCurrentUser(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /me: %d %s", w.Code, w.Body)
 	}
-	var m map[string]string
+	// map[string]any, а не map[string]string: с ADR-7 в /me появилось булево
+	// is_provider_admin — надзор больше не выражается ролью.
+	var m map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
 	if m["role"] != "it_admin" {
-		t.Errorf("role = %q, want it_admin", m["role"])
+		t.Errorf("role = %v, want it_admin", m["role"])
 	}
 	if m["email"] == "" || m["id"] == "" {
 		t.Errorf("пустые поля идентичности: %+v", m)
+	}
+	if m["is_provider_admin"] != false {
+		t.Errorf("is_provider_admin = %v, want false у обычного админа тенанта", m["is_provider_admin"])
 	}
 }
 

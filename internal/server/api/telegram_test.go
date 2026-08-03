@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 func TestGetTelegramStatus_NotLinked_Returns200(t *testing.T) {
@@ -35,7 +37,7 @@ func TestGetTelegramStatus_Linked_Returns200(t *testing.T) {
 
 	// Set telegram_chat_id for the user created by authToken
 	email := "admin_" + t.Name() + "@test.com"
-	user, err := db.GetUserByEmail(context.Background(), email)
+	user, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, email)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ElementType, type CSSProperties } from "react"
+import { useTranslation } from "react-i18next"
 import { useNavigate } from "react-router-dom"
 import { Monitor, FileCode2, Shield, Bell, ChevronRight, ShieldAlert, KeyRound, UserCog } from "lucide-react"
 import api, { Device, Script, PolicyRule, Alert, DEVICE_STATUS } from "@/lib/api"
@@ -19,92 +20,24 @@ const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
 // Счётчик читается «Активных: 12», а бейдж на карточке — «Активен». Одна карта на оба
 // падежа звучала бы криво в одном из мест, поэтому здесь только форма для счётчиков;
 // цвет и порядок по-прежнему берутся из общей DEVICE_STATUS.
+// Значения — КЛЮЧИ словаря: t() на уровне модуля недоступен, перевод берётся в
+// компоненте (тот же приём, что в Login и Profile).
 const STATUS_PLURAL: Record<string, string> = {
-  active:           "Активных",
-  enrolled:         "Зарегистрированных",
-  pending:          "Ожидающих",
-  pending_approval: "Ожидают одобрения",
-  rejected:         "Отклонённых",
-  blocked:          "Заблокированных",
-  decommissioned:   "Выведенных из эксплуатации",
+  active:           "dashboard.statusActive",
+  enrolled:         "dashboard.statusEnrolled",
+  pending:          "dashboard.statusPending",
+  pending_approval: "dashboard.statusPendingApproval",
+  rejected:         "dashboard.statusRejected",
+  blocked:          "dashboard.statusBlocked",
+  decommissioned:   "dashboard.statusDecommissioned",
 }
 
-const ACTION_LABELS: Record<string, string> = {
-  block_device:          "заблокировал устройство",
-  unblock_device:        "разблокировал устройство",
-  approve_admin_request: "одобрил заявку на права",
-  reject_admin_request:  "отклонил заявку на права",
-  revoke_admin_request:  "отозвал права",
-  create_device:         "добавил устройство",
-  delete_device:         "удалил устройство",
-  approve_device:        "одобрил устройство",
-  reject_device:         "отклонил устройство",
-  approve_pending_bulk:  "одобрил очередь энроллмента",
-  reject_pending_bulk:   "отклонил очередь энроллмента",
-  create_bulk_token:     "выпустил массовый токен",
-  decommission_device:   "вывел устройство из эксплуатации",
-  reboot_device:         "перезагрузил устройство",
-  reboot_group:          "перезагрузил группу устройств",
-  create_api_token:      "выпустил API-токен",
-  revoke_api_token:      "отозвал API-токен",
-  reenroll_device:       "перерегистрировал устройство",
-  lock_device:           "заблокировал экран устройства",
-  unlock_device:         "разблокировал экран устройства",
-  create_script:         "создал скрипт",
-  update_script:         "изменил скрипт",
-  delete_script:         "удалил скрипт",
-  create_policy:         "создал политику",
-  delete_policy:         "удалил политику",
-  run_script:            "запустил скрипт",
-  run_script_on_group:   "запустил скрипт на группе",
-  create_script_policy:  "создал скрипт-политику",
-  delete_script_policy:  "удалил скрипт-политику",
-  enable_script_policy:  "включил скрипт-политику",
-  disable_script_policy: "выключил скрипт-политику",
-  acknowledge_alert:     "подтвердил алерт",
-  login:                 "вошёл в систему",
-  logout:                "вышел из системы",
-  login_failed:          "неудачная попытка входа",
-  change_password:       "сменил пароль",
-  password_reset_requested: "запросил сброс пароля",
-  password_reset:        "сбросил пароль",
-  invite_user:           "пригласил пользователя",
-  accept_invite:         "принял приглашение",
-  create_device_group:   "создал группу устройств",
-  update_device_group:   "изменил группу устройств",
-  delete_device_group:   "удалил группу устройств",
-  add_device_to_group:   "добавил устройство в группу",
-  remove_device_from_group: "убрал устройство из группы",
-  assign_policy_to_group:   "назначил группе политику",
-  unassign_policy_from_group: "снял с группы политику",
-  assign_software_policy_to_group:   "назначил группе политику ПО",
-  unassign_software_policy_from_group: "снял с группы политику ПО",
-}
 
 // Таксономия событий ленты: security должно цепляться взглядом сразу,
 // остальные категории различаются иконкой и сдержанным цветовым акцентом.
-type EventCategory = "security" | "auth" | "admin" | "device" | "content"
 
-const ACTION_CATEGORY: Record<string, EventCategory> = {
-  login_failed: "security", block_device: "security", lock_device: "security",
-  login: "auth", logout: "auth", change_password: "auth",
-  password_reset: "auth", password_reset_requested: "auth",
-  invite_user: "admin", accept_invite: "admin",
-  approve_admin_request: "admin", reject_admin_request: "admin", revoke_admin_request: "admin",
-  create_device: "device", delete_device: "device", reenroll_device: "device",
-  unblock_device: "device", unlock_device: "device",
-  // Выпуск токена и одобрение — выдача доступа к парку, это security, а не «контент»:
-  // без явной категории они падали в content и рисовались нейтральной иконкой.
-  create_bulk_token: "security", approve_device: "security", approve_pending_bulk: "security",
-  create_api_token: "security", revoke_api_token: "security",
-  reject_device: "device", reject_pending_bulk: "device", decommission_device: "device",
-  reboot_device: "device", reboot_group: "device",
-  // Запуск скрипта — исполнение кода на устройстве/парке, не правка контента.
-  run_script: "device", run_script_on_group: "device",
-  create_device_group: "device", update_device_group: "device", delete_device_group: "device",
-  add_device_to_group: "device", remove_device_from_group: "device",
-  // всё остальное (скрипты/политики/алерты) — content по умолчанию
-}
+
+import { actionCategory, actionLabel, hiddenFromFeed, type EventCategory } from "@/lib/auditActions"
 
 const CATEGORY_STYLE: Record<EventCategory, { icon: ElementType; fg: string; bg: string }> = {
   // red-700 в светлой теме: red-500 на белом даёт 3.57:1 — ниже AA для text-xs.
@@ -158,6 +91,7 @@ function osFamily(os: string): "macOS" | "Windows" | "Linux" {
 
 
 export default function Dashboard() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [devices, setDevices]   = useState<Device[]>([])
   const [scripts, setScripts]   = useState<Script[]>([])
@@ -179,11 +113,13 @@ export default function Dashboard() {
       setDevices(d.data ?? [])
       setScripts(s.data ?? [])
       setPolicies(p.data ?? [])
-      setActivity(a.data ?? [])
+      // Фильтруем ЗДЕСЬ, а не при отрисовке: иначе «Нет событий» не показывалось бы
+      // на странице, где все пришедшие записи скрыты, — лента выглядела бы сломанной.
+      setActivity((a.data ?? []).filter((e) => !hiddenFromFeed(e.action)))
       setAlerts(al.data ?? [])
     }).catch(() => {
       setLoadFailed(true)
-      toast({ title: "Не удалось загрузить данные", variant: "destructive" })
+      toast({ title: t("dashboard.loadFailed"), variant: "destructive" })
     }).finally(() => setLoading(false))
   }, [])
 
@@ -200,7 +136,7 @@ export default function Dashboard() {
   const statusRows = Object.entries(statusCounts)
     .sort((a, b) => statusOrder.indexOf(a[0]) - statusOrder.indexOf(b[0]))
     .map(([status, count]) => ({
-      label: STATUS_PLURAL[status] ?? DEVICE_STATUS[status as keyof typeof DEVICE_STATUS]?.label ?? status,
+      label: STATUS_PLURAL[status] ? t(STATUS_PLURAL[status]) : DEVICE_STATUS[status as keyof typeof DEVICE_STATUS]?.label ?? status,
       dot: DEVICE_STATUS[status as keyof typeof DEVICE_STATUS]?.dot ?? "bg-muted-foreground/40",
       count,
     }))
@@ -220,12 +156,12 @@ export default function Dashboard() {
   const totalDevices = Math.max(devices.length, 1)
 
   if (loading) {
-    return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+    return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("common.loading")}</div>
   }
 
   return (
     <div className="flex flex-col gap-5">
-      <h1 className="text-xl font-semibold text-foreground">Обзор</h1>
+      <h1 className="text-xl font-semibold text-foreground">{t("dashboard.title")}</h1>
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -233,10 +169,10 @@ export default function Dashboard() {
             (красно-оранжевая колонка и цифра). Нулевые счётчики превращаем в CTA —
             три нуля подряд читаются как «заброшенный продукт». */}
         {[
-          { label: "Всего устройств", value: devices.length, icon: Monitor,   sub: `${online} онлайн`, cta: "Подключить устройство", onClick: () => navigate("/devices")  },
-          { label: "Скриптов",        value: scripts.length,  icon: FileCode2, sub: "в библиотеке",     cta: "Добавить скрипт",       onClick: () => navigate("/scripts")  },
-          { label: "Политик",         value: policies.length, icon: Shield,    sub: "правил ПО",        cta: "Добавить политику",     onClick: () => navigate("/policies") },
-          { label: "Алертов",         value: unackedAlerts,   icon: Bell,      sub: "неподтверждённых", cta: "",                      onClick: () => navigate("/alerts"), alert: true },
+          { label: t("dashboard.totalDevices"), value: devices.length, icon: Monitor,   sub: t("dashboard.online", { count: online }), cta: t("dashboard.connectDevice"), onClick: () => navigate("/devices")  },
+          { label: t("dashboard.scripts"),        value: scripts.length,  icon: FileCode2, sub: t("dashboard.inLibrary"),     cta: t("dashboard.addScript"),       onClick: () => navigate("/scripts")  },
+          { label: t("dashboard.policies"),         value: policies.length, icon: Shield,    sub: t("dashboard.softwareRules"),        cta: t("dashboard.addPolicy"),     onClick: () => navigate("/policies") },
+          { label: t("dashboard.alerts"),         value: unackedAlerts,   icon: Bell,      sub: t("dashboard.unacknowledged"), cta: "",                      onClick: () => navigate("/alerts"), alert: true },
         ].map(({ label, value, icon: Icon, sub, cta, onClick, alert }) => (
           <SpotlightCard
             as="button"
@@ -272,10 +208,10 @@ export default function Dashboard() {
         {/* Left: Devices by OS + status breakdown */}
         <div className="flex flex-col gap-5">
           <div className="glass px-5 py-[18px]">
-            <h2 className="text-[15px] font-semibold text-foreground">Устройства по ОС</h2>
-            <p className="text-xs text-muted-foreground mb-4">Всего {devices.length}</p>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("dashboard.byOS")}</h2>
+            <p className="text-xs text-muted-foreground mb-4">{t("dashboard.totalOf", { count: devices.length })}</p>
             {osEntries.length === 0 ? (
-              <p className="text-xs text-muted-foreground">Нет данных</p>
+              <p className="text-xs text-muted-foreground">{t("common.none")}</p>
             ) : (
               <div className="flex flex-col gap-3.5">
                 {osEntries.map(([os, count]) => (
@@ -303,11 +239,11 @@ export default function Dashboard() {
 
           {/* Status breakdown */}
           <div className="glass px-5 py-[18px]">
-            <h2 className="text-[15px] font-semibold text-foreground">Статусы</h2>
-            <p className="text-xs text-muted-foreground mb-3.5">Распределение парка</p>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("dashboard.statuses")}</h2>
+            <p className="text-xs text-muted-foreground mb-3.5">{t("dashboard.fleetSpread")}</p>
             <div className="flex flex-col gap-2.5">
               {statusRows.length === 0 && (
-                <p className="text-xs text-muted-foreground">Нет устройств</p>
+                <p className="text-xs text-muted-foreground">{t("dashboard.noDevices")}</p>
               )}
               {statusRows.map(({ label, count, dot }) => (
                 <div key={label} className="flex items-center justify-between">
@@ -326,23 +262,23 @@ export default function Dashboard() {
         <div className="glass flex flex-col">
           <div className="flex items-center justify-between px-5 pt-4 pb-3">
             <div>
-              <h2 className="text-[15px] font-semibold text-foreground">Активность</h2>
-              <p className="text-xs text-muted-foreground">Последние события</p>
+              <h2 className="text-[15px] font-semibold text-foreground">{t("dashboard.activity")}</h2>
+              <p className="text-xs text-muted-foreground">{t("dashboard.recentEvents")}</p>
             </div>
             <button
               type="button"
               onClick={() => navigate("/audit-log")}
               className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              Все события <ChevronRight className="h-3.5 w-3.5" />
+              {t("dashboard.allEvents")} <ChevronRight className="h-3.5 w-3.5" />
             </button>
           </div>
           <div>
             {activity.length === 0 && (
-              <p className="text-xs text-muted-foreground px-5 py-6 text-center">Нет событий</p>
+              <p className="text-xs text-muted-foreground px-5 py-6 text-center">{t("dashboard.noEvents")}</p>
             )}
             {activity.map((e, i) => {
-              const cat = ACTION_CATEGORY[e.action] ?? "content"
+              const cat = actionCategory(e.action)
               const { icon: CatIcon, fg, bg } = CATEGORY_STYLE[cat]
               return (
                 <div
@@ -360,7 +296,7 @@ export default function Dashboard() {
                       <span className="font-medium text-foreground">{e.user_email}</span>
                       {" "}
                       <span className={cat === "security" ? fg : "text-muted-foreground"}>
-                        {ACTION_LABELS[e.action] ?? e.action}
+                        {actionLabel(e.action)}
                       </span>
                     </p>
                     <p className="text-[11px] text-muted-foreground mt-0.5">{formatDistanceToNow(e.created_at)}</p>
@@ -376,20 +312,20 @@ export default function Dashboard() {
       <div className="glass">
         <div className="flex items-center justify-between px-5 pt-4 pb-3">
           <div>
-            <h2 className="text-[15px] font-semibold text-foreground">Последние устройства</h2>
-            <p className="text-xs text-muted-foreground">Недавно на связи</p>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("dashboard.recentDevices")}</h2>
+            <p className="text-xs text-muted-foreground">{t("dashboard.recentlySeen")}</p>
           </div>
           <button
             type="button"
             onClick={() => navigate("/devices")}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
-            Все устройства <ChevronRight className="h-3.5 w-3.5" />
+            {t("dashboard.allDevices")} <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </div>
         <div>
           {devices.length === 0 && (
-            <p className="text-xs text-muted-foreground px-5 py-6 text-center">Нет устройств</p>
+            <p className="text-xs text-muted-foreground px-5 py-6 text-center">{t("dashboard.noDevices")}</p>
           )}
           {devices.slice(0, 5).map((d) => {
             // Фолбэк не декоративный: без него неизвестный статус давал className

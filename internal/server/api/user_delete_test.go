@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // userIDByEmail — id пользователя, заведённого хелперами через email.
 func userIDByEmail(t *testing.T, db *storage.DB, email string) string {
 	t.Helper()
-	u, err := db.GetUserByEmail(context.Background(), email)
+	u, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, email)
 	if err != nil || u == nil {
 		t.Fatalf("пользователь %q не найден: %v", email, err)
 	}

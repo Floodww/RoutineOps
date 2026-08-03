@@ -169,8 +169,8 @@ func TestManagerPollOverGRPC(t *testing.T) {
 		},
 	})
 	enqueued := 0
-	m := NewManager(dialer, func(string, []byte) error { enqueued++; return nil }, time.Minute, quietLog(), true)
-	m.consoleUser = func() string { return "alice" } // детерминированный пользователь
+	m := NewManager(dialer, func(string, []byte) error { enqueued++; return nil }, time.Minute, quietLog(), true, nil)
+	m.consoleUser = func() (string, bool) { return "alice", true } // детерминированный пользователь
 
 	m.poll(context.Background())
 

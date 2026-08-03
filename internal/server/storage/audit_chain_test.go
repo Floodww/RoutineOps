@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // Тесты пакета делят ОДНУ базу (см. TestMain), поэтому всё, что портит цепочку,
@@ -17,7 +18,7 @@ import (
 // mustVerify — проверка цепочки с падением на ошибке выполнения (не на нарушении).
 func mustVerify(t *testing.T, db *storage.DB) *storage.AuditChainStatus {
 	t.Helper()
-	st, err := db.VerifyAuditChain(context.Background())
+	st, err := db.VerifyAuditChain(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("VerifyAuditChain: %v", err)
 	}
@@ -221,7 +222,14 @@ func TestAuditChain_AnchorCatchesFullRecompute(t *testing.T) {
 			t.Fatalf("WriteAuditLog #%d: %v", i, err)
 		}
 	}
-	anchorSeq, anchorHash, err := db.WriteAuditAnchor(ctx)
+	// Якорю нужен привязанный тенант: цепочка аудита тенантская. Коммитим сразу —
+	// проверки ниже читают через Pool(), вне этой транзакции.
+	anchorCtx, anchorFinish, err := db.BindTenant(ctx, tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
+	anchorSeq, anchorHash, err := db.WriteAuditAnchor(anchorCtx)
+	anchorFinish(err == nil)
 	if err != nil {
 		t.Fatalf("WriteAuditAnchor: %v", err)
 	}
@@ -381,13 +389,20 @@ func TestAuditChain_SurvivesJSONBNormalization(t *testing.T) {
 // перезапись. Якорь ценен именно тем, что зафиксирован однажды.
 func TestWriteAuditAnchor_Idempotent(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
 
+	// Якорь берёт тенанта из привязанного скоупа (цепочка аудита тенантская),
+	// поэтому голый context.Background() ему больше не годится.
+	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
 	if err := db.WriteAuditLog(ctx, "", "idem@example.com", "chain_idem", "test", "x", nil); err != nil {
+		finish(false)
 		t.Fatalf("WriteAuditLog: %v", err)
 	}
 	seq1, hash1, err := db.WriteAuditAnchor(ctx)
 	if err != nil {
+		finish(false)
 		t.Fatalf("первый якорь: %v", err)
 	}
 	t.Cleanup(func() {
@@ -396,14 +411,19 @@ func TestWriteAuditAnchor_Idempotent(t *testing.T) {
 
 	seq2, hash2, err := db.WriteAuditAnchor(ctx)
 	if err != nil {
+		finish(false)
 		t.Fatalf("повторный якорь: %v", err)
 	}
+	// Коммитим ДО проверки: счётчик ниже читает через Pool(), то есть вне этой
+	// транзакции, и незакоммиченных якорей не увидел бы.
+	finish(true)
+
 	if seq1 != seq2 || hash1 != hash2 {
 		t.Errorf("повторный якорь дал (%d, %s), ждали (%d, %s)", seq2, hash2, seq1, hash1)
 	}
 
 	var count int
-	if err := db.Pool().QueryRow(ctx,
+	if err := db.Pool().QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM audit_anchors WHERE seq = $1`, seq1).Scan(&count); err != nil {
 		t.Fatalf("подсчёт якорей: %v", err)
 	}

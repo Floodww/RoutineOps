@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"log/slog"
 	"testing"
@@ -66,7 +67,7 @@ func TestConnect_ADR1_HostnameFromCert(t *testing.T) {
 	}
 
 	dbID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	device, _, err := db.GetDevice(context.Background(), dbID)
+	device, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, dbID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestConnect_BlockedDevice(t *testing.T) {
 	if err != nil || dbID == "" {
 		t.Fatalf("registerDevice: id=%q err=%v", dbID, err)
 	}
-	if err := db.UpdateDeviceStatus(context.Background(), dbID, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, dbID, "blocked"); err != nil {
 		t.Fatalf("block device: %v", err)
 	}
 
@@ -217,7 +218,7 @@ func TestConnect_BlockedMidSession(t *testing.T) {
 			hookCalls++
 			if hookCalls == 2 {
 				// Block device before processing second message
-				_ = db.UpdateDeviceStatus(context.Background(), dbID, "blocked")
+				_ = db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, dbID, "blocked")
 			}
 		},
 	}
@@ -578,7 +579,7 @@ func TestReportAdminAccess_ApprovedStatus(t *testing.T) {
 	gw := newGW(t, db)
 
 	// create a real request so UpdateAdminAccessReport has a row to touch
-	owner, _ := db.CreateUser(context.Background(), "Owner2", uniqEmail("owner2_adm"), "hash", "user")
+	owner, _ := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Owner2", uniqEmail("owner2_adm"), "hash", "user")
 	certCtx, fingerprint := makeCertCtx(t, "device-reportadm-ok")
 	registerDevice(t, db, "device-reportadm-ok", fingerprint)
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)

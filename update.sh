@@ -20,6 +20,15 @@ if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="do
 # но чиним симметрично install.sh, а не по месту падения.
 grep -q $'\r' .env.prod && { sed -i 's/\r$//' .env.prod; echo "!! .env.prod был в CRLF (Windows) — привёл к LF"; }
 
+# Раскладка ролей БД: сервер под mdm_app (RLS реально изолирует тенантов), миграции под
+# владельцем mdm. Инсталляции до разделения ролей ехали с сервером под владельцем БД, то
+# есть с мультитенантностью, которую не защищало ничего. Тот же вызов есть в install.sh,
+# но апгрейд идёт ЗДЕСЬ и install.sh не зовёт — без этой строки починка до парка клиентов
+# не доезжает. Раскладка уже правильная → no-op.
+DSN_BEFORE=$(sed -n 's/^DATABASE_DSN=//p' .env.prod | head -1)
+bash scripts/env-db-roles.sh .env.prod || { echo "ОШИБКА: роли БД в .env.prod не приведены — обновление прервано." >&2; exit 1; }
+DSN_AFTER=$(sed -n 's/^DATABASE_DSN=//p' .env.prod | head -1)
+
 set -a; . ./.env.prod; set +a
 
 echo "=== MDM Update ==="
@@ -48,6 +57,14 @@ echo "Новая версия: v${VERSION}"
 # 3. Пересборка. migrate-сервис накатит pending-миграции ДО старта server.
 $DC -f docker-compose.prod.yml up -d --build
 
+# Сменился DSN сервера (разделение ролей выше) — контейнер держит СТАРЫЙ в памяти:
+# env_file читается на старте, а пересборка образа его не меняет, поэтому обычный up
+# может оставить сервер под прежней ролью и починка выглядела бы применённой, не будучи ею.
+if [ "$DSN_BEFORE" != "$DSN_AFTER" ]; then
+  echo "DSN сервера изменился — пересоздаю server..."
+  $DC -f docker-compose.prod.yml up -d --force-recreate server
+fi
+
 # 4. Сборка + публикация агентов новой версии (self-update подхватит парк за <interval>).
 #    Подпись — локальным per-deployer приватником; RegisterAgentRelease делает UPSERT
 #    (повтор той же версии = no-op, не падение). В build-контейнер отдаём только нужное.
@@ -57,6 +74,8 @@ PG=$($DC -f docker-compose.prod.yml ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
 docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
+  -e BUILD_TAGS="${BUILD_TAGS:-}" \
+  -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
   golang:1.26-alpine sh -c '
     set -e
     V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
@@ -67,6 +86,17 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # darwin здесь НЕТ: macOS-агенту нужен cgo (Cocoa-замок + Keychain), а
     # `CGO_ENABLED=0 GOOS=darwin` молча собирает заглушки по тегам `!darwin || !cgo`
     # — парк получил бы агента без оверлея блокировки. Публикуем prebuilt ниже.
+    # Редакция АГЕНТА обязана совпадать с редакцией инсталляции. Раньше здесь
+    # собиралось безусловно без тегов, поэтому enterprise-сервер раздавал парку
+    # open-core агента: FileVault там не выключен, а НЕ СКОМПИЛИРОВАН — оператор-путь
+    # provisioning отвечал бы отказом на каждой машине, кроме тех, куда пакет
+    # поставили руками.
+    TAGSFLAG=""
+    if [ -n "$BUILD_TAGS" ]; then
+      TAGSFLAG="-tags $BUILD_TAGS"
+      echo "  редакция агента: $BUILD_TAGS (из BUILD_TAGS в .env.prod)"
+    fi
+
     for pair in "windows amd64" "linux amd64" "linux arm64"; do
       # shellcheck disable=SC2086
       set -- $pair; OS=$1; ARCH=$2
@@ -98,7 +128,7 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
       # переставал быть универсальным, а при потере приватника пропадал единственный путь
       # восстановления (ре-энролл с новым ключом — вшитый бы его перебил).
       # Ключ self-update агент берёт из enroll-ответа: сервер отдаёт RELEASE_PUBKEY из .env.prod.
-      GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath \
+      GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath $TAGSFLAG \
         -ldflags "-s -w -X main.version=${V} ${EXTRA_LDFLAGS}" \
         -o /tmp/agent_${OS}_${ARCH} ./cmd/agent
 
@@ -113,10 +143,49 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # macOS: prebuilt из репо (собран мейнтейнером на маке с cgo), подписываем его
     # ключом ЭТОГО деплойера. Сборка и подпись развязаны — publish-release берёт
     # любой файл. sha256 сверяем до подписи: подписать битый бинарь = раздать его.
+    #
+    # РЕДАКЦИЯ. Лежащий в репозитории prebuilt ВСЕГДА open-core, и это не оплошность:
+    # enterprise-бинарь нельзя коммитить, его ловит гейт публичного среза
+    # (scripts/export-free.sh §V4c распаковывает бинарные артефакты). Значит на
+    # enterprise-инсталляции публиковать его нельзя — иначе парк маков обновится на
+    # агента, где FileVault не выключен, а не скомпилирован. Enterprise-бинарь
+    # приходит из приватного релиз-канала и указывается через DARWIN_AGENT
+    # (путь ОТНОСИТЕЛЬНО каталога деплоя — контейнер видит только его).
     PREBUILT=build/darwin/agent_darwin_arm64
+    case "$BUILD_TAGS" in
+      *enterprise*)
+        if [ -z "$DARWIN_AGENT" ]; then
+          echo "ОШИБКА: инсталляция enterprise (BUILD_TAGS=$BUILD_TAGS), а darwin-агент в репозитории — open-core." >&2
+          echo "  Публикация macOS отменена: маки получили бы агента БЕЗ FileVault (не выключен, а не собран)." >&2
+          echo "  Возьмите enterprise-бинарь из приватного релиз-канала, положите в каталог деплоя" >&2
+          echo "  вместе с файлами .sha256 и .version и укажите путь: DARWIN_AGENT=enterprise/agent_darwin_arm64 ./update.sh" >&2
+          exit 1
+        fi
+        if [ ! -f "$DARWIN_AGENT" ]; then
+          echo "ОШИБКА: DARWIN_AGENT=$DARWIN_AGENT не найден в каталоге деплоя." >&2
+          exit 1
+        fi
+        # Проверяем, что это ДЕЙСТВИТЕЛЬНО enterprise-сборка, а не переименованный
+        # open-core бинарь: строка есть только в FileVault-коде под тегом.
+        if ! grep -q validaterecovery "$DARWIN_AGENT"; then
+          echo "ОШИБКА: $DARWIN_AGENT собран БЕЗ тега enterprise (нет FileVault-кода) — публикация отменена." >&2
+          exit 1
+        fi
+        PREBUILT="$DARWIN_AGENT"
+        echo "  darwin: enterprise-бинарь из $DARWIN_AGENT"
+        ;;
+      *)
+        # Open-core инсталляция: enterprise-бинарь здесь публиковать нельзя — это
+        # раздача закрытого кода всему парку.
+        if [ -f "$PREBUILT" ] && grep -q validaterecovery "$PREBUILT"; then
+          echo "ОШИБКА: $PREBUILT собран с тегом enterprise, а инсталляция open-core — публикация отменена." >&2
+          exit 1
+        fi
+        ;;
+    esac
     if [ -f "$PREBUILT" ] && [ -f "$PREBUILT.sha256" ]; then
       echo "  → darwin/arm64 (prebuilt из репо)"
-      ( cd build/darwin && sha256sum -c agent_darwin_arm64.sha256 ) || {
+      ( cd "$(dirname "$PREBUILT")" && sha256sum -c "$(basename "$PREBUILT").sha256" ) || {
         echo "ОШИБКА: sha256 prebuilt darwin-бинаря не сошлась — публикация отменена" >&2
         exit 1
       }

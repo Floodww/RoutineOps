@@ -5,7 +5,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"time"
 
 	"github.com/Floodww/RoutineOps/internal/agent/command"
 	"github.com/Floodww/RoutineOps/internal/agent/config"
@@ -36,7 +39,19 @@ func runFileVaultProvision(_ *config.Config, _ *slog.Logger) error {
 	return errors.New("filevault-provision: enterprise feature not built")
 }
 
+// newFileVaultProvisioner — в open-core исполнителя нет, поэтому executor
+// отчитывается по задаче ОШИБКОЙ («сборка без поддержки FileVault»), а не молчит.
+func newFileVaultProvisioner(_ *config.Config, _ string, _ *transport.Dialer, _ *slog.Logger) command.FileVaultProvisioner {
+	return nil
+}
+
+// runFileVaultDialog — подкоманды диалога в open-core нет.
+func runFileVaultDialog(_, _ string, _ time.Duration) int {
+	fmt.Fprintln(os.Stderr, "filevault-dialog: enterprise feature not built")
+	return 1
+}
+
 // escrowSealerStatus — open-core всегда «выключено».
-func escrowSealerStatus() (bool, string) {
+func escrowSealerStatus(_ *config.Config) (bool, string) {
 	return false, "не собрано (enterprise-фича)"
 }

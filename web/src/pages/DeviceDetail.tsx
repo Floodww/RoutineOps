@@ -1,46 +1,53 @@
+import i18n from "@/i18n/config"
 import { useEffect, useState } from "react"
+import { useTranslation, Trans } from "react-i18next"
 import { useParams, useNavigate } from "react-router-dom"
 import { ChevronLeft, Copy, Check, Terminal, ShieldCheck, Cpu, HardDrive, MemoryStick, ChevronDown, Trash2 } from "lucide-react"
-import api, { Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS, EscrowRecord, EscrowReveal, ESCROW_SECRET_TYPE, UNINSTALL_OUTCOME } from "@/lib/api"
+import api, { errMessage, Device, Software, Task, Script, DeviceDetailResponse, ReenrollResponse, deviceRunsScript, agentPlatform, DEVICE_STATUS, REBOOT_DELAYS, EscrowRecord, EscrowReveal, ESCROW_SECRET_TYPE, UNINSTALL_OUTCOME, Vulnerability } from "@/lib/api"
 import { GroupBadge } from "@/components/GroupBadge"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Select } from "@/components/ui/select"
 import OwnerCard from "@/components/OwnerCard"
+import { ScreenSessionPanel } from "@/components/ScreenSessionPanel"
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import ConfirmDialog from "@/components/ConfirmDialog"
 import { toast } from "@/lib/toast"
-import { formatDistanceToNow } from "@/lib/time"
+import { formatDistanceToNow, formatDateTime } from "@/lib/time"
 import { useMe } from "@/lib/useMe"
+import { useTenants } from "@/lib/useTenants"
 
 type TaskForm = { script: string; platform: string; priority: string }
 type TaskMode = "library" | "manual"
 
 
 const statusBadge = (status: Device["status"]) => {
-  const { label, variant } = DEVICE_STATUS[status] ?? { label: status, variant: "outline" as const }
-  return <Badge variant={variant}>{label}</Badge>
+  // i18n.t, а не useTranslation: функция модульная, хука здесь нет. Экран сам
+  // подписан на смену языка, поэтому подпись перерисуется вместе с ним.
+  const known = DEVICE_STATUS[status]
+  return <Badge variant={known?.variant ?? "outline"}>{known ? i18n.t(known.label) : status}</Badge>
 }
 
 // lockDivergence — расхождение ЖЕЛАЕМОГО лока (lock_status) с ФАКТИЧЕСКИМ, о котором
 // доложил агент (lock_actual_state). Показываем только состояния, где машина НЕ закрыта
 // или закрыта наполовину: именно они опасны молчанием — панель рисует «заблокировано»,
 // а устройством пользуются. Совпадение desired/actual и пустой actual — не рисуем.
+// Значения — КЛЮЧИ словаря: t() на уровне модуля недоступен.
 const LOCK_ACTUAL_ALERTS: Record<string, { label: string; hint: string }> = {
   lock_failed: {
-    label: "Лок НЕ применён",
-    hint: "Агент не смог поднять блокировку и продолжает попытки. Устройство сейчас РАБОЧЕЕ, несмотря на статус «заблокировано».",
+    label: "deviceDetail.lockNotApplied",
+    hint: "deviceDetail.theAgentCouldNot",
   },
   filevault_revoked: {
-    label: "FileVault: нужен ребут",
-    hint: "Secure Token снят, ключ восстановления заэскроен, но до перезагрузки том остаётся открытым — лок ещё не эффективен.",
+    label: "deviceDetail.filevaultRebootRequired",
+    hint: "deviceDetail.theSecureTokenIs",
   },
   filevault_revoke_failed: {
-    label: "FileVault: revoke не завершён",
-    hint: "Деструктивная операция могла примениться частично. Требуется ручной разбор IT.",
+    label: "deviceDetail.filevaultRevokeDidNot",
+    hint: "deviceDetail.aDestructiveOperationMay",
   },
 }
 
@@ -55,11 +62,12 @@ export function decommissionArmed(hostname: string, typed: string): boolean {
   return want !== "" && typed.trim().toLowerCase() === want
 }
 
+// Значения — КЛЮЧИ словаря: t() на уровне модуля недоступен.
 const taskStatusLabel: Record<string, string> = {
-  pending:   "Ожидает",
-  acked:     "Принята",
-  completed: "Выполнена",
-  failed:    "Ошибка",
+  pending:   "deviceDetail.pending",
+  acked:     "deviceDetail.accepted",
+  completed: "deviceDetail.done",
+  failed:    "deviceDetail.error",
 }
 
 const taskStatusVariant: Record<string, "default" | "secondary" | "success" | "destructive" | "outline"> = {
@@ -76,15 +84,17 @@ const PLATFORM_OPTIONS = [
 ]
 
 const PRIORITY_OPTIONS = [
-  { value: "low",    label: "Низкий"   },
-  { value: "normal", label: "Обычный"  },
-  { value: "high",   label: "Высокий"  },
+  { value: "low",    label: "deviceDetail.low"    },
+  { value: "normal", label: "deviceDetail.normal" },
+  { value: "high",   label: "deviceDetail.high"   },
 ]
 
 export default function DeviceDetail() {
+  const { t } = useTranslation()
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { isAdmin } = useMe()
+  const { isAdmin, isProvider } = useMe()
+  const { tenants: allTenants } = useTenants()
   const [device, setDevice] = useState<Device | null>(null)
   const [software, setSoftware] = useState<Software[]>([])
   // Что сносим — держим всю запись: в подтверждении нужны имя, версия и метод, иначе
@@ -117,6 +127,9 @@ export default function DeviceDetail() {
   const [decomReason, setDecomReason] = useState("")
   const [decomTyped, setDecomTyped] = useState("")
   const [decommissioning, setDecommissioning] = useState(false)
+  const [moveOpen, setMoveOpen] = useState(false)
+  const [moveTo, setMoveTo] = useState("")
+  const [moving, setMoving] = useState(false)
   const [rebootOpen, setRebootOpen] = useState(false)
   const [rebootReason, setRebootReason] = useState("")
   const [rebootDelay, setRebootDelay] = useState(REBOOT_DELAYS[0].value)
@@ -124,19 +137,22 @@ export default function DeviceDetail() {
   const [escrow, setEscrow] = useState<EscrowRecord[]>([])
   const [revealing, setRevealing] = useState(false)
   const [revealed, setRevealed] = useState<EscrowReveal | null>(null)
+  const [vulns, setVulns] = useState<Vulnerability[]>([])
 
   useEffect(() => {
     async function load() {
       try {
-        const [d, t] = await Promise.all([
+        const [d, t, v] = await Promise.all([
           api.get<DeviceDetailResponse>(`/devices/${id}`),
           api.get<Task[]>(`/devices/${id}/tasks`),
+          api.get<Vulnerability[]>(`/devices/${id}/vulnerabilities`).catch(() => ({ data: [] as Vulnerability[] })),
         ])
         setDevice(d.data.device)
         setSoftware(d.data.software ?? [])
         setTasks(t.data ?? [])
+        setVulns(v.data ?? [])
       } catch {
-        toast({ title: "Не удалось загрузить данные устройства", variant: "destructive" })
+        toast({ title: t("deviceDetail.failedToLoadThe"), variant: "destructive" })
       } finally {
         setLoading(false)
       }
@@ -190,7 +206,7 @@ export default function DeviceDetail() {
       setLockPassword(r.data.password)
       setDevice({ ...device, lock_status: "locked" })
     } catch {
-      toast({ title: "Не удалось отправить команду блокировки", variant: "destructive" })
+      toast({ title: t("deviceDetail.failedToSendThe2"), variant: "destructive" })
     } finally {
       setLocking(false)
     }
@@ -201,9 +217,31 @@ export default function DeviceDetail() {
     try {
       await api.post(`/devices/${id}/unlock`, {})
       setDevice({ ...device, lock_status: "unlocked" })
-      toast({ title: "Команда разблокировки отправлена", variant: "success" })
+      toast({ title: t("deviceDetail.theUnlockCommandWas"), variant: "success" })
     } catch {
-      toast({ title: "Не удалось отправить команду разблокировки", variant: "destructive" })
+      toast({ title: t("deviceDetail.failedToSendThe"), variant: "destructive" })
+    }
+  }
+
+  // Перенос в другой тенант — действие надзора над инсталляцией. Членство в группах
+  // при этом снимается сервером: группы принадлежат покинутому тенанту, и устройство,
+  // оставшееся в них, попало бы под чужие политики.
+  async function moveTenant() {
+    if (!moveTo) return
+    setMoving(true)
+    try {
+      await api.post(`/devices/${id}/tenant`, { tenant_id: moveTo })
+      setMoveOpen(false)
+      toast({
+        title: t("deviceDetail.deviceMoved"),
+        description: t("deviceDetail.groupsWereClearedAssign"),
+        variant: "success",
+      })
+      navigate("/devices")
+    } catch (e) {
+      toast({ title: t("deviceDetail.failedToMove"), description: errMessage(e), variant: "destructive" })
+    } finally {
+      setMoving(false)
     }
   }
 
@@ -218,18 +256,18 @@ export default function DeviceDetail() {
       await api.post(`/devices/${id}/decommission`, { reason: decomReason })
       setDecomOpen(false)
       toast({
-        title: "Задача сноса поставлена",
-        description: "Агент удалит себя, когда устройство выйдет на связь. Статус сменится после подтверждения.",
+        title: t("deviceDetail.theRemovalTaskWas"),
+        description: t("deviceDetail.theAgentRemovesItself"),
         variant: "success",
       })
-      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
-      setTasks(t.data ?? [])
+      const fresh = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(fresh.data ?? [])
     } catch (e) {
       const status = (e as { response?: { status?: number } }).response?.status
       toast({
         title: status === 409
-          ? "Устройство уже выведено из эксплуатации"
-          : "Не удалось поставить задачу сноса",
+          ? t("deviceDetail.theDeviceIsAlready")
+          : t("deviceDetail.failedToQueueThe3"),
         variant: "destructive",
       })
     } finally {
@@ -253,12 +291,12 @@ export default function DeviceDetail() {
       })
       setToUninstall(null)
       toast({
-        title: "Задача на удаление поставлена",
-        description: "Агент снимет инвентарь заново, найдёт цель и отчитается по факту — исход появится в списке задач.",
+        title: t("deviceDetail.theUninstallTaskWas"),
+        description: t("deviceDetail.theAgentTakesA"),
         variant: "success",
       })
-      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
-      setTasks(t.data ?? [])
+      const fresh = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(fresh.data ?? [])
     } catch (e) {
       const r = (e as { response?: { status?: number; data?: unknown } }).response
       const text = typeof r?.data === "string" ? r.data.trim() : ""
@@ -267,12 +305,12 @@ export default function DeviceDetail() {
         // осмысленный отказ с причиной от сервера. Их важно различать: «попробуйте
         // ещё раз» подходит ровно ни к одному из них.
         title: r?.status === 404
-          ? "Удаление ПО доступно в редакции Enterprise"
+          ? t("deviceDetail.softwareRemovalIsAvailable")
           : r?.status === 402
-            ? "Лицензия не покрывает удаление ПО"
+            ? t("deviceDetail.theLicenseDoesNot")
             : r?.status === 409 && text
               ? text
-              : "Не удалось поставить задачу удаления",
+              : t("deviceDetail.failedToQueueThe2"),
         variant: "destructive",
       })
     } finally {
@@ -287,18 +325,18 @@ export default function DeviceDetail() {
       await api.post(`/devices/${id}/reboot`, { reason: rebootReason, delay_seconds: rebootDelay })
       setRebootOpen(false)
       toast({
-        title: "Перезагрузка запланирована",
-        description: "Команду выполнит операционная система устройства. Если машина сейчас не на связи — после подключения.",
+        title: t("deviceDetail.rebootScheduled"),
+        description: t("deviceDetail.theCommandIsExecuted"),
         variant: "success",
       })
-      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
-      setTasks(t.data ?? [])
+      const fresh = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(fresh.data ?? [])
     } catch (e) {
       const status = (e as { response?: { status?: number } }).response?.status
       toast({
         title: status === 409
-          ? "Устройство не в рабочем состоянии — перезагрузка недоступна"
-          : "Не удалось поставить задачу перезагрузки",
+          ? t("deviceDetail.theDeviceIsNot")
+          : t("deviceDetail.failedToQueueThe"),
         variant: "destructive",
       })
     } finally {
@@ -337,7 +375,7 @@ export default function DeviceDetail() {
       const next = device.status === "active" ? "blocked" : "active"
       await api.put(`/devices/${id}/status`, { status: next })
       setDevice({ ...device, status: next })
-      toast({ title: next === "blocked" ? "Устройство заблокировано" : "Устройство разблокировано", variant: "success" })
+      toast({ title: next === "blocked" ? t("deviceDetail.deviceLocked") : t("deviceDetail.deviceUnlocked"), variant: "success" })
     } finally {
       setBlocking(false)
     }
@@ -363,9 +401,9 @@ export default function DeviceDetail() {
       setTaskOpen(false)
       setSelectedScriptId("")
       setTaskForm({ script: "", platform: "linux", priority: "normal" })
-      const t = await api.get<Task[]>(`/devices/${id}/tasks`)
-      setTasks(t.data ?? [])
-      toast({ title: "Задача отправлена на устройство", variant: "success" })
+      const fresh = await api.get<Task[]>(`/devices/${id}/tasks`)
+      setTasks(fresh.data ?? [])
+      toast({ title: t("deviceDetail.theTaskWasSent"), variant: "success" })
     } finally {
       setSubmitting(false)
     }
@@ -375,14 +413,14 @@ export default function DeviceDetail() {
     setDeleting(true)
     try {
       await api.delete(`/devices/${id}`)
-      toast({ title: "Устройство удалено", variant: "success" })
+      toast({ title: t("deviceDetail.deviceDeleted"), variant: "success" })
       navigate("/devices")
     } catch (e) {
       const status = (e as { response?: { status?: number } }).response?.status
       toast({
         title: status === 409
-          ? "Нельзя удалить: есть эскроу recovery-ключей"
-          : "Не удалось удалить устройство",
+          ? t("deviceDetail.cannotDeleteRecoveryKeys")
+          : t("deviceDetail.failedToDeleteThe"),
         variant: "destructive",
       })
     } finally {
@@ -396,7 +434,7 @@ export default function DeviceDetail() {
       const r = await api.post<ReenrollResponse>(`/devices/${id}/reenroll`, {})
       setReenrollResult(r.data)
     } catch {
-      toast({ title: "Не удалось создать токен перерегистрации", variant: "destructive" })
+      toast({ title: t("deviceDetail.failedToCreateA"), variant: "destructive" })
       setReenrollOpen(false)
     } finally {
       setReenrolling(false)
@@ -415,8 +453,8 @@ export default function DeviceDetail() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
-  if (!device) return <p className="text-destructive text-sm">Устройство не найдено</p>
+  if (loading) return <p className="text-muted-foreground text-sm">{t("deviceDetail.loading")}</p>
+  if (!device) return <p className="text-destructive text-sm">{t("deviceDetail.deviceNotFound")}</p>
 
   return (
     <div className="flex flex-col gap-5">
@@ -430,14 +468,14 @@ export default function DeviceDetail() {
         </button>
         <h1 className="text-xl font-semibold text-foreground">{device.hostname}</h1>
         {statusBadge(device.status)}
-        {device.lock_status === "locked" && <Badge variant="destructive">Экран заблокирован</Badge>}
+        {device.lock_status === "locked" && <Badge variant="destructive">{t("deviceDetail.theScreenIsLocked")}</Badge>}
         {/* Фактическое состояние лока расходится с желаемым — оператору это ВАЖНЕЕ
             бейджа «заблокировано» рядом: машина в этот момент рабочая либо закрыта
             наполовину. Пусто/unlocked-совпадение ничего не рисуем — шум. */}
         {lockDivergence(device) && (
           <Badge variant="outline" className="border-amber-500 text-amber-600 dark:text-amber-400"
-                 title={lockDivergence(device)!.hint}>
-            ⚠ {lockDivergence(device)!.label}
+                 title={t(lockDivergence(device)!.hint)}>
+            ⚠ {t(lockDivergence(device)!.label)}
           </Badge>
         )}
         {/* Очередь отчётов мертва: устройство на связи, но всё, что оно должно
@@ -446,10 +484,10 @@ export default function DeviceDetail() {
             включая бейдж лока выше. */}
         {device.outbox_unavailable && (
           <Badge variant="outline" className="border-violet-500 text-violet-600 dark:text-violet-400"
-                 title={`Отчёты, статусы лока и security-события с устройства не доходят${
-                   device.degraded_detail ? `.\nПричина: ${device.degraded_detail}` : ""
-                 }${device.degraded_since ? `\nС ${new Date(device.degraded_since).toLocaleString("ru-RU")}` : ""}`}>
-            🕳 Агент ослеп
+                 title={t("deviceDetail.blindTitle") +
+                   (device.degraded_detail ? ".\n" + t("deviceDetail.blindReason", { detail: device.degraded_detail }) : "") +
+                   (device.degraded_since ? "\n" + t("deviceDetail.blindSince", { since: formatDateTime(device.degraded_since) }) : "")}>
+            {t("deviceDetail.agentBlind")}
           </Badge>
         )}
         {device.groups?.map((g) => <GroupBadge key={g.id} group={g} />)}
@@ -459,24 +497,24 @@ export default function DeviceDetail() {
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm">
-                Действия <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-60" />
+                {t("deviceDetail.actions")} <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-60" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem disabled={reenrolling} onSelect={() => { setReenrollOpen(true); if (!reenrollResult) reenroll() }}>
-                Перерегистрировать
+                {t("deviceDetail.reenroll")}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {device.lock_status === "locked" ? (
                 <DropdownMenuItem onSelect={sendUnlock}>
-                  Разблокировать экран
+                  {t("deviceDetail.unlockScreen")}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuItem
                   onSelect={() => { setLockPassword(null); setLockReason(""); setLockOpen(true) }}
                   disabled={device.status !== "active"}
                 >
-                  Заблокировать экран
+                  {t("deviceDetail.lockTheScreen")}
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -490,7 +528,7 @@ export default function DeviceDetail() {
                 disabled={blocking || (device.status !== "active" && device.status !== "blocked")}
                 onSelect={() => device.status === "active" ? setConfirmBlock(true) : toggleBlock()}
               >
-                {device.status === "active" ? "Заблокировать доступ" : "Разблокировать доступ"}
+                {device.status === "active" ? t("deviceDetail.blockAccess2") : t("deviceDetail.unblockAccess")}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {/* Перезагрузка только для active: остальные состояния сервер отбивает 409
@@ -499,8 +537,22 @@ export default function DeviceDetail() {
                 disabled={rebooting || device.status !== "active"}
                 onSelect={() => { setRebootReason(""); setRebootDelay(REBOOT_DELAYS[0].value); setRebootOpen(true) }}
               >
-                Перезагрузить
+                {t("deviceDetail.reboot")}
               </DropdownMenuItem>
+              {/* Перенос между тенантами — только надзор над инсталляцией и только
+                  когда тенантов больше одного: иначе пункт меню обещает выбор,
+                  которого нет. */}
+              {isProvider && allTenants.length > 1 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={moving}
+                    onSelect={() => { setMoveTo(""); setMoveOpen(true) }}
+                  >
+                    {t("deviceDetail.moveTenant")}
+                  </DropdownMenuItem>
+                </>
+              )}
               <DropdownMenuSeparator />
               {/* Гасим только уже списанные — сервер на них отвечает 409 (handler.go:1155).
                   Оффлайн-машину списывать РАЗРЕШАЕМ: задача штатно ждёт выхода на связь. */}
@@ -509,7 +561,7 @@ export default function DeviceDetail() {
                 disabled={decommissioning || device.status === "decommissioned"}
                 onSelect={() => { setDecomReason(""); setDecomTyped(""); setDecomOpen(true) }}
               >
-                Вывести из эксплуатации
+                {t("deviceDetail.decommission")}
               </DropdownMenuItem>
               {/* Только для decommissioned: delete на живом устройстве воскрешает его
                   скелетом (агент апсертит строку heartbeat'ом в gateway) и сиротеет.
@@ -519,7 +571,7 @@ export default function DeviceDetail() {
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem destructive disabled={deleting} onSelect={() => setConfirmDelete(true)}>
-                    Удалить из инвентаря
+                    {t("deviceDetail.deleteFromInventory")}
                   </DropdownMenuItem>
                 </>
               )}
@@ -531,11 +583,11 @@ export default function DeviceDetail() {
           <Dialog open={reenrollOpen} onOpenChange={(o) => { setReenrollOpen(o); if (!o) { setReenrollResult(null); setCopied(false) } }}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Перерегистрация устройства</DialogTitle>
+                <DialogTitle>{t("deviceDetail.deviceReEnrollment")}</DialogTitle>
               </DialogHeader>
               {reenrollResult ? (
                 <div className="space-y-4 pt-2">
-                  <p className="text-sm text-muted-foreground">Запустите на устройстве. Токен действует 24ч.</p>
+                  <p className="text-sm text-muted-foreground">{t("deviceDetail.runItOnThe")}</p>
                   <div className="relative">
                     <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono break-all whitespace-pre-wrap pr-10 text-soft">
                       {reenrollCommand()}
@@ -550,11 +602,11 @@ export default function DeviceDetail() {
                   </div>
                   <p className="text-xs text-muted-foreground font-mono">{reenrollResult.enrollment_token}</p>
                   <Button className="w-full" variant="outline" onClick={() => setReenrollOpen(false)}>
-                    Готово
+                    {t("deviceDetail.done")}
                   </Button>
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground pt-2">Генерация токена...</p>
+                <p className="text-sm text-muted-foreground pt-2">{t("deviceDetail.generatingAToken")}</p>
               )}
             </DialogContent>
           </Dialog>
@@ -563,12 +615,12 @@ export default function DeviceDetail() {
           <Dialog open={taskOpen} onOpenChange={(o) => { setTaskOpen(o); if (!o) { setSelectedScriptId(""); setTaskForm({ script: "", platform: "linux", priority: "normal" }) } }}>
             {isAdmin && (
             <DialogTrigger asChild>
-              <Button size="sm" onClick={() => openTaskDialog("library")}>Новая задача</Button>
+              <Button size="sm" onClick={() => openTaskDialog("library")}>{t("deviceDetail.newTask")}</Button>
             </DialogTrigger>
             )}
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Новая задача — {device.hostname}</DialogTitle>
+                <DialogTitle>{t("deviceDetail.newTaskFor", { name: device.hostname })}</DialogTitle>
               </DialogHeader>
               <div className="space-y-4 pt-2">
                 {/* Переключатель режима */}
@@ -585,7 +637,7 @@ export default function DeviceDetail() {
                           : "text-muted-foreground hover:text-foreground",
                       ].join(" ")}
                     >
-                      {mode === "library" ? "Из библиотеки" : "Написать вручную"}
+                      {mode === "library" ? t("deviceDetail.fromTheLibrary") : t("deviceDetail.writeByHand")}
                     </button>
                   ))}
                 </div>
@@ -593,17 +645,17 @@ export default function DeviceDetail() {
                 {taskMode === "library" ? (
                   <>
                     <div className="space-y-1.5">
-                      <Label>Скрипт для {device.os}</Label>
+                      <Label>{t("deviceDetail.scriptFor", { os: device.os })}</Label>
                       {runnableScripts.length === 0 ? (
                         <p className="text-sm text-muted-foreground">
-                          Нет скриптов для этой ОС. Добавьте их в разделе «Скрипты».
+                          {t("deviceDetail.noScriptsForOS")}
                         </p>
                       ) : (
                         <Select
                           value={selectedScriptId}
                           onChange={setSelectedScriptId}
-                          placeholder="Выберите скрипт…"
-                          options={[{ value: "", label: "Выберите скрипт…", disabled: true }, ...scriptOptions]}
+                          placeholder={t("deviceDetail.chooseAScript")}
+                          options={[{ value: "", label: t("deviceDetail.chooseAScript"), disabled: true }, ...scriptOptions]}
                         />
                       )}
                     </div>
@@ -617,13 +669,13 @@ export default function DeviceDetail() {
                       onClick={submitTask}
                       disabled={submitting || !selectedScript}
                     >
-                      {submitting ? "Запуск..." : "Запустить"}
+                      {submitting ? t("deviceDetail.running") : t("deviceDetail.run")}
                     </Button>
                   </>
                 ) : (
                   <>
                     <div className="space-y-1.5">
-                      <Label htmlFor="task-script">Скрипт</Label>
+                      <Label htmlFor="task-script">{t("deviceDetail.script")}</Label>
                       <textarea
                         id="task-script"
                         className="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
@@ -634,7 +686,7 @@ export default function DeviceDetail() {
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <Label>Платформа</Label>
+                        <Label>{t("deviceDetail.platform2")}</Label>
                         <Select
                           value={taskForm.platform}
                           onChange={(v) => setTaskForm({ ...taskForm, platform: v })}
@@ -642,11 +694,11 @@ export default function DeviceDetail() {
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <Label>Приоритет</Label>
+                        <Label>{t("deviceDetail.priority2")}</Label>
                         <Select
                           value={taskForm.priority}
                           onChange={(v) => setTaskForm({ ...taskForm, priority: v })}
-                          options={PRIORITY_OPTIONS}
+                          options={PRIORITY_OPTIONS.map((o) => ({ ...o, label: t(o.label) }))}
                         />
                       </div>
                     </div>
@@ -655,7 +707,7 @@ export default function DeviceDetail() {
                       onClick={submitTask}
                       disabled={submitting || !taskForm.script}
                     >
-                      {submitting ? "Отправка..." : "Создать"}
+                      {submitting ? t("deviceDetail.sending") : t("deviceDetail.create")}
                     </Button>
                   </>
                 )}
@@ -667,10 +719,10 @@ export default function DeviceDetail() {
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {[
-          { label: "ОС",              value: `${device.os} ${device.os_version}` },
+          { label: t("deviceDetail.os"),              value: `${device.os} ${device.os_version}` },
           { label: "IP",              value: device.ip_address || "—"            },
-          { label: "Последний раз",   value: device.last_seen_at ? formatDistanceToNow(device.last_seen_at) : "—" },
-          { label: "Зарегистрировано",value: formatDistanceToNow(device.created_at) },
+          { label: t("deviceDetail.lastSeen"),   value: device.last_seen_at ? formatDistanceToNow(device.last_seen_at) : "—" },
+          { label: t("deviceDetail.enrolled"),value: formatDistanceToNow(device.created_at) },
         ].map(({ label, value }) => (
           <div key={label} className="glass px-5 py-[18px]">
             <p className="text-xs text-muted-foreground">{label}</p>
@@ -691,12 +743,12 @@ export default function DeviceDetail() {
       <div className="glass px-5 py-[18px]">
         <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2 mb-4">
           <ShieldCheck className="h-[17px] w-[17px] text-muted-foreground" strokeWidth={2} />
-          Диагностика
+          {t("deviceDetail.diagnostics")}
         </h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-3">
             <div>
-              <p className="text-xs text-soft mb-0.5">Пользователь за консолью</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.consoleUser")}</p>
               <p className="text-sm text-foreground">{device.console_user || "—"}</p>
             </div>
             <div>
@@ -704,27 +756,27 @@ export default function DeviceDetail() {
               <p className="text-sm font-mono text-foreground">{device.cert_cn || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">Энроллмент</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.enrollment")}</p>
               <p className="text-sm text-foreground">{device.enrolled_at ? formatDistanceToNow(device.enrolled_at) : "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">MAC-адрес</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.macAddress")}</p>
               <p className="text-sm font-mono text-foreground">{device.mac_address || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">Серийный номер (SN)</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.serialNumberSn")}</p>
               <p className="text-sm font-mono text-foreground">{device.serial_number || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">Версия агента</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.agentVersion")}</p>
               <p className="text-sm font-mono text-foreground">{device.agent_version || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">Внутренний IP</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.internalIp")}</p>
               <p className="text-sm font-mono text-foreground">{device.ip_address || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-soft mb-0.5">Внешний IP</p>
+              <p className="text-xs text-soft mb-0.5">{t("deviceDetail.externalIp")}</p>
               <p className="text-sm font-mono text-foreground">{device.public_ip || "—"}</p>
             </div>
           </div>
@@ -743,7 +795,7 @@ export default function DeviceDetail() {
                 <MemoryStick className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" strokeWidth={2} />
                 <div>
                   <p className="text-xs text-soft">RAM</p>
-                  <p className="text-sm text-foreground">{(device.ram_mb / 1024).toFixed(1)} ГБ</p>
+                  <p className="text-sm text-foreground">{t("deviceDetail.gigabytes", { value: (device.ram_mb / 1024).toFixed(1) })}</p>
                 </div>
               </div>
             )}
@@ -751,7 +803,7 @@ export default function DeviceDetail() {
               <div className="flex items-start gap-2">
                 <HardDrive className="h-3.5 w-3.5 text-muted-foreground mt-0.5 shrink-0" strokeWidth={2} />
                 <div>
-                  <p className="text-xs text-soft">Диск (C:)</p>
+                  <p className="text-xs text-soft">{t("deviceDetail.diskC")}</p>
                   <p className="text-sm text-foreground">{device.disk}</p>
                 </div>
               </div>
@@ -764,59 +816,60 @@ export default function DeviceDetail() {
         <div className="px-5 pt-4 pb-3">
           <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
             <Terminal className="h-[17px] w-[17px] text-muted-foreground" strokeWidth={2} />
-            Задачи
+            {t("deviceDetail.tasks")}
           </h2>
         </div>
         <div>
           {tasks.length === 0 && (
             <p className="border-t border-border px-5 py-6 text-center text-xs text-muted-foreground">
-              Нет задач
+              {t("deviceDetail.noTasks")}
             </p>
           )}
-          {tasks.map((t) => {
-            const hasLog = !!(t.output || t.error_log || t.script_content)
+          {/* Переменная называется task: t() из useTranslation закрылась бы ей. */}
+          {tasks.map((task) => {
+            const hasLog = !!(task.output || task.error_log || task.script_content)
             return (
               <div
-                key={t.id}
+                key={task.id}
                 className={[
                   "flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl",
                   hasLog ? "cursor-pointer glass-hover" : "",
                 ].join(" ")}
-                onClick={() => hasLog && setLogTask(t)}
+                onClick={() => hasLog && setLogTask(task)}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <Badge variant={taskStatusVariant[t.status]}>
-                    {taskStatusLabel[t.status] ?? t.status}
+                  <Badge variant={taskStatusVariant[task.status]}>
+                    {taskStatusLabel[task.status] ? i18n.t(taskStatusLabel[task.status]) : task.status}
                   </Badge>
                   {/* Исход удаления вместо платформы: у uninstall-задачи «linux/normal»
                       не говорит ничего, а исход — единственное, что оператору нужно.
                       Незнакомое значение показываем как есть: сервер хранит домен
                       открытым, и новый исход агента должен быть виден, а не пропасть. */}
-                  {t.uninstall_outcome ? (
+                  {task.uninstall_outcome ? (
                     <>
                       <Badge
                         variant="outline"
-                        title={UNINSTALL_OUTCOME[t.uninstall_outcome]?.hint}
-                        className={t.uninstall_outcome === "removed"
+                        title={UNINSTALL_OUTCOME[task.uninstall_outcome] ? i18n.t(UNINSTALL_OUTCOME[task.uninstall_outcome].hint) : undefined}
+                        className={task.uninstall_outcome === "removed"
                           ? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
                           : "border-amber-500 text-amber-600 dark:text-amber-400"}
                       >
-                        {UNINSTALL_OUTCOME[t.uninstall_outcome]?.label ?? t.uninstall_outcome}
+                        {UNINSTALL_OUTCOME[task.uninstall_outcome] ? i18n.t(UNINSTALL_OUTCOME[task.uninstall_outcome].label) : task.uninstall_outcome}
                       </Badge>
                       <span className="text-[13px] text-soft truncate">
-                        {t.uninstall?.software_name}
+                        {task.uninstall?.software_name}
                       </span>
                     </>
                   ) : (
                     <>
-                      <span className="text-[13px] text-soft truncate">{t.platform}</span>
-                      <span className="text-xs text-muted-foreground">{t.priority}</span>
+                      <span className="text-[13px] text-soft truncate">{task.platform}</span>
+                      <span className="text-xs text-muted-foreground">{task.priority}</span>
                     </>
                   )}
                 </div>
                 <div className="flex items-center gap-4 flex-shrink-0">
-                  <span className="text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</span>
-                  {hasLog && <span className="text-xs text-brand">лог →</span>}
+                  <span className="text-xs text-muted-foreground">{formatDistanceToNow(task.created_at)}</span>
+                  {hasLog && <span className="text-xs text-brand">{t("deviceDetail.log")}</span>}
                 </div>
               </div>
             )
@@ -827,11 +880,10 @@ export default function DeviceDetail() {
       {escrow.length > 0 && (
         <div className="glass">
           <div className="px-5 pt-4 pb-3">
-            <h2 className="text-[15px] font-semibold text-foreground">Ключи восстановления (эскроу)</h2>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("deviceDetail.recoveryKeysEscrow")}</h2>
             <p className="text-xs text-muted-foreground mt-1">
-              Сервер хранит их только в зашифрованном виде и расшифровать не может.
-              Выгруженный файл открывается офлайн утилитой <span className="font-mono">routineops-unseal</span>{" "}
-              с шерами приватного ключа.
+              {t("deviceDetail.escrowHint1")}
+              <Trans i18nKey="deviceDetail.escrowHint2" components={[<span className="font-mono" />]} />
             </p>
           </div>
           <div>
@@ -840,23 +892,58 @@ export default function DeviceDetail() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-foreground truncate">
-                      {ESCROW_SECRET_TYPE[e.secret_type] ?? e.secret_type}
+                      {ESCROW_SECRET_TYPE[e.secret_type] ? i18n.t(ESCROW_SECRET_TYPE[e.secret_type]) : e.secret_type}
                     </span>
-                    {e.latest && <Badge variant="outline">актуальный</Badge>}
+                    {e.latest && <Badge variant="outline">{t("deviceDetail.current")}</Badge>}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    заэскроен {formatDistanceToNow(e.escrowed_at)}
-                    {e.agent_version && ` · агент ${e.agent_version}`}
-                    {e.revealed_at && ` · выгружал ${e.revealed_by || "—"}, ${formatDistanceToNow(e.revealed_at)}`}
+                    {t("deviceDetail.escrowedAt", { when: formatDistanceToNow(e.escrowed_at) })}
+                    {e.agent_version && " · " + t("deviceDetail.escrowAgent", { version: e.agent_version })}
+                    {e.revealed_at && " · " + t("deviceDetail.escrowRevealed", { who: e.revealed_by || "—", when: formatDistanceToNow(e.revealed_at) })}
                   </div>
                 </div>
                 {/* Выгружаем только актуальную строку: устаревший ключ откроется, но
                     машину им уже не разблокировать — PRK ротируется при перевыпуске. */}
                 {e.latest && (
                   <Button size="sm" variant="outline" disabled={revealing} onClick={() => revealEscrow(e.secret_type)}>
-                    {revealing ? "..." : "Выгрузить"}
+                    {revealing ? "..." : t("deviceDetail.reveal")}
                   </Button>
                 )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Экран устройства (ADR-8, только Enterprise). Секция сама прячется, если
+          ручек нет: в open-core их не существует вовсе. */}
+      <ScreenSessionPanel deviceId={id!} />
+
+      {vulns.length > 0 && (
+        <div className="glass">
+          <div className="px-5 pt-4 pb-3">
+            <h2 className="text-[15px] font-semibold text-foreground">{t("deviceDetail.vulnerabilitiesCve")}</h2>
+          </div>
+          <div>
+            {vulns.map((v) => (
+              <div
+                key={`${v.cve_id}|${v.software_name}`}
+                className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground truncate">{v.cve_id}</span>
+                    <span className="text-xs font-medium bg-destructive/10 text-destructive px-1.5 py-0.5 rounded-md">
+                      CVSS {v.cvss_score ?? "N/A"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate mt-0.5">
+                    {v.software_name}
+                  </div>
+                  <div className="text-sm text-muted-foreground mt-1 line-clamp-2">
+                    {v.description}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -866,7 +953,7 @@ export default function DeviceDetail() {
       {software.length > 0 && (
         <div className="glass">
           <div className="px-5 pt-4 pb-3">
-            <h2 className="text-[15px] font-semibold text-foreground">Программное обеспечение</h2>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("deviceDetail.software")}</h2>
           </div>
           <div>
             {software.map((s) => (
@@ -882,9 +969,9 @@ export default function DeviceDetail() {
                     {s.scope === "user" && (
                       <span
                         className="flex-shrink-0 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-500"
-                        title="Установлено в профиль пользователя. Правила запрещённого ПО на такие установки действуют, но удалить их нельзя: чужой профиль недоступен службе агента."
+                        title={t("deviceDetail.installedIntoAUser")}
                       >
-                        в профиле пользователя
+                        {t("deviceDetail.inUserProfile")}
                       </span>
                     )}
                   </div>
@@ -904,8 +991,8 @@ export default function DeviceDetail() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      aria-label={`Удалить ${s.name}`}
-                      title="Удалить с устройства"
+                      aria-label={t("deviceDetail.removeAria", { name: s.name })}
+                      title={t("deviceDetail.removeFromTheDevice")}
                       onClick={() => setToUninstall(s)}
                       className="text-muted-foreground hover:text-destructive"
                     >
@@ -925,7 +1012,7 @@ export default function DeviceDetail() {
       <Dialog open={toUninstall !== null} onOpenChange={(o) => { if (!o) setToUninstall(null) }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Удалить программу с устройства?</DialogTitle>
+            <DialogTitle>{t("deviceDetail.removeTheProgramFrom")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="rounded-lg border border-border px-3 py-2 text-sm">
@@ -936,17 +1023,14 @@ export default function DeviceDetail() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Агент не выполняет присланную команду: он снимает инвентарь заново, находит
-              эту запись у себя и использует собственный способ удаления. Если за это время
-              программа обновилась или её ключ изменился, снос не состоится — вы увидите
-              «цель изменилась», а не удалённую по ошибке версию.
+              {t("deviceDetail.uninstallHint")}
             </p>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setToUninstall(null)} disabled={uninstalling}>
-                Отмена
+                {t("deviceDetail.cancel")}
               </Button>
               <Button variant="destructive" onClick={sendUninstall} disabled={uninstalling}>
-                {uninstalling ? "Отправка..." : "Удалить"}
+                {uninstalling ? t("deviceDetail.sending") : t("deviceDetail.delete")}
               </Button>
             </div>
           </div>
@@ -959,10 +1043,10 @@ export default function DeviceDetail() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Terminal className="h-4 w-4 text-muted-foreground" strokeWidth={2} />
-              Лог задачи
+              {t("deviceDetail.taskLog")}
               {logTask && (
                 <Badge variant={taskStatusVariant[logTask.status]} className="ml-1">
-                  {taskStatusLabel[logTask.status] ?? logTask.status}
+                  {taskStatusLabel[logTask.status] ? t(taskStatusLabel[logTask.status]) : logTask.status}
                 </Badge>
               )}
             </DialogTitle>
@@ -970,14 +1054,14 @@ export default function DeviceDetail() {
           {logTask && (
             <div className="space-y-4 pt-1">
               <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                <span>Платформа: <span className="text-foreground">{logTask.platform}</span></span>
-                <span>Приоритет: <span className="text-foreground">{logTask.priority}</span></span>
-                <span>Создана: <span className="text-foreground">{formatDistanceToNow(logTask.created_at)}</span></span>
+                <span>{t("deviceDetail.platform")} <span className="text-foreground">{logTask.platform}</span></span>
+                <span>{t("deviceDetail.priority")} <span className="text-foreground">{logTask.priority}</span></span>
+                <span>{t("deviceDetail.created")} <span className="text-foreground">{formatDistanceToNow(logTask.created_at)}</span></span>
               </div>
 
               {logTask.script_content && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-muted-foreground">Скрипт</p>
+                  <p className="text-xs font-medium text-muted-foreground">{t("deviceDetail.script")}</p>
                   <pre className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs font-mono whitespace-pre-wrap break-all max-h-40 overflow-auto text-soft">
                     {logTask.script_content}
                   </pre>
@@ -986,7 +1070,7 @@ export default function DeviceDetail() {
 
               {logTask.output && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Вывод</p>
+                  <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">{t("deviceDetail.output")}</p>
                   <pre className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5 text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto text-foreground">
                     {logTask.output}
                   </pre>
@@ -995,7 +1079,7 @@ export default function DeviceDetail() {
 
               {logTask.error_log && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-destructive">Ошибки</p>
+                  <p className="text-xs font-medium text-destructive">{t("deviceDetail.errors")}</p>
                   <pre className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto text-destructive">
                     {logTask.error_log}
                   </pre>
@@ -1005,8 +1089,8 @@ export default function DeviceDetail() {
               {!logTask.output && !logTask.error_log && (
                 <p className="text-sm text-muted-foreground">
                   {logTask.status === "pending" || logTask.status === "acked"
-                    ? "Задача ещё выполняется — вывод появится после завершения."
-                    : "Вывод отсутствует."}
+                    ? t("deviceDetail.theTaskIsStill")
+                    : t("deviceDetail.noOutput")}
                 </p>
               )}
             </div>
@@ -1017,9 +1101,9 @@ export default function DeviceDetail() {
       <ConfirmDialog
         open={confirmBlock}
         onOpenChange={setConfirmBlock}
-        title="Заблокировать доступ?"
-        description={`Агент на «${device.hostname}» будет отключён от управления до разблокировки.`}
-        confirmLabel="Заблокировать"
+        title={t("deviceDetail.blockAccess")}
+        description={t("deviceDetail.blockWarn", { name: device.hostname })}
+        confirmLabel={t("deviceDetail.lock")}
         destructive
         onConfirm={toggleBlock}
       />
@@ -1027,9 +1111,9 @@ export default function DeviceDetail() {
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title="Удалить устройство?"
-        description={`«${device.hostname}» и вся его история (задачи, скрипты, алерты, членство в группах) будут удалены безвозвратно. Если агент ещё жив, устройство появится снова при следующем heartbeat — сначала удалите агента с машины.`}
-        confirmLabel="Удалить"
+        title={t("deviceDetail.deleteTheDevice")}
+        description={t("deviceDetail.deleteWarn", { name: device.hostname })}
+        confirmLabel={t("deviceDetail.delete")}
         destructive
         onConfirm={removeDevice}
       />
@@ -1038,11 +1122,11 @@ export default function DeviceDetail() {
       <Dialog open={lockOpen} onOpenChange={(o) => { setLockOpen(o); if (!o) { setLockPassword(null); setLockReason("") } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Заблокировать экран</DialogTitle>
+            <DialogTitle>{t("deviceDetail.lockTheScreen")}</DialogTitle>
           </DialogHeader>
           {lockPassword ? (
             <div className="space-y-4 pt-2">
-              <p className="text-sm text-muted-foreground">Команда отправлена. Сохраните пароль — он не будет показан повторно.</p>
+              <p className="text-sm text-muted-foreground">{t("deviceDetail.theCommandWasSent")}</p>
               <div className="relative">
                 <pre className="rounded-md border border-border bg-muted px-3 py-3 text-sm font-mono pr-10 text-foreground">{lockPassword}</pre>
                 <button
@@ -1057,26 +1141,26 @@ export default function DeviceDetail() {
                   {lockCopied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-500" /> : <Copy className="h-4 w-4" />}
                 </button>
               </div>
-              <Button className="w-full" variant="outline" onClick={() => setLockOpen(false)}>Закрыть</Button>
+              <Button className="w-full" variant="outline" onClick={() => setLockOpen(false)}>{t("deviceDetail.close")}</Button>
             </div>
           ) : (
             <div className="space-y-4 pt-2">
               <p className="text-sm text-muted-foreground">
-                На экране устройства появится замок с паролем разблокировки. Пароль генерируется один раз.
+                {t("deviceDetail.lockHint")}
               </p>
               <div className="space-y-1.5">
-                <Label htmlFor="lock-reason">Причина (необязательно)</Label>
+                <Label htmlFor="lock-reason">{t("deviceDetail.reasonOptional")}</Label>
                 <input
                   id="lock-reason"
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  placeholder="Нарушение ИБ, утеря ноутбука..."
+                  placeholder={t("deviceDetail.securityIncidentLostLaptop")}
                   value={lockReason}
                   onChange={(e) => setLockReason(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && sendLock()}
                 />
               </div>
               <Button className="w-full" onClick={sendLock} disabled={locking}>
-                {locking ? "Отправка..." : "Заблокировать экран"}
+                {locking ? t("deviceDetail.sending") : t("deviceDetail.lockTheScreen")}
               </Button>
             </div>
           )}
@@ -1085,35 +1169,65 @@ export default function DeviceDetail() {
 
       {/* Диалог вывода из эксплуатации. Отдельный, а не ConfirmDialog: нужны причина
           для аудита и ввод имени руками — операция необратима. */}
+      <Dialog open={moveOpen} onOpenChange={setMoveOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("deviceDetail.moveTitle", { name: device.hostname })}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="move-tenant">{t("deviceDetail.tenant")}</Label>
+              <select
+                id="move-tenant"
+                value={moveTo}
+                onChange={(e) => setMoveTo(e.target.value)}
+                className="w-full h-9 rounded-md border bg-background px-3 text-sm"
+              >
+                <option value="">{t("deviceDetail.choose")}</option>
+                {allTenants
+                  .filter((t) => t.id !== device.tenant_id)
+                  .map((tn) => <option key={tn.id} value={tn.id}>{tn.name}</option>)}
+              </select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t("deviceDetail.moveHint")}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setMoveOpen(false)} disabled={moving}>
+                {t("deviceDetail.cancel")}
+              </Button>
+              <Button onClick={moveTenant} disabled={moving || moveTo === ""}>
+                {moving ? t("deviceDetail.moving") : t("deviceDetail.move")}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={decomOpen} onOpenChange={(o) => { setDecomOpen(o); if (!o) { setDecomReason(""); setDecomTyped("") } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Вывести из эксплуатации</DialogTitle>
+            <DialogTitle>{t("deviceDetail.decommission")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <p className="text-sm text-soft">
-              Агент удалит себя с «{device.hostname}»: службу, сертификат, приватный ключ,
-              каталоги данных и собственный бинарник. Отменить нельзя — вернуть машину
-              под управление можно только новой регистрацией.
+              {t("deviceDetail.decommissionHint", { name: device.hostname })}
             </p>
             <p className="text-sm text-soft">
-              Команда доставляется, когда устройство выйдет на связь. Статус сменится на
-              «Выведен из эксплуатации» только после подтверждения агента; если машина
-              в сеть уже не вернётся — снимайте агента вручную. Это не kill-switch: для
-              украденной техники нужна блокировка доступа.
+              {t("deviceDetail.decommissionDelivery")}
             </p>
             <div className="space-y-1.5">
-              <Label htmlFor="decom-reason">Причина (необязательно)</Label>
+              <Label htmlFor="decom-reason">{t("deviceDetail.reasonOptional")}</Label>
               <Input
                 id="decom-reason"
-                placeholder="Списание техники, увольнение сотрудника..."
+                placeholder={t("deviceDetail.hardwareWriteOffEmployee")}
                 value={decomReason}
                 onChange={(e) => setDecomReason(e.target.value)}
               />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="decom-confirm">
-                Введите <span className="font-mono text-foreground">{device.hostname}</span> для подтверждения
+                <Trans i18nKey="deviceDetail.typeToConfirm" values={{ name: device.hostname }} components={[<span className="font-mono text-foreground" />]} />
               </Label>
               <Input
                 id="decom-confirm"
@@ -1132,7 +1246,7 @@ export default function DeviceDetail() {
               onClick={sendDecommission}
               disabled={decommissioning || !decommissionArmed(device.hostname, decomTyped)}
             >
-              {decommissioning ? "Отправка..." : "Вывести из эксплуатации"}
+              {decommissioning ? t("deviceDetail.sending") : t("deviceDetail.decommission")}
             </Button>
           </div>
         </DialogContent>
@@ -1143,12 +1257,11 @@ export default function DeviceDetail() {
       <Dialog open={!!revealed} onOpenChange={(o) => !o && setRevealed(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Ключ выгружен</DialogTitle>
+            <DialogTitle>{t("deviceDetail.keyRevealed")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              Файл сохранён. Он зашифрован — расшифруйте его офлайн, на машине с шерами
-              приватного ключа эскроу:
+              {t("deviceDetail.revealSaved")}
             </p>
             <pre className="text-xs font-mono bg-muted/40 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">
 {`routineops-unseal unseal \\
@@ -1158,8 +1271,7 @@ export default function DeviceDetail() {
   -share share1.txt -share share2.txt`}
             </pre>
             <p className="text-xs text-muted-foreground">
-              Выгрузка записана в журнал аудита. Расшифрованный секрет не храните в
-              переписке и тикетах.
+              {t("deviceDetail.revealAudited")}
             </p>
           </div>
         </DialogContent>
@@ -1169,41 +1281,38 @@ export default function DeviceDetail() {
       <Dialog open={rebootOpen} onOpenChange={setRebootOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Перезагрузить {device.hostname}</DialogTitle>
+            <DialogTitle>{t("deviceDetail.rebootTitle", { name: device.hostname })}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Отсрочка — это время, за которое сотрудник успевает сохранить работу. По её
-              истечении приложения закрываются принудительно, отменить запланированную
-              перезагрузку из панели нельзя.
+              {t("deviceDetail.rebootDelayHint")}
               {/* device.os — сырая строка от агента, не ScriptPlatform: сверяем подстрокой. */}
               {!/win/i.test(device.os) && (
-                <> На macOS и Linux сотрудник за графическим сеансом предупреждения не увидит —
-                предупредите его сами.</>
+                <> {t("deviceDetail.rebootNoWarningHint")}</>
               )}
             </p>
             <div className="space-y-1.5">
-              <Label>Когда</Label>
+              <Label>{t("deviceDetail.when")}</Label>
               <Select
                 value={String(rebootDelay)}
                 onChange={(v) => setRebootDelay(Number(v))}
-                options={REBOOT_DELAYS.map((d) => ({ value: String(d.value), label: d.label }))}
+                options={REBOOT_DELAYS.map((d) => ({ value: String(d.value), label: i18n.t(d.label) }))}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="reboot-reason">Причина (необязательно)</Label>
+              <Label htmlFor="reboot-reason">{t("deviceDetail.reasonOptional")}</Label>
               <Input
                 id="reboot-reason"
-                placeholder="Установка обновлений безопасности..."
+                placeholder={t("deviceDetail.installingSecurityUpdates")}
                 value={rebootReason}
                 onChange={(e) => setRebootReason(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                На Windows этот текст сотрудник увидит в системном предупреждении.
+                {t("deviceDetail.windowsNoticeHint")}
               </p>
             </div>
             <Button className="w-full" onClick={sendReboot} disabled={rebooting}>
-              {rebooting ? "Отправка..." : "Запланировать перезагрузку"}
+              {rebooting ? t("deviceDetail.sending") : t("deviceDetail.scheduleAReboot")}
             </Button>
           </div>
         </DialogContent>

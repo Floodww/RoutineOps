@@ -7,7 +7,12 @@
 //	publish-release \
 //	  -binary ./agent_darwin_arm64 \
 //	  -version v1.0.0 -os darwin -arch arm64 \
-//	  -key release_ed25519.pem
+//	  -key release_ed25519.pem \
+//	  -channel beta
+//
+// Канареечная выкатка (Q-52): сначала публикуют в beta, где сидит небольшая группа
+// машин, а после обкатки повторяют ту же команду с -channel stable — это и есть
+// продвижение (UPSERT переводит строку, второй сборки не нужно).
 package main
 
 import (
@@ -35,11 +40,19 @@ func main() {
 		osName     = flag.String("os", "", "GOOS бинаря (darwin/linux/windows)")
 		arch       = flag.String("arch", "", "GOARCH бинаря (amd64/arm64)")
 		keyPath    = flag.String("key", "", "путь к ed25519-приватнику релиза (PEM)")
+		// Канал по умолчанию — stable, и это осознанно НЕ beta: команду запускают
+		// руками, и забытый флаг должен вести себя как раньше (публикация на парк),
+		// а не тихо посадить релиз в канарейку, откуда его никто не ждёт.
+		channel = flag.String("channel", storage.ChannelStable, "канал выкатки: stable|beta")
 	)
 	flag.Parse()
 
 	if *binaryPath == "" || *version == "" || *osName == "" || *arch == "" || *keyPath == "" {
 		fmt.Fprintln(os.Stderr, "all flags required: -binary -version -os -arch -key")
+		os.Exit(2)
+	}
+	if !storage.ValidChannel(*channel) {
+		fmt.Fprintf(os.Stderr, "неизвестный канал %q (ожидается stable|beta)\n", *channel)
 		os.Exit(2)
 	}
 
@@ -96,13 +109,19 @@ func main() {
 
 	if err := db.RegisterAgentRelease(context.Background(), *osName, *arch, *version,
 		filename, sha256hex, base64.StdEncoding.EncodeToString(sig),
-		base64.StdEncoding.EncodeToString(manifestSig),
+		base64.StdEncoding.EncodeToString(manifestSig), *channel,
 	); err != nil {
 		fmt.Fprintln(os.Stderr, "register:", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("published %s %s/%s → %s (sha256=%s)\n", *version, *osName, *arch, dst, hex.EncodeToString(digest[:]))
+	fmt.Printf("published %s %s/%s [%s] → %s (sha256=%s)\n",
+		*version, *osName, *arch, *channel, dst, hex.EncodeToString(digest[:]))
+	if *channel == storage.ChannelStable {
+		fmt.Println("канал stable: релиз уедет на ВЕСЬ парк этой платформы")
+	} else {
+		fmt.Println("канал beta: релиз уедет только на устройства beta-групп")
+	}
 }
 
 func loadEd25519PrivPEM(path string) (ed25519.PrivateKey, error) {

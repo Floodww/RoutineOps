@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"testing"
 )
@@ -19,7 +20,7 @@ func TestUpdateDeviceStatus_RefusesManagedStatuses(t *testing.T) {
 
 	for _, src := range []string{"pending_approval", "rejected", "decommissioned"} {
 		deviceID, _ := createDevice(t, rtr, tok, "mng-"+src, "windows")
-		if err := db.UpdateDeviceStatus(ctx, deviceID, src); err != nil {
+		if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, src); err != nil {
 			t.Fatalf("set %s: %v", src, err)
 		}
 		body, _ := json.Marshal(map[string]string{"status": "active"})
@@ -27,14 +28,14 @@ func TestUpdateDeviceStatus_RefusesManagedStatuses(t *testing.T) {
 		if w.Code != http.StatusConflict {
 			t.Errorf("PUT status=active на %s: got %d, want 409 (не бэкдор в approve)", src, w.Code)
 		}
-		if st, _ := db.GetDeviceStatusByID(ctx, deviceID); st != src {
+		if st, _ := db.GetDeviceStatusByID(ctx, tenancy.DefaultTenantID, deviceID); st != src {
 			t.Errorf("%s изменён backdoor'ом на %q", src, st)
 		}
 	}
 
 	// Штатный block/unblock (active↔blocked) по-прежнему работает.
 	deviceID, _ := createDevice(t, rtr, tok, "normal-block", "windows")
-	if err := db.UpdateDeviceStatus(ctx, deviceID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
 	body, _ := json.Marshal(map[string]string{"status": "blocked"})
@@ -42,7 +43,7 @@ func TestUpdateDeviceStatus_RefusesManagedStatuses(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("block active-устройства: got %d, want 200", w.Code)
 	}
-	if st, _ := db.GetDeviceStatusByID(ctx, deviceID); st != "blocked" {
+	if st, _ := db.GetDeviceStatusByID(ctx, tenancy.DefaultTenantID, deviceID); st != "blocked" {
 		t.Errorf("статус = %q, want blocked", st)
 	}
 }

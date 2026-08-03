@@ -127,13 +127,21 @@ if [ ! -f .env.prod ]; then
     exit 1
   fi
   DB_PASS=$(openssl rand -hex 16)
+  # Второй пароль — роли mdm_app (049), под которой ходит СЕРВЕР. Роль mdm остаётся
+  # только владельцем БД для DDL: она обходит RLS всегда (владелец), и пока сервер ходил
+  # под ней, изоляция тенантов (RLS FORCE, 046) была декоративной на КАЖДОЙ свежей
+  # установке. hex, а не base64: этот пароль уходит и в URL DSN, и в SQL-литерал
+  # ALTER ROLE (scripts/migrate.sh) — алфавит [0-9a-f] безопасен в обоих контекстах без
+  # percent-encoding и экранирования кавычек.
+  APP_PASS=$(openssl rand -hex 24)
   # base64, а НЕ hex: сервер требует >=16 РАЗНЫХ байт (distinctByteCount, main.go),
   # а у hex алфавит ровно 16 символов (0-9a-f) → если в рандоме не выпал хоть один,
   # получаем 15 распознанных → сервер крашится "too few distinct bytes" (~1 из 4).
   # base64 (алфавит 64) даёт много различных байт с запасом. -A: без переносов строк.
   JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')
   cat > .env.prod <<EOF
-DATABASE_DSN=postgres://mdm:${DB_PASS}@postgres:5432/mdm?sslmode=disable
+DATABASE_DSN=postgres://mdm_app:${APP_PASS}@postgres:5432/mdm?sslmode=disable
+MIGRATION_DSN=postgres://mdm:${DB_PASS}@postgres:5432/mdm?sslmode=disable
 REDIS_ADDR=redis:6379
 SERVER_CERT=certs/server.crt
 SERVER_KEY=certs/server.key
@@ -146,6 +154,15 @@ SEED_ADMIN_PASSWORD=${ADMIN_PASSWORD}
 PUBLIC_WEB_URL=https://${PUBLIC_IP}
 EOF
   echo ".env.prod создан"
+fi
+
+# Раскладка ролей БД на УЖЕ существующей установке: сервер обязан ходить под mdm_app,
+# миграции — под mdm. Свежая установка получает это выше, а инсталляции, поставленные до
+# разделения ролей, ехали с сервером под владельцем БД — и RLS их не защищала. Тот же
+# вызов стоит в update.sh: апгрейд идёт через него, install.sh он не зовёт.
+if bash scripts/env-db-roles.sh .env.prod; then :; else
+  echo "ОШИБКА: не удалось привести роли БД в .env.prod — установка прервана." >&2
+  exit 1
 fi
 
 # .env.prod создаётся только при отсутствии (выше) — значит смена адреса его не трогает,

@@ -1,11 +1,21 @@
 import { useEffect, useState } from "react"
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom"
-import { LayoutDashboard, Monitor, Bell, Shield, LogOut, LogIn, KeyRound, KeySquare, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck, FolderTree } from "lucide-react"
+import { useTranslation } from "react-i18next"
+import { LayoutDashboard, Monitor, Bell, Shield, ShieldCheck, LogOut, LogIn, KeyRound, KeySquare, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck, FolderTree, Building2, Network, ScanFace, Fingerprint, Radio, Rocket, ChevronsUpDown, Check } from "lucide-react"
 import { logout } from "@/lib/auth"
 import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import { useMe } from "@/lib/useMe"
+import { useMyTenants } from "@/lib/useMyTenants"
 import { useTheme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu"
+
+// Роли в подписи переключателя: сырые it_admin/viewer в интерфейсе не показываем.
+// Значения — КЛЮЧИ словаря: t() на уровне модуля недоступен.
+const ROLE_LABELS: Record<string, string> = {
+  it_admin: "layout.roleAdmin",
+  viewer: "layout.roleViewer",
+}
 import api from "@/lib/api"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
@@ -15,17 +25,19 @@ import { toast } from "@/lib/toast"
 // Порядок обратный шкале важности намеренно: пользователь читает слева направо и
 // выбирает, НАСКОЛЬКО ЕГО БЕСПОКОИТЬ, а не насколько серьёзен инцидент.
 const SEVERITY_CHOICES = [
-  { value: "low", label: "Все" },
-  { value: "medium", label: "Средние+" },
-  { value: "high", label: "Высокие+" },
-  { value: "critical", label: "Критичные" },
+  { value: "low", tKey: "layout.tgSeverityLow" },
+  { value: "medium", tKey: "layout.tgSeverityMedium" },
+  { value: "high", tKey: "layout.tgSeverityHigh" },
+  { value: "critical", tKey: "layout.tgSeverityCritical" },
 ]
 
 export default function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { theme, toggleTheme } = useTheme()
-  const { isAdmin, me } = useMe()
+  const { isAdmin, isProvider, me } = useMe()
+  const { tenants: myTenants, switchTenant } = useMyTenants()
+  const [switching, setSwitching] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
   const [queueCount, setQueueCount] = useState(0)
   const [alertCount, setAlertCount] = useState(0)
@@ -38,6 +50,12 @@ export default function Layout() {
   // Порог доставки уведомлений (users.notify_min_severity, миграция 041).
   const [tgMinSeverity, setTgMinSeverity] = useState("low")
   const [tgSevSaving, setTgSevSaving] = useState(false)
+  const { t, i18n } = useTranslation()
+
+  const toggleLanguage = () => {
+    const nextLang = i18n.language === "ru" ? "en" : "ru"
+    i18n.changeLanguage(nextLang)
+  }
 
   useEffect(() => {
     api.get<{ linked: boolean }>("/profile/telegram")
@@ -84,7 +102,7 @@ export default function Layout() {
       // трактуем как «всё как раньше», симметрично DEFAULT 'low' в схеме.
       setTgMinSeverity(r.data.min_severity || "low")
     } catch {
-      toast({ title: "Не удалось загрузить статус Telegram", variant: "destructive" })
+      toast({ title: t("layout.telegramFailed"), variant: "destructive" })
     }
   }
 
@@ -99,7 +117,7 @@ export default function Layout() {
       await api.post("/profile/notify-min-severity", { min_severity: value })
       setTgMinSeverity(value)
     } catch {
-      toast({ title: "Не удалось сохранить порог уведомлений", variant: "destructive" })
+      toast({ title: t("layout.thresholdFailed"), variant: "destructive" })
     } finally {
       setTgSevSaving(false)
     }
@@ -111,7 +129,7 @@ export default function Layout() {
       const r = await api.post<{ token: string }>("/profile/telegram-link", {})
       setTgToken(r.data.token)
     } catch {
-      toast({ title: "Не удалось сгенерировать токен", variant: "destructive" })
+      toast({ title: t("layout.tgTokenGenFail"), variant: "destructive" })
     } finally {
       setTgLoading(false)
     }
@@ -130,40 +148,54 @@ export default function Layout() {
     {
       title: null,
       items: [
-        { to: "/", label: "Обзор", icon: LayoutDashboard, badge: 0, adminOnly: false },
-        { to: "/alerts", label: "Алерты", icon: Bell, badge: alertCount, adminOnly: false },
-        { to: "/audit-log", label: "Журнал", icon: History, badge: 0, adminOnly: false },
+        { to: "/", label: t("nav.dashboard"), icon: LayoutDashboard, badge: 0, adminOnly: false },
+        { to: "/compliance", label: t("nav.compliance"), icon: ShieldCheck, badge: 0, adminOnly: false },
+        { to: "/alerts", label: t("nav.alerts"), icon: Bell, badge: alertCount, adminOnly: false },
+        { to: "/audit-log", label: t("nav.audit"), icon: History, badge: 0, adminOnly: false },
       ],
     },
     {
-      title: "Хосты",
+      title: t("nav.hosts"),
       items: [
-        { to: "/devices", label: "Устройства", icon: Monitor, badge: 0, adminOnly: false },
-        { to: "/enrollment", label: "Энроллмент", icon: LogIn, badge: queueCount, adminOnly: true },
-        { to: "/groups", label: "Группы", icon: Boxes, badge: 0, adminOnly: true },
+        { to: "/devices", label: t("nav.devices"), icon: Monitor, badge: 0, adminOnly: false },
+        { to: "/across-tenants", label: t("nav.acrossTenants"), icon: Network, badge: 0, providerOnly: true },
+        { to: "/enrollment", label: t("nav.enrollment"), icon: LogIn, badge: queueCount, adminOnly: true },
+        { to: "/groups", label: t("nav.groups"), icon: Boxes, badge: 0, adminOnly: true },
+        { to: "/rollout", label: t("nav.rollout"), icon: Rocket, badge: 0, adminOnly: false },
       ],
     },
     {
-      title: "Управление",
+      title: t("nav.management"),
       items: [
-        { to: "/scripts", label: "Скрипты", icon: FileCode2, badge: 0, adminOnly: true },
-        { to: "/script-policies", label: "Политики скриптов", icon: ListChecks, badge: 0, adminOnly: true },
-        { to: "/policies", label: "Политики", icon: Shield, badge: 0, adminOnly: true },
-        { to: "/admin-access", label: "Заявки на права", icon: KeyRound, badge: pendingCount, adminOnly: true },
+        { to: "/scripts", label: t("nav.scripts"), icon: FileCode2, badge: 0, adminOnly: true },
+        { to: "/script-policies", label: t("nav.scriptPolicies"), icon: ListChecks, badge: 0, adminOnly: true },
+        { to: "/policies", label: t("nav.policies"), icon: Shield, badge: 0, adminOnly: true },
+        { to: "/admin-access", label: t("nav.adminAccess"), icon: KeyRound, badge: pendingCount, adminOnly: true },
       ],
     },
     {
-      title: "Настройки",
+      title: t("nav.settings"),
       items: [
-        { to: "/profile", label: "Профиль", icon: UserCircle, badge: 0, adminOnly: false },
-        { to: "/users", label: "Пользователи", icon: Users, badge: 0, adminOnly: true },
-        { to: "/license", label: "Лицензия", icon: BadgeCheck, badge: 0, adminOnly: true },
-        { to: "/api-tokens", label: "API-токены", icon: KeySquare, badge: 0, adminOnly: true },
-        { to: "/directory", label: "Каталог", icon: FolderTree, badge: 0, adminOnly: true },
+        { to: "/profile", label: t("nav.profile"), icon: UserCircle, badge: 0, adminOnly: false },
+        { to: "/users", label: t("nav.users"), icon: Users, badge: 0, adminOnly: true },
+        { to: "/license", label: t("nav.license"), icon: BadgeCheck, badge: 0, adminOnly: true },
+        { to: "/api-tokens", label: t("nav.apiTokens"), icon: KeySquare, badge: 0, adminOnly: true },
+        { to: "/directory", label: t("nav.directory"), icon: FolderTree, badge: 0, adminOnly: true },
+        { to: "/sso", label: t("nav.sso"), icon: ScanFace, badge: 0, adminOnly: true },
+        { to: "/saml", label: t("nav.saml"), icon: Fingerprint, badge: 0, adminOnly: true },
+        { to: "/siem", label: t("nav.siem"), icon: Radio, badge: 0, adminOnly: true },
+        { to: "/tenants", label: t("nav.tenants"), icon: Building2, badge: 0, providerOnly: true },
       ],
     },
   ]
-    .map((s) => ({ ...s, items: s.items.filter((i) => !i.adminOnly || isAdmin) }))
+    .map((s) => ({
+      ...s,
+      items: s.items.filter((i) => {
+        if ((i as { providerOnly?: boolean }).providerOnly) return isProvider
+        if (i.adminOnly) return isAdmin
+        return true
+      }),
+    }))
     // У viewer «Управление» пустеет целиком — заголовок без пунктов не рисуем.
     .filter((s) => s.items.length > 0)
 
@@ -185,6 +217,65 @@ export default function Layout() {
             </div>
           </NavLink>
         </div>
+
+        {/* Переключатель тенанта (ADR-7 §11.4). Показывается только при
+            мульти-членстве: при одном тенанте выбирать не из чего, а Free вообще не
+            должен видеть эту сущность (контракт §10.2).
+
+            Раньше здесь стоял голый <select> с подписью-капслоком — он выпадал из
+            языка остального интерфейса и читался как настройка формы, а не как
+            «где я сейчас нахожусь». Теперь это строка под шапкой: активный тенант
+            виден всегда, роль в нём — рядом, выпадающий список в том же стиле, что
+            и меню действий на страницах. */}
+        {myTenants.length > 1 && (
+          <div className="px-2.5 pt-2.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild disabled={switching}>
+                <button
+                  className="w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-[var(--sidebar-accent)] disabled:opacity-60"
+                  title={t("layout.tenant")}
+                >
+                  <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium truncate">
+                      {myTenants.find((m) => m.active)?.tenant_name ?? "—"}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {switching
+                        ? t("layout.switching")
+                        : (() => {
+                            const role = myTenants.find((m) => m.active)?.role ?? ""
+                            return ROLE_LABELS[role] ? t(ROLE_LABELS[role]) : role
+                          })()}
+                    </div>
+                  </div>
+                  <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[--radix-dropdown-menu-trigger-width] min-w-56">
+                {myTenants.map((m) => (
+                  <DropdownMenuItem
+                    key={m.tenant_id}
+                    disabled={m.active || switching}
+                    onSelect={() => {
+                      if (m.active) return
+                      setSwitching(true)
+                      switchTenant(m.tenant_id).catch(() => setSwitching(false))
+                    }}
+                  >
+                    <Check className={cn("h-4 w-4 shrink-0", !m.active && "opacity-0")} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate">{m.tenant_name}</div>
+                      <div className="text-[11px] text-muted-foreground truncate">
+                        {ROLE_LABELS[m.role] ?? m.role}
+                      </div>
+                    </div>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
 
         <nav className="flex-1 overflow-y-auto px-2.5 py-3.5 flex flex-col gap-0.5">
           {navSections.map((section, si) => (
@@ -228,7 +319,7 @@ export default function Layout() {
         <div className="p-2.5 border-t border-[var(--sidebar-border)] flex flex-col gap-0.5">
           {me && (
             <div className="px-3 pb-1 text-[11px] text-muted-foreground truncate">
-              {me.role === "it_admin" ? "Админ" : "Наблюдатель"}
+              {me.role === "it_admin" ? t("layout.roleAdmin") : t("layout.roleViewer")}
             </div>
           )}
           <button
@@ -239,7 +330,15 @@ export default function Layout() {
             {theme === "dark"
               ? <Sun className="h-[17px] w-[17px]" />
               : <Moon className="h-[17px] w-[17px]" />}
-            {theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            {theme === "dark" ? t("layout.themeLight") : t("layout.themeDark")}
+          </button>
+          <button
+            type="button"
+            onClick={toggleLanguage}
+            className="nav-item text-muted-foreground w-full"
+          >
+            <span className="font-semibold px-[2px]">{i18n.language.toUpperCase()}</span>
+            {i18n.language === "ru" ? t("layout.langEn") : t("layout.langRu")}
           </button>
           <button
             type="button"
@@ -247,7 +346,7 @@ export default function Layout() {
             className="nav-item text-muted-foreground w-full"
           >
             <Send className="h-[17px] w-[17px]" />
-            {tgLinked ? "Telegram ✓" : "Подключить Telegram"}
+            {tgLinked ? t("layout.tgConnected") : t("layout.tgConnect")}
           </button>
           <button
             type="button"
@@ -255,7 +354,7 @@ export default function Layout() {
             className="nav-item text-muted-foreground hover:!text-destructive w-full"
           >
             <LogOut className="h-[17px] w-[17px]" />
-            Выход
+            {t("layout.logout")}
           </button>
         </div>
       </aside>
@@ -263,14 +362,14 @@ export default function Layout() {
       <Dialog open={tgOpen} onOpenChange={setTgOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Telegram уведомления</DialogTitle>
+            <DialogTitle>{t("layout.tgDialogTitle")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-1">
             {tgLinked ? (
-              <p className="text-sm text-green-700 dark:text-green-400">Telegram подключён. Вы получаете уведомления.</p>
+              <p className="text-sm text-green-700 dark:text-green-400">{t("layout.tgDialogConnected")}</p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                Подключите Telegram, чтобы получать уведомления об алертах и заявках на права.
+                {t("layout.tgDialogDesc")}
               </p>
             )}
             {tgToken ? (
@@ -278,7 +377,7 @@ export default function Layout() {
                 <p className="text-sm">
                   {tgBotUsername ? (
                     <>
-                      Отправьте боту{" "}
+                      {t("layout.tgSendToBot")}{" "}
                       <a
                         href={`https://t.me/${tgBotUsername}`}
                         target="_blank"
@@ -287,20 +386,20 @@ export default function Layout() {
                       >
                         @{tgBotUsername}
                       </a>{" "}
-                      команду:
+                      {t("layout.tgCommand")}
                     </>
                   ) : (
-                    <>Отправьте Telegram-боту вашей организации команду:</>
+                    <>{t("layout.tgSendToBotOrg")}</>
                   )}
                 </p>
                 <code className="block rounded-md border border-border bg-muted px-3 py-2.5 text-sm select-all break-all font-mono">
                   /start {tgToken}
                 </code>
-                <p className="text-xs text-muted-foreground">Токен одноразовый. Если не сработал — сгенерируйте новый.</p>
+                <p className="text-xs text-muted-foreground">{t("layout.tgDialogNote")}</p>
               </div>
             ) : null}
             <Button variant="outline" className="w-full" onClick={generateToken} disabled={tgLoading}>
-              {tgLoading ? "Генерация..." : tgToken ? "Сгенерировать новый токен" : "Получить токен"}
+              {tgLoading ? t("layout.tgBtnGenerating") : tgToken ? t("layout.tgBtnNewToken") : t("layout.tgBtnGetToken")}
             </Button>
 
             {/* Порог доставки (миграция 041). Показывается всегда, а не только при
@@ -308,7 +407,7 @@ export default function Layout() {
                 прятать настройку за состоянием, которое пользователь как раз сейчас
                 меняет, значило бы заставить его открыть диалог второй раз. */}
             <div className="space-y-2 border-t border-border pt-4">
-              <p className="text-sm font-medium text-foreground">Беспокоить начиная с уровня</p>
+              <p className="text-sm font-medium text-foreground">{t("layout.tgSeverityLabel")}</p>
               <div className="flex gap-1.5">
                 {SEVERITY_CHOICES.map((c) => (
                   <button
@@ -322,12 +421,12 @@ export default function Layout() {
                         : "border-border text-muted-foreground hover:bg-muted"
                     }`}
                   >
-                    {c.label}
+                    {t(c.tKey)}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">
-                Алерты ниже выбранного уровня не приходят в Telegram, но остаются в панели.
+                {t("layout.tgSeverityNote")}
               </p>
             </div>
           </div>

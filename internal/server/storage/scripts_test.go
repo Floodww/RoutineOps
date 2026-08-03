@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 
 func TestCreateScript_ReturnsScript(t *testing.T) {
 	db := newDB(t)
-	s, err := db.CreateScript(context.Background(), fmt.Sprintf("myscript-%s", uniq(t)), "macos", "echo hello")
+	s, err := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("myscript-%s", uniq(t)), "macos", "echo hello")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
@@ -26,9 +27,9 @@ func TestCreateScript_ReturnsScript(t *testing.T) {
 
 func TestGetScript_Found(t *testing.T) {
 	db := newDB(t)
-	created, _ := db.CreateScript(context.Background(), fmt.Sprintf("getscript-%s", uniq(t)), "windows", "dir")
+	created, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("getscript-%s", uniq(t)), "windows", "dir")
 
-	got, err := db.GetScript(context.Background(), created.ID)
+	got, err := db.GetScript(context.Background(), tenancy.DefaultTenantID, created.ID)
 	if err != nil {
 		t.Fatalf("GetScript: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestGetScript_Found(t *testing.T) {
 
 func TestGetScript_NotFound_ReturnsNil(t *testing.T) {
 	db := newDB(t)
-	got, err := db.GetScript(context.Background(), "00000000-0000-0000-0000-000000000000")
+	got, err := db.GetScript(context.Background(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		t.Fatalf("GetScript: %v", err)
 	}
@@ -50,9 +51,9 @@ func TestGetScript_NotFound_ReturnsNil(t *testing.T) {
 
 func TestUpdateScript(t *testing.T) {
 	db := newDB(t)
-	s, _ := db.CreateScript(context.Background(), fmt.Sprintf("updscript-%s", uniq(t)), "macos", "echo old")
+	s, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("updscript-%s", uniq(t)), "macos", "echo old")
 
-	updated, err := db.UpdateScript(context.Background(), s.ID, s.Name, "windows", "echo new")
+	updated, err := db.UpdateScript(context.Background(), tenancy.DefaultTenantID, s.ID, s.Name, "windows", "echo new")
 	if err != nil {
 		t.Fatalf("UpdateScript: %v", err)
 	}
@@ -69,12 +70,12 @@ func TestUpdateScript(t *testing.T) {
 
 func TestDeleteScript_RemovesIt(t *testing.T) {
 	db := newDB(t)
-	s, _ := db.CreateScript(context.Background(), fmt.Sprintf("delscript-%s", uniq(t)), "macos", "echo bye")
+	s, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("delscript-%s", uniq(t)), "macos", "echo bye")
 
-	if err := db.DeleteScript(context.Background(), s.ID); err != nil {
+	if err := db.DeleteScript(context.Background(), tenancy.DefaultTenantID, s.ID); err != nil {
 		t.Fatalf("DeleteScript: %v", err)
 	}
-	got, _ := db.GetScript(context.Background(), s.ID)
+	got, _ := db.GetScript(context.Background(), tenancy.DefaultTenantID, s.ID)
 	if got != nil {
 		t.Error("script should be deleted")
 	}
@@ -83,9 +84,9 @@ func TestDeleteScript_RemovesIt(t *testing.T) {
 func TestListScripts_ContainsCreated(t *testing.T) {
 	db := newDB(t)
 	name := fmt.Sprintf("listscript-%s", uniq(t))
-	s, _ := db.CreateScript(context.Background(), name, "linux", "uname -a")
+	s, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, name, "linux", "uname -a")
 
-	scripts, err := db.ListScripts(context.Background())
+	scripts, err := db.ListScripts(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListScripts: %v", err)
 	}
@@ -102,10 +103,9 @@ func TestListScripts_ContainsCreated(t *testing.T) {
 
 func TestCreateScriptPolicy_And_Toggle(t *testing.T) {
 	db := newDB(t)
-	s, _ := db.CreateScript(context.Background(), fmt.Sprintf("pol-script-%s", uniq(t)), "macos", "date")
+	s, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("pol-script-%s", uniq(t)), "macos", "date")
 
-	pol, err := db.CreateScriptPolicy(context.Background(),
-		fmt.Sprintf("pol-%s", uniq(t)), s.ID, "schedule",
+	pol, err := db.CreateScriptPolicy(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("pol-%s", uniq(t)), s.ID, "schedule",
 		[]byte(`{"cron":"*/5 * * * *"}`), nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
@@ -118,11 +118,11 @@ func TestCreateScriptPolicy_And_Toggle(t *testing.T) {
 	}
 
 	// disable it
-	if err := db.ToggleScriptPolicy(context.Background(), pol.ID, false); err != nil {
+	if err := db.ToggleScriptPolicy(context.Background(), tenancy.DefaultTenantID, pol.ID, false); err != nil {
 		t.Fatalf("ToggleScriptPolicy: %v", err)
 	}
 
-	policies, _ := db.ListScriptPolicies(context.Background())
+	policies, _ := db.ListScriptPolicies(context.Background(), tenancy.DefaultTenantID)
 	for _, p := range policies {
 		if p.ID == pol.ID && p.IsActive {
 			t.Error("policy should be inactive after toggle")
@@ -132,15 +132,14 @@ func TestCreateScriptPolicy_And_Toggle(t *testing.T) {
 
 func TestDeleteScriptPolicy(t *testing.T) {
 	db := newDB(t)
-	s, _ := db.CreateScript(context.Background(), fmt.Sprintf("delpol-script-%s", uniq(t)), "windows", "ver")
-	pol, _ := db.CreateScriptPolicy(context.Background(),
-		fmt.Sprintf("delpol-%s", uniq(t)), s.ID, "event", nil, []byte(`{"event":"startup"}`))
+	s, _ := db.CreateScript(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("delpol-script-%s", uniq(t)), "windows", "ver")
+	pol, _ := db.CreateScriptPolicy(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("delpol-%s", uniq(t)), s.ID, "event", nil, []byte(`{"event":"startup"}`))
 
-	if err := db.DeleteScriptPolicy(context.Background(), pol.ID); err != nil {
+	if err := db.DeleteScriptPolicy(context.Background(), tenancy.DefaultTenantID, pol.ID); err != nil {
 		t.Fatalf("DeleteScriptPolicy: %v", err)
 	}
 
-	policies, _ := db.ListScriptPolicies(context.Background())
+	policies, _ := db.ListScriptPolicies(context.Background(), tenancy.DefaultTenantID)
 	for _, p := range policies {
 		if p.ID == pol.ID {
 			t.Error("deleted policy should not appear in list")
@@ -152,16 +151,16 @@ func TestCreateDeviceGroup_And_AddRemoveMember(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-grp-%s", uniq(t)), "macos")
 
-	g, err := db.CreateDeviceGroup(context.Background(), fmt.Sprintf("group-%s", uniq(t)), "")
+	g, err := db.CreateDeviceGroup(context.Background(), tenancy.DefaultTenantID, fmt.Sprintf("group-%s", uniq(t)), "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
 
-	if err := db.AddDeviceToGroup(context.Background(), d.ID, g.ID); err != nil {
+	if err := db.AddDeviceToGroup(context.Background(), tenancy.DefaultTenantID, d.ID, g.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
 
-	groups, err := db.ListDeviceGroups(context.Background())
+	groups, err := db.ListDeviceGroups(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListDeviceGroups: %v", err)
 	}
@@ -185,11 +184,11 @@ func TestCreateDeviceGroup_And_AddRemoveMember(t *testing.T) {
 	}
 
 	// remove member
-	if err := db.RemoveDeviceFromGroup(context.Background(), d.ID, g.ID); err != nil {
+	if err := db.RemoveDeviceFromGroup(context.Background(), tenancy.DefaultTenantID, d.ID, g.ID); err != nil {
 		t.Fatalf("RemoveDeviceFromGroup: %v", err)
 	}
 
-	groups2, _ := db.ListDeviceGroups(context.Background())
+	groups2, _ := db.ListDeviceGroups(context.Background(), tenancy.DefaultTenantID)
 	for _, grp := range groups2 {
 		if grp.ID == g.ID {
 			for _, did := range grp.DeviceIDs {
@@ -210,28 +209,28 @@ func TestDuplicateNames_ScriptsAndPolicies(t *testing.T) {
 	ctx := context.Background()
 
 	name := fmt.Sprintf("Проверка антивируса %s", uniq(t))
-	s, err := db.CreateScript(ctx, name, "windows", "echo ok")
+	s, err := db.CreateScript(ctx, tenancy.DefaultTenantID, name, "windows", "echo ok")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	if _, err := db.CreateScript(ctx, "  "+strings.ToUpper(name)+" ", "windows", "echo dup"); !errors.Is(err, storage.ErrDuplicateName) {
+	if _, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "  "+strings.ToUpper(name)+" ", "windows", "echo dup"); !errors.Is(err, storage.ErrDuplicateName) {
 		t.Errorf("дубль имени скрипта = %v, want ErrDuplicateName", err)
 	}
 
 	// Переименование в занятое имя — тот же конфликт, что и создание.
-	other, err := db.CreateScript(ctx, name+" второй", "windows", "echo other")
+	other, err := db.CreateScript(ctx, tenancy.DefaultTenantID, name+" второй", "windows", "echo other")
 	if err != nil {
 		t.Fatalf("CreateScript (второй): %v", err)
 	}
-	if _, err := db.UpdateScript(ctx, other.ID, name, "windows", "echo other"); !errors.Is(err, storage.ErrDuplicateName) {
+	if _, err := db.UpdateScript(ctx, tenancy.DefaultTenantID, other.ID, name, "windows", "echo other"); !errors.Is(err, storage.ErrDuplicateName) {
 		t.Errorf("переименование в занятое = %v, want ErrDuplicateName", err)
 	}
 
 	polName := fmt.Sprintf("Ежедневная проверка %s", uniq(t))
-	if _, err := db.CreateScriptPolicy(ctx, polName, s.ID, "manual", nil, nil); err != nil {
+	if _, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, polName, s.ID, "manual", nil, nil); err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
-	if _, err := db.CreateScriptPolicy(ctx, strings.ToLower(polName), s.ID, "manual", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
+	if _, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, strings.ToLower(polName), s.ID, "manual", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
 		t.Errorf("дубль имени скрипт-политики = %v, want ErrDuplicateName", err)
 	}
 }
@@ -242,16 +241,16 @@ func TestDuplicateNames_ScriptsAndPolicies(t *testing.T) {
 func TestUpdateScriptPolicy_KeepsIDChangesFields(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
-	s1, _ := db.CreateScript(ctx, fmt.Sprintf("upd-pol-script-a-%s", uniq(t)), "linux", "echo a")
-	s2, _ := db.CreateScript(ctx, fmt.Sprintf("upd-pol-script-b-%s", uniq(t)), "linux", "echo b")
+	s1, _ := db.CreateScript(ctx, tenancy.DefaultTenantID, fmt.Sprintf("upd-pol-script-a-%s", uniq(t)), "linux", "echo a")
+	s2, _ := db.CreateScript(ctx, tenancy.DefaultTenantID, fmt.Sprintf("upd-pol-script-b-%s", uniq(t)), "linux", "echo b")
 
 	name := fmt.Sprintf("Политика %s", uniq(t))
-	p, err := db.CreateScriptPolicy(ctx, name, s1.ID, "schedule", []byte(`{"cron":"0 9 * * *"}`), nil)
+	p, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, name, s1.ID, "schedule", []byte(`{"cron":"0 9 * * *"}`), nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
 
-	upd, err := db.UpdateScriptPolicy(ctx, p.ID, name+" (новое имя)", s2.ID, "on_connect", nil, nil)
+	upd, err := db.UpdateScriptPolicy(ctx, tenancy.DefaultTenantID, p.ID, name+" (новое имя)", s2.ID, "on_connect", nil, nil)
 	if err != nil {
 		t.Fatalf("UpdateScriptPolicy: %v", err)
 	}
@@ -266,14 +265,14 @@ func TestUpdateScriptPolicy_KeepsIDChangesFields(t *testing.T) {
 	}
 
 	// Несуществующая политика — (nil, nil), хендлер отдаёт 404, а не 500.
-	got, err := db.UpdateScriptPolicy(ctx, "00000000-0000-0000-0000-000000000000", "x", s1.ID, "on_connect", nil, nil)
+	got, err := db.UpdateScriptPolicy(ctx, tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000", "x", s1.ID, "on_connect", nil, nil)
 	if err != nil || got != nil {
 		t.Errorf("UpdateScriptPolicy(нет такой) = %v, %v; want nil, nil", got, err)
 	}
 
 	// Переименование в занятое имя — 409, а не 500.
-	other, _ := db.CreateScriptPolicy(ctx, name+" сосед", s1.ID, "on_connect", nil, nil)
-	if _, err := db.UpdateScriptPolicy(ctx, other.ID, name+" (новое имя)", s1.ID, "on_connect", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
+	other, _ := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, name+" сосед", s1.ID, "on_connect", nil, nil)
+	if _, err := db.UpdateScriptPolicy(ctx, tenancy.DefaultTenantID, other.ID, name+" (новое имя)", s1.ID, "on_connect", nil, nil); !errors.Is(err, storage.ErrDuplicateName) {
 		t.Errorf("переименование в занятое = %v, want ErrDuplicateName", err)
 	}
 }

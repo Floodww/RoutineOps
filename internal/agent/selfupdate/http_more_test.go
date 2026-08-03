@@ -40,12 +40,12 @@ func selfSignedCAPEM(t *testing.T) []byte {
 
 func TestNewHTTPClient(t *testing.T) {
 	// Пустой caFile → системные корни (DefaultClient), ok=true.
-	if c, ok := newHTTPClient(""); !ok || c != http.DefaultClient {
+	if c, ok := NewHTTPClient(""); !ok || c != http.DefaultClient {
 		t.Fatalf("пустой caFile: ожидали (DefaultClient, true), got (%v, %v)", c, ok)
 	}
 
 	// Несуществующий путь → ok=false, fallback на DefaultClient.
-	if c, ok := newHTTPClient(filepath.Join(t.TempDir(), "нет.pem")); ok || c != http.DefaultClient {
+	if c, ok := NewHTTPClient(filepath.Join(t.TempDir(), "нет.pem")); ok || c != http.DefaultClient {
 		t.Fatalf("отсутствующий caFile: ожидали (DefaultClient, false), got (%v, %v)", c, ok)
 	}
 
@@ -54,7 +54,7 @@ func TestNewHTTPClient(t *testing.T) {
 	if err := os.WriteFile(junk, []byte("это не сертификат"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if c, ok := newHTTPClient(junk); ok || c != http.DefaultClient {
+	if c, ok := NewHTTPClient(junk); ok || c != http.DefaultClient {
 		t.Fatalf("битый PEM: ожидали (DefaultClient, false), got (%v, %v)", c, ok)
 	}
 
@@ -63,7 +63,7 @@ func TestNewHTTPClient(t *testing.T) {
 	if err := os.WriteFile(caPath, selfSignedCAPEM(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, ok := newHTTPClient(caPath)
+	c, ok := NewHTTPClient(caPath)
 	if !ok {
 		t.Fatal("валидный CA: ожидали ok=true")
 	}

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"testing"
 )
@@ -37,7 +38,7 @@ func TestRebootDevice_SecondRequestReusesPendingTask(t *testing.T) {
 	ctx := context.Background()
 
 	deviceID, _ := createDevice(t, rtr, tok, "reboot-idem", "windows")
-	if err := db.UpdateDeviceStatus(ctx, deviceID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
 
@@ -78,7 +79,7 @@ func TestRebootDevice_DelayNormalization(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deviceID, _ := createDevice(t, rtr, tok, "reboot-delay-"+tc.name, "linux")
-			if err := db.UpdateDeviceStatus(ctx, deviceID, "active"); err != nil {
+			if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 				t.Fatalf("set active: %v", err)
 			}
 			resp, code := postReboot(t, rtr, tok, "/api/v1/devices/"+deviceID+"/reboot",
@@ -114,7 +115,7 @@ func TestRebootDevice_RefusesNonActive(t *testing.T) {
 
 	for _, st := range []string{"blocked", "decommissioned", "pending_approval"} {
 		deviceID, _ := createDevice(t, rtr, tok, "reboot-"+st, "windows")
-		if err := db.UpdateDeviceStatus(ctx, deviceID, st); err != nil {
+		if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, st); err != nil {
 			t.Fatalf("set %s: %v", st, err)
 		}
 		_, code := postReboot(t, rtr, tok, "/api/v1/devices/"+deviceID+"/reboot", map[string]any{})
@@ -131,7 +132,7 @@ func TestRebootDevice_ViewerForbidden(t *testing.T) {
 	viewer := tokenForRole(t, rtr, db, "viewer", "viewer_")
 
 	deviceID, _ := createDevice(t, rtr, admin, "reboot-rbac", "windows")
-	if err := db.UpdateDeviceStatus(context.Background(), deviceID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
 	_, code := postReboot(t, rtr, viewer, "/api/v1/devices/"+deviceID+"/reboot", map[string]any{})
@@ -153,7 +154,7 @@ func TestRebootGroup_ConfirmsScope(t *testing.T) {
 	var deviceIDs []string
 	for _, name := range []string{"g1", "g2"} {
 		id, _ := createDevice(t, rtr, tok, "reboot-"+name, "windows")
-		if err := db.UpdateDeviceStatus(ctx, id, "active"); err != nil {
+		if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, id, "active"); err != nil {
 			t.Fatalf("set active: %v", err)
 		}
 		body, _ := json.Marshal(map[string]string{"device_id": id})

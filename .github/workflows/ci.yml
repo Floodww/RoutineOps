@@ -61,8 +61,13 @@ jobs:
           # её отсутствии он печатал «ПРОПУСК» и выходил с кодом 0, то есть проверял
           # ноль. Теперь скрипт fail-closed, и без этой строки любое обновление
           # образа или добавление setup-python роняло бы весь пайплайн.
+          # Ставим системным пакетом, а НЕ `pip install`: с PEP 668 интерпретатор в
+          # свежих образах помечен externally-managed, и pip в него отказывается
+          # ставить (error: externally-managed-environment) — фолбэк сработал бы
+          # ровно в тот момент, когда он нужен, и уронил бы пайплайн вместо починки.
           python3 -c 'import yaml' 2>/dev/null \
-            || python3 -m pip install --quiet --disable-pip-version-check PyYAML
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          python3 -c 'import yaml' || { echo "PyYAML недоступен — гард спецификации API не может работать" >&2; exit 1; }
           # check-public-docs.sh и его whitelist вырезаются из Free-среза
           # (export-free.sh, шаг 4) — это мейнтейнерский тулинг. В срезе гард
           # и не нужен: он проверяет список, по которому срез и сделан.
@@ -81,6 +86,26 @@ jobs:
       # не было ни одного автоматического барьера.
       - name: leak-guard (enterprise → open-core)
         run: sh scripts/check-oss-no-enterprise.sh
+
+      # Тот же класс проблемы, что и у гардов выше, только по другой оси: leak-скан
+      # Free-среза (имена, внутренние хосты/IP, процесс-ссылки на приватные доки) жил
+      # ТОЛЬКО внутри export-free.sh, а тот гоняется руками и лишь перед публикацией.
+      # Утечки поэтому копились неделями и всплывали пачкой: 28.07 один прогон дал
+      # сразу четыре блокера — комментарии и одна тестовая константа, каждый из
+      # которых стоил бы минуты, поймай его коммит-в-коммит.
+      # --scan-only делает срез (шаги 1-4b) и гоняет V1/V4/V4b — чистая работа с
+      # текстом: ни protoc, ни npm, ни сборки. Про НЕпокрытое (V4c, бинари) шаг
+      # печатает явно — «leak-скан» в логе не должен читаться как «проверено всё».
+      - name: leak-скан Free-среза (утечки в публичный код)
+        run: bash scripts/export-free.sh --scan-only
+
+      # Регрессия из поля (13.07): install.sh был идемпотентен настолько, что
+      # ИСПРАВЛЕННЫЙ адрес сервера никуда не доезжал — опечатка в цифре IP стоила дня.
+      # Тест закрывает и обратную половину (CA, секреты и БД трогать нельзя), но до
+      # сих пор запускался руками. Docker и hostname в нём заглушки, нужен только
+      # bash+openssl — на раннере это секунды.
+      - name: install.sh — реконсиляция адресов и секретов
+        run: bash scripts/test-install-readdress.sh
 
       - name: build
         run: go build ./...
@@ -217,6 +242,36 @@ jobs:
         # -arch x64: иначе пакет x86 и ProgramFiles64Folder уезжает в Program Files (x86).
         run: wix build installer/windows/agent.wxs -arch x64 -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -d CaCert=installer/windows/ca.crt -o agent.msi
 
+      # До сих пор CI собирал ТОЛЬКО валидатор — файл, который никуда не едет.
+      # Боевой авторинг (build/msi/mdm-agent.wxs, его собирает build-msi.ps1) не
+      # проверялся ничем, хотя именно он уходит на парк: опечатка в нём всплывала
+      # бы на релизной сборке, а не в PR. Нужен util-extension: боевой источник
+      # зовёт WixQuietExec для enroll/uninstall.
+      - name: wix build боевого MSI (то, что реально едет в поле)
+        shell: pwsh
+        run: |
+          wix extension add -g WixToolset.Util.wixext/4.0.5
+          wix build build/msi/mdm-agent.wxs -arch x64 -ext WixToolset.Util.wixext `
+            -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -o prod-authoring.msi
+
+      # UpgradeCode валидатора и боевого MSI обязаны РАЗЛИЧАТЬСЯ. Это не
+      # придирка к стилю: совпади они — MSI, собранный в CI (другой профиль
+      # установки, без SERVER_ADDR), стал бы для Windows апгрейдом боевой
+      # установки и мог бы подменить рабочего агента на парке, случайно попав в
+      # releases. Гейт держит расхождение намеренным, а не забытым.
+      - name: гейт UpgradeCode (валидатор ≠ боевой)
+        shell: pwsh
+        run: |
+          $rx = 'UpgradeCode="([0-9a-fA-F-]{36})"'
+          $prod = (Select-String -Path build/msi/mdm-agent.wxs -Pattern $rx).Matches[0].Groups[1].Value
+          $ci   = (Select-String -Path installer/windows/agent.wxs -Pattern $rx).Matches[0].Groups[1].Value
+          Write-Host "боевой=$prod валидатор=$ci"
+          if (-not $prod -or -not $ci) { Write-Error "UpgradeCode не найден в одном из .wxs"; exit 1 }
+          if ($prod -eq $ci) {
+            Write-Error "UpgradeCode совпали: MSI из CI стал бы апгрейдом боевой установки"
+            exit 1
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: agent-msi
@@ -257,6 +312,73 @@ jobs:
           $exe = Join-Path $Env:ProgramFiles 'RoutineOps\RoutineOps-agent.exe'
           if (Test-Path $exe) { throw "agent.exe остался после удаления: $exe" }
           Write-Host "OK: MSI удалён, файлы убраны"
+
+  # 🔴 ОТДЕЛЬНАЯ джоба, а не флаг к предыдущей. Enterprise-код и его тесты живут под
+  # `//go:build enterprise`, и обычный `go test`/`golangci-lint` их НЕ КОМПИЛИРУЕТ.
+  # То есть весь платный набор — SAML, SCIM, SIEM, эскроу, лицензия, FileVault, CVE,
+  # каналы обновлений — в CI не проверялся вообще ни разу: джоба выше была зелёной
+  # ровно потому, что этих файлов для неё не существует. Ровно та же дыра нашлась и в
+  # локальном pre-push (закрыта там же).
+  enterprise:
+    name: enterprise · test + lint (build tag)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: mdm_test
+          POSTGRES_USER: mdm
+          POSTGRES_PASSWORD: mdm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mdm -d mdm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build (enterprise)
+        run: go build -tags enterprise ./...
+
+      # -p 1: пакеты по одному. Параллельные пакеты дерутся за общую тестовую БД и
+      # дают «connection refused» на ровном месте, а мигающий гейт хуже медленного.
+      - name: test (enterprise)
+        env:
+          TEST_POSTGRES_DSN: postgres://mdm:mdm@localhost:5432/mdm_test?sslmode=disable
+        run: go test -p 1 -tags enterprise ./internal/...
+
+      - name: golangci-lint (enterprise)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          args: --build-tags enterprise ./...
+
+  # Сборка образа — БЕЗ публикации. Автодеплоя здесь нет и не должно быть: прод-запись
+  # остаётся ручной. Смысл джобы в том, чтобы «собирается ли то, что мы выкатываем»
+  # выяснялось на пуше, а не в момент, когда образ понадобился.
+  image:
+    name: docker · сборка образа (без публикации)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Обе редакции: open-core и enterprise собираются ОДНИМ Dockerfile через
+        # build-arg, и ломается обычно ровно та, которую не собирают.
+        edition: ["", "enterprise"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build (${{ matrix.edition == '' && 'open-core' || matrix.edition }})
+        run: |
+          docker build \
+            --build-arg BUILD_TAGS='${{ matrix.edition }}' \
+            --build-arg VERSION="ci-${GITHUB_SHA::8}" \
+            -t routineops-server:ci-${{ matrix.edition || 'free' }} .
 
   proto-breaking:
     name: proto · buf breaking

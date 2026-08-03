@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"log/slog"
 	"testing"
@@ -86,7 +87,7 @@ func TestReportAdminAccess_ForeignDeviceIgnored(t *testing.T) {
 	gw := newGW(t, db)
 	ctx := context.Background()
 
-	owner, _ := db.CreateUser(ctx, "Owner", uniqEmail("owner_idor"), "hash", "user")
+	owner, _ := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_idor"), "hash", "user")
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-adm")
 	registerDevice(t, db, "device-attacker-adm", aFP)
 	_, vFP := makeCertCtx(t, "device-victim-adm")
@@ -112,7 +113,7 @@ func TestReportAdminAccess_ForeignDeviceIgnored(t *testing.T) {
 		t.Fatalf("ReportAdminAccess: %v", err)
 	}
 
-	rows, err := db.ListAdminAccessRequests(ctx, "")
+	rows, err := db.ListAdminAccessRequests(ctx, tenancy.DefaultTenantID, "")
 	if err != nil {
 		t.Fatalf("ListAdminAccessRequests: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestReportSecurityEvent_ForeignAdminRequestCannotPinVictim(t *testing.T) {
 	gw := newGW(t, db)
 	ctx := context.Background()
 
-	owner, _ := db.CreateUser(ctx, "Owner", uniqEmail("owner_secidor"), "hash", "user")
+	owner, _ := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_secidor"), "hash", "user")
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-sec")
 	registerDevice(t, db, "device-attacker-sec", aFP)
 	_, vFP := makeCertCtx(t, "device-victim-sec")
@@ -157,7 +158,7 @@ func TestReportSecurityEvent_ForeignAdminRequestCannotPinVictim(t *testing.T) {
 	}
 
 	// Жертву обязано быть можно удалить: чужой alert не должен держать её заявку.
-	found, err := db.DeleteDevice(ctx, victimID)
+	found, err := db.DeleteDevice(ctx, tenancy.DefaultTenantID, victimID)
 	if err != nil {
 		t.Fatalf("удаление жертвы заблокировано чужим alert (IDOR не закрыт): %v", err)
 	}
@@ -183,7 +184,7 @@ func TestBlockedInterceptor_RejectsBlockedDevice(t *testing.T) {
 	info := &grpc.UnaryServerInfo{}
 
 	// Заблокировано → PermissionDenied, хендлер не вызван.
-	if err := db.UpdateDeviceStatus(ctx, devID, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, devID, "blocked"); err != nil {
 		t.Fatalf("UpdateDeviceStatus blocked: %v", err)
 	}
 	if _, err := unary(certCtx, nil, info, handler); status.Code(err) != codes.PermissionDenied {
@@ -194,7 +195,7 @@ func TestBlockedInterceptor_RejectsBlockedDevice(t *testing.T) {
 	}
 
 	// Разблокировано → хендлер вызван.
-	if err := db.UpdateDeviceStatus(ctx, devID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, devID, "active"); err != nil {
 		t.Fatalf("UpdateDeviceStatus active: %v", err)
 	}
 	if _, err := unary(certCtx, nil, info, handler); err != nil {

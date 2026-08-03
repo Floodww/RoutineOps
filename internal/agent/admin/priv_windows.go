@@ -43,12 +43,45 @@ func runNet(args ...string) error {
 }
 
 // Grant добавляет пользователя в локальную группу администраторов (нужны права админа).
-func (osPriv) Grant(user string) error {
+// Уже-член группы (system error 1378) — успех: иначе заявка на уже-админа
+// крутилась бы вечно, не выставляя granted_at и не снимая улики.
+func (o osPriv) Grant(user string) error {
 	group, err := adminGroupName()
 	if err != nil {
 		return err
 	}
-	return runNet("localgroup", group, user, "/add")
+	if err := runNet("localgroup", group, user, "/add"); err != nil {
+		if isAlreadyLocalGroupMember(err) {
+			return nil
+		}
+		// Решает ФАКТ, а не текст ошибки: состав группы читается построчно и от
+		// языка системы не зависит, тогда как формулировка «уже входит в группу»
+		// у каждой локали своя, а номер 1378 попадает в текст лишь потому, что
+		// `net` печатает его отдельной строкой. Ровно на локализации Windows это
+		// место уже ломалось однажды (1376 → adminGroupName по well-known SID),
+		// поэтому текстовый разбор здесь — быстрый путь, а не единственный.
+		if member, ierr := o.IsAdmin(user); ierr == nil && member {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// isAlreadyLocalGroupMember — быстрый путь для «пользователь уже в группе».
+//
+// Русская формулировка снята с живой Windows (`net helpmsg 1378`):
+// «Указанная учетная запись уже входит в эту группу». Прежний вариант «уже
+// является членом» не встречается ни в одной локали и был мёртвой веткой —
+// на русской системе спасал только номер в выводе `net`.
+func isAlreadyLocalGroupMember(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "1378") ||
+		strings.Contains(s, "already a member") ||
+		strings.Contains(s, "уже входит в эту группу")
 }
 
 // Revoke убирает пользователя из группы администраторов.

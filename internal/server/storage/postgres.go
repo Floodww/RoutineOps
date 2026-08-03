@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Floodww/RoutineOps/internal/server/alerting"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // ErrForeignKeyViolation — INSERT ссылается на уже удалённую строку (политика/
@@ -36,21 +37,43 @@ func wrapFKViolation(err error) error {
 	return err
 }
 
+// User — ЧЛЕНСТВО человека в тенанте, а не сам человек (ADR-7, §11.2). Пароля тут
+// больше нет: он принадлежит личности (storage.Identity). Один человек может иметь
+// несколько таких строк — по одной на тенант, с разными ролями.
 type User struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	Role         string    `json:"role"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	IdentityID string    `json:"-"`
+	Name       string    `json:"name"`
+	Email      string    `json:"email"`
+	Role       string    `json:"role"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
-func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+// GetUserByEmailInTenant ищет пользователя по e-mail внутри одного тенанта.
+//
+// Отличие от GetUserByEmail принципиальное: тот резолвит ДО того, как тенант известен
+// (форма логина), и потому ходит через SECURITY DEFINER мимо RLS. Здесь тенант уже
+// известен — его дал не пользователь, а найденная строка (IdP в OIDC-callback), и
+// e-mail уникален только в пределах тенанта (045). Глобальный поиск на этом месте
+// пускал бы IdP одного тенанта в чужую учётку с тем же адресом (Q-20).
+func (db *DB) GetUserByEmailInTenant(ctx context.Context, tenantID, email string) (*User, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var u User
-	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at
-		FROM users WHERE email = $1
-	`, email).Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
+	err = db.Q(ctx).QueryRow(ctx, `
+		SELECT id, identity_id, name, email, role, created_at
+		FROM users WHERE tenant_id = $1 AND email = $2
+	`, tenantID, email).Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -61,7 +84,7 @@ func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 }
 
 func (db *DB) GetITAdminsWithTelegramChatID(ctx context.Context) ([]string, error) {
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT telegram_chat_id FROM users
 		WHERE role = 'it_admin' AND telegram_chat_id IS NOT NULL AND telegram_chat_id != ''`)
 	if err != nil {
@@ -95,7 +118,7 @@ type TelegramRecipient struct {
 // фильтр по severity было бы неверно — заявку нельзя «отфильтровать по важности»,
 // она либо рассматривается, либо истекает.
 func (db *DB) GetTelegramRecipients(ctx context.Context) ([]TelegramRecipient, error) {
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT telegram_chat_id, COALESCE(notify_min_severity, '')
 		FROM users
 		WHERE role = 'it_admin' AND telegram_chat_id IS NOT NULL AND telegram_chat_id != ''`)
@@ -118,8 +141,13 @@ func (db *DB) GetTelegramRecipients(ctx context.Context) ([]TelegramRecipient, e
 // Пустая строка (строка не прошла миграцию 041) нормализуется в значение по
 // умолчанию — «всё как раньше», а не в тишину: см. обоснование DEFAULT 'low' в 041.
 func (db *DB) GetUserNotifyMinSeverity(ctx context.Context, userID string) (string, error) {
+	ctx, finish, err := db.bindTenantForUser(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	defer finish(true)
 	var s string
-	err := db.pool.QueryRow(ctx,
+	err = db.Q(ctx).QueryRow(ctx,
 		`SELECT COALESCE(notify_min_severity, '') FROM users WHERE id = $1`, userID).Scan(&s)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -136,7 +164,12 @@ func (db *DB) GetUserNotifyMinSeverity(ctx context.Context, userID string) (stri
 // SetUserNotifyMinSeverity меняет порог доставки. Значение валидируется вызывающим
 // (api.setNotifyMinSeverity) и страхуется CHECK-ограничением в схеме.
 func (db *DB) SetUserNotifyMinSeverity(ctx context.Context, userID, minSeverity string) error {
-	tag, err := db.pool.Exec(ctx,
+	ctx, finish, err := db.bindTenantForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	tag, err := db.Q(ctx).Exec(ctx,
 		`UPDATE users SET notify_min_severity = $1 WHERE id = $2`, minSeverity, userID)
 	if err != nil {
 		return err
@@ -148,17 +181,17 @@ func (db *DB) SetUserNotifyMinSeverity(ctx context.Context, userID, minSeverity 
 }
 
 func (db *DB) SetUserTelegramChatID(ctx context.Context, userID, chatID string) error {
-	_, err := db.pool.Exec(ctx,
+	_, err := db.Q(ctx).Exec(ctx,
 		`UPDATE users SET telegram_chat_id = $1 WHERE id = $2`, chatID, userID)
 	return err
 }
 
 func (db *DB) GetUserByLinkToken(ctx context.Context, token string) (*User, error) {
 	var u User
-	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at
+	err := db.Q(ctx).QueryRow(ctx, `
+		SELECT id, identity_id, name, email, role, created_at
 		FROM users WHERE telegram_link_token = $1`, token).
-		Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
+		Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -168,18 +201,35 @@ func (db *DB) GetUserByLinkToken(ctx context.Context, token string) (*User, erro
 	return &u, nil
 }
 
+// SetUserLinkToken ставит или снимает link-токен привязки Telegram.
+//
+// Скоуп по пользователю: users тенантская, а вызывающие (профиль, привязка
+// Telegram) тенанта в контекст не кладут — без bind запрос уходит в пул, где на
+// соединении мог остаться пустой routineops.tenant_id, и предикат RLS падает,
+// пытаясь привести пустую строку к uuid.
 func (db *DB) SetUserLinkToken(ctx context.Context, userID, token string) error {
-	var err error
+	ctx, finish, err := db.bindTenantForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+
 	if token == "" {
-		_, err = db.pool.Exec(ctx, `UPDATE users SET telegram_link_token = NULL WHERE id = $1`, userID)
+		_, err = db.Q(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = NULL WHERE id = $1`, userID)
 	} else {
-		_, err = db.pool.Exec(ctx, `UPDATE users SET telegram_link_token = $1 WHERE id = $2`, token, userID)
+		_, err = db.Q(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = $1 WHERE id = $2`, token, userID)
 	}
 	return err
 }
 
 func (db *DB) GetUserTelegramStatus(ctx context.Context, userID string) (chatID *string, linkToken *string, err error) {
-	err = db.pool.QueryRow(ctx, `
+	ctx, finish, err := db.bindTenantForUser(ctx, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer finish(true)
+
+	err = db.Q(ctx).QueryRow(ctx, `
 		SELECT telegram_chat_id, telegram_link_token FROM users WHERE id = $1`, userID).
 		Scan(&chatID, &linkToken)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -188,24 +238,87 @@ func (db *DB) GetUserTelegramStatus(ctx context.Context, userID string) (chatID 
 	return chatID, linkToken, err
 }
 
+func (db *DB) UpdateUser(ctx context.Context, tenantID, id, name, email string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+
+	res, err := db.Q(ctx).Exec(ctx, `
+		UPDATE users
+		SET name = $1, email = $2
+		WHERE id = $3 AND tenant_id = $4
+	`, name, email, id, tenantID)
+	if err != nil {
+		return false, err
+	}
+	return res.RowsAffected() > 0, nil
+}
+
 func (db *DB) GetDeviceHostname(ctx context.Context, deviceID string) (string, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrTenantScopeMissing) {
+			if len(deviceID) >= 8 {
+				return deviceID[:8], nil
+			}
+			return deviceID, nil
+		}
+		return "", err
+	}
+	defer finish(true)
 	var hostname string
-	err := db.pool.QueryRow(ctx, `SELECT hostname FROM devices WHERE id = $1`, deviceID).Scan(&hostname)
+	err = db.Q(ctx).QueryRow(ctx, `SELECT hostname FROM devices WHERE id = $1`, deviceID).Scan(&hostname)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return deviceID[:8], nil
+		if len(deviceID) >= 8 {
+			return deviceID[:8], nil
+		}
+		return deviceID, nil
 	}
 	return hostname, err
 }
 
-func (db *DB) CreateUser(ctx context.Context, name, email, passwordHash, role string) (*User, error) {
+func (db *DB) CreateUser(ctx context.Context, tenantID, name, email, passwordHash, role string) (*User, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	// ADR-7: сначала личность, потом членство. Если человек с таким e-mail уже есть
+	// в другом тенанте, новая личность НЕ создаётся — к существующей добавляется
+	// членство, и пароль у него остаётся прежний. Переданный passwordHash в этом
+	// случае игнорируется: назначать человеку второй пароль мы не вправе.
+	identityID, _, err := db.EnsureIdentity(ctx, email, passwordHash)
+	if err != nil {
+		return nil, err
+	}
 	var u User
-	err := db.pool.QueryRow(ctx, `
-		INSERT INTO users (name, email, password_hash, role)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, name, email, password_hash, role, created_at
-	`, name, email, passwordHash, role).
-		Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
-	return &u, err
+	err = db.Q(ctx).QueryRow(ctx, `
+		INSERT INTO users (tenant_id, identity_id, name, email, role)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, name, email, role, created_at
+	`, tenantID, identityID, name, email, role).
+		Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	u.IdentityID = identityID
+	return &u, nil
 }
 
 type Device struct {
@@ -215,6 +328,7 @@ type Device struct {
 	OSVersion  string `json:"os_version"`
 	IPAddress  string `json:"ip_address"`
 	Status     string `json:"status"`
+	TenantID   string `json:"tenant_id,omitempty"`
 	LockStatus string `json:"lock_status"`
 	// LockActualState — что агент ФАКТИЧЕСКИ доложил про лок, в отличие от
 	// lock_status (желаемое). Заполняется только в GetDevice (карточка). Пусто =
@@ -314,18 +428,30 @@ func (db *DB) Pool() *pgxpool.Pool {
 // бы в дубль last_seen_at.
 
 func (db *DB) UpsertDeviceHeartbeat(ctx context.Context, d HeartbeatData) error {
-	_, err := db.pool.Exec(ctx, `
+	ctx, finish, err := db.bindTenantForFingerprint(ctx, d.CertFingerprint)
+	if errors.Is(err, tenancy.ErrTenantScopeMissing) {
+		ctx, finish, err = db.BindTenant(ctx, tenancy.DefaultTenantID)
+	}
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	tenantID := tenancy.DefaultTenantID
+	if tid, ok := TenantIDFrom(ctx); ok && tid != "" {
+		tenantID = tid
+	}
+	_, err = db.Q(ctx).Exec(ctx, `
 		INSERT INTO devices (hostname, os, ip_address, public_ip, status, certificate_fingerprint, cert_cn, last_seen_at,
-		                     outbox_unavailable, degraded_detail, degraded_since)
+		                     outbox_unavailable, degraded_detail, degraded_since, tenant_id)
         VALUES ($1, 'unknown', $2, NULLIF($5,''), 'active', $3, $4, now(),
-                $6, CASE WHEN $6 THEN $7::text ELSE '' END, CASE WHEN $6 THEN now() END)
+                $6, CASE WHEN $6 THEN $7::text ELSE '' END, CASE WHEN $6 THEN now() END, $8)
 		ON CONFLICT (certificate_fingerprint)
 		DO UPDATE SET ip_address = COALESCE(NULLIF($2,''), devices.ip_address), public_ip = COALESCE(NULLIF($5,''), devices.public_ip), last_seen_at = now(), cert_cn = $4,
 			status = CASE WHEN devices.status IN ('enrolled', 'pending') THEN 'active' ELSE devices.status END,
 			outbox_unavailable = $6,
 			degraded_detail = CASE WHEN $6 THEN $7::text ELSE '' END,
 			degraded_since  = CASE WHEN $6 THEN COALESCE(devices.degraded_since, now()) END
-	`, d.DeviceID, d.IPAddress, d.CertFingerprint, d.CertCN, d.PublicIP, d.OutboxUnavailable, d.DegradedDetail)
+	`, d.DeviceID, d.IPAddress, d.CertFingerprint, d.CertCN, d.PublicIP, d.OutboxUnavailable, d.DegradedDetail, tenantID)
 	return err
 }
 
@@ -398,11 +524,13 @@ type HeartbeatData struct {
 // UpsertInventory обновляет поля устройства и заменяет список ПО атомарно.
 // Устройство должно уже существовать (создаётся при первом heartbeat).
 func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
-	tx, err := db.pool.Begin(ctx)
+	tx, owned, err := db.beginScoped(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	if owned {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
 
 	var deviceID string
 	err = tx.QueryRow(ctx, `
@@ -441,27 +569,49 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 		return fmt.Errorf("delete old software: %w", err)
 	}
 
-	// CopyFrom, а не INSERT в цикле: с 2.6.0 в снимок попали per-user установки,
-	// и на парке в 1000+ машин это сотни строк на устройство × полная перезапись
-	// набора на каждом изменившемся инвентаре — цикл Exec'ов упирался бы в
-	// round-trip'ы, а не в БД.
-	if _, err = tx.CopyFrom(ctx,
-		pgx.Identifier{"device_software"},
-		[]string{"device_id", "software_name", "version", "vendor", "install_location", "arch", "uninstall_id", "uninstall_method", "scope"},
-		pgx.CopyFromSlice(len(d.Software), func(i int) ([]any, error) {
-			s := d.Software[i]
-			return []any{deviceID, s.Name, s.Version, s.Vendor, s.InstallLocation, s.Arch, s.UninstallID, s.UninstallMethod, s.Scope}, nil
-		}),
-	); err != nil {
-		return fmt.Errorf("insert software: %w", err)
+	// CopyFrom запрещён в Postgres при включённом RLS для не-владельцев (ERROR: 0A000).
+	// Используем pgx.Batch, который решает ту же проблему (убирает round-trip'ы),
+	// отправляя все INSERT'ы единым пакетом, но легален для RLS.
+	batch := &pgx.Batch{}
+	for _, s := range d.Software {
+		batch.Queue(`INSERT INTO device_software (device_id, software_name, version, vendor, install_location, arch, uninstall_id, uninstall_method, scope)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			deviceID, s.Name, s.Version, s.Vendor, s.InstallLocation, s.Arch, s.UninstallID, s.UninstallMethod, s.Scope)
+	}
+	br := tx.SendBatch(ctx, batch)
+	var batchErr error
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			batchErr = err
+			break
+		}
+	}
+	br.Close()
+	if batchErr != nil {
+		return fmt.Errorf("insert software: %w", batchErr)
 	}
 
-	return tx.Commit(ctx)
+	if owned {
+		return tx.Commit(ctx)
+	}
+	return nil
 }
 
-func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem, error) {
+func (db *DB) GetDevice(ctx context.Context, tenantID, id string) (*Device, []SoftwareItem, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer finish(true)
+	}
 	var d Device
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
   SELECT id, hostname, os, COALESCE(os_version, ''), COALESCE(ip_address, ''),
          status, COALESCE(lock_status, 'unlocked'), last_seen_at, created_at,
          COALESCE(cert_cn, ''), enrolled_at,
@@ -476,8 +626,8 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
        COALESCE((SELECT COALESCE(display_name, sam_account) FROM directory_persons WHERE id = d.owner_directory_id), ''),
        COALESCE((SELECT email FROM directory_persons WHERE id = d.owner_directory_id), ''),
        d.outbox_unavailable, COALESCE(d.degraded_detail, ''), d.degraded_since
-  FROM devices d WHERE d.id = $1
- `, id).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
+  FROM devices d WHERE d.id = $1 AND d.tenant_id = $2
+ `, id, tenantID).Scan(&d.ID, &d.Hostname, &d.OS, &d.OSVersion,
 		&d.IPAddress, &d.Status, &d.LockStatus, &d.LastSeenAt, &d.CreatedAt,
 		&d.CertCN, &d.EnrolledAt, &d.CPU, &d.RAM, &d.Disk, &d.MACAddress, &d.SerialNumber, &d.PublicIP,
 		&d.AgentVersion,
@@ -495,7 +645,7 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 	}
 
 	d.Groups = []DeviceGroupRef{}
-	groups, err := db.pool.Query(ctx, `
+	groups, err := db.Q(ctx).Query(ctx, `
   SELECT g.id, g.name, g.color
   FROM device_group_members m
   JOIN device_groups g ON g.id = m.group_id
@@ -518,7 +668,7 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 		return nil, nil, err
 	}
 
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
   SELECT software_name, COALESCE(version, ''), vendor, install_location, arch,
          uninstall_id, uninstall_method, scope
   FROM device_software WHERE device_id = $1
@@ -550,13 +700,36 @@ func (db *DB) GetDevice(ctx context.Context, id string) (*Device, []SoftwareItem
 // синком AD (Enterprise) — для устройства это один и тот же владелец. Enterprise-матчер
 // при этом ставит владельца ТОЛЬКО устройствам без него, поэтому назначенный здесь
 // вручную владелец синком не затирается.
-func (db *DB) SetDeviceOwnerPerson(ctx context.Context, deviceID, personID string) (bool, error) {
+func (db *DB) SetDeviceOwnerPerson(ctx context.Context, tenantID, deviceID, personID string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer finish(true)
+	if personID != "" {
+		var personTenant string
+		err = db.Q(ctx).QueryRow(ctx, `SELECT tenant_id::text FROM directory_persons WHERE id = $1`, personID).Scan(&personTenant)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, fmt.Errorf("person not found")
+			}
+			return false, err
+		}
+		if personTenant != tenantID {
+			return false, fmt.Errorf("person belongs to another tenant")
+		}
+	}
 	var tag pgconn.CommandTag
-	var err error
 	if personID == "" {
-		tag, err = db.pool.Exec(ctx, `UPDATE devices SET owner_directory_id = NULL WHERE id = $1`, deviceID)
+		tag, err = db.Q(ctx).Exec(ctx,
+			`UPDATE devices SET owner_directory_id = NULL WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID)
 	} else {
-		tag, err = db.pool.Exec(ctx, `UPDATE devices SET owner_directory_id = $2 WHERE id = $1`, deviceID, personID)
+		tag, err = db.Q(ctx).Exec(ctx,
+			`UPDATE devices SET owner_directory_id = $3 WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID, personID)
 	}
 	if err != nil {
 		return false, err
@@ -619,11 +792,18 @@ const (
 var ErrDeviceNotActive = errors.New("device is not active")
 
 func (db *DB) CreateTask(ctx context.Context, deviceID, scriptContent, platform, priority string) (*Task, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "script"); err != nil {
+		return nil, err
+	}
 	var t Task
-	err := db.pool.QueryRow(ctx, `
-  INSERT INTO tasks (device_id, script_content, platform, priority, status)
-  SELECT $1, $2, $3, $4, 'pending'
-  WHERE EXISTS (SELECT 1 FROM devices WHERE id = $1 AND status = 'active')
+	err = db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, tenant_id)
+  SELECT $1, $2, $3, $4, 'pending', d.tenant_id FROM devices d WHERE d.id = $1 AND d.status = 'active'
   RETURNING id, device_id, script_content, platform, priority, status, created_at
  `, deviceID, scriptContent, platform, priority).
 		Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.CreatedAt)
@@ -640,7 +820,12 @@ func (db *DB) CreateTask(ctx context.Context, deviceID, scriptContent, platform,
 var ErrTaskNotOwned = errors.New("task not found for this device")
 
 func (db *DB) AckTask(ctx context.Context, taskID, deviceID string) error {
-	tag, err := db.pool.Exec(ctx,
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	tag, err := db.Q(ctx).Exec(ctx,
 		`UPDATE tasks SET status = 'acked', acked_at = now() WHERE id = $1 AND device_id = $2`,
 		taskID, deviceID)
 	if err != nil {
@@ -673,7 +858,12 @@ func (db *DB) AckTask(ctx context.Context, taskID, deviceID string) error {
 // taskType возвращается вместе с prevStatus: gateway по нему решает пост-эффект
 // завершения (decommission-задача с SUCCESS → пометить устройство списанным).
 func (db *DB) CompleteTask(ctx context.Context, taskID, deviceID, status, output, errLog string) (prevStatus, taskType string, err error) {
-	err = db.pool.QueryRow(ctx, `
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return "", "", err
+	}
+	defer finish(true)
+	err = db.Q(ctx).QueryRow(ctx, `
   UPDATE tasks t
   SET status = $3, output = $4, error_log = $5, completed_at = now()
   FROM tasks old
@@ -710,7 +900,7 @@ const StaleAckedTimeoutMinutes = 15
 // Порог считается в SQL (now() на стороне БД), чтобы не зависеть от часов и таймзоны
 // процесса: acked_at пишется тем же серверным now().
 func (db *DB) FailStaleAckedTasks(ctx context.Context, timeoutMinutes int) (int64, error) {
-	res, err := db.pool.Exec(ctx, `
+	res, err := db.Q(ctx).Exec(ctx, `
   UPDATE tasks
   SET status = 'failed',
       error_log = 'агент подтвердил получение, но не прислал результат (таймаут)',
@@ -727,7 +917,7 @@ func (db *DB) FailStaleAckedTasks(ctx context.Context, timeoutMinutes int) (int6
 
 func (db *DB) GetDeviceCN(ctx context.Context, deviceID string) (string, error) {
 	var cn string
-	err := db.pool.QueryRow(ctx,
+	err := db.Q(ctx).QueryRow(ctx,
 		`SELECT COALESCE(cert_cn, '') FROM devices WHERE id = $1`, deviceID).Scan(&cn)
 	return cn, err
 }
@@ -736,10 +926,19 @@ func (db *DB) CreateLockTask(ctx context.Context, deviceID, lockHash, lockReason
 	if lockMode == "" {
 		lockMode = LockModeOverlay // fail-safe
 	}
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "lock"); err != nil {
+		return nil, err
+	}
 	var t Task
-	err := db.pool.QueryRow(ctx, `
-  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, lock_hash, lock_reason, lock_unlock, lock_mode)
-  VALUES ($1, '', COALESCE((SELECT os FROM devices WHERE id = $1), 'unknown'), 'high', 'pending', 'lock', $2, $3, $4, $5)
+	err = db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, lock_hash, lock_reason, lock_unlock, lock_mode, tenant_id)
+  SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'lock', $2, $3, $4, $5, d.tenant_id
+  FROM devices d WHERE d.id = $1
   RETURNING id, device_id, script_content, platform, priority, status, created_at, task_type, lock_hash, lock_reason, lock_unlock, lock_mode
  `, deviceID, lockHash, lockReason, unlock, lockMode).
 		Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode)
@@ -766,7 +965,7 @@ var ErrNoDesiredLock = errors.New("desired lock absent (lock_hash empty)")
 // придёт на несуществующее устройство — вызывающий (gateway) резолвит deviceID по
 // сертификату до вызова, так что различать эти случаи здесь незачем.
 func (db *DB) UpdateDeviceLockStatus(ctx context.Context, deviceID, lockStatus string) error {
-	tag, err := db.pool.Exec(ctx,
+	tag, err := db.Q(ctx).Exec(ctx,
 		`UPDATE devices SET lock_status = $2
 		 WHERE id = $1 AND ($2 <> 'locked' OR COALESCE(lock_hash, '') <> '')`, deviceID, lockStatus)
 	if err != nil {
@@ -788,10 +987,19 @@ func (db *DB) UpdateDeviceLockStatus(ctx context.Context, deviceID, lockStatus s
 // пока задача не доставлена — иначе Connect отклонил бы устройство раньше, чем оно
 // получит команду сноса. Флип делает gateway по подтверждению агента.
 func (db *DB) CreateDecommissionTask(ctx context.Context, deviceID string) (*Task, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "decommission"); err != nil {
+		return nil, err
+	}
 	var t Task
-	err := db.pool.QueryRow(ctx, `
-  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type)
-  VALUES ($1, '', COALESCE((SELECT os FROM devices WHERE id = $1), 'unknown'), 'high', 'pending', 'decommission')
+	err = db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, tenant_id)
+  SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'decommission', d.tenant_id
+  FROM devices d WHERE d.id = $1
   RETURNING id, device_id, script_content, platform, priority, status, created_at, task_type, lock_hash, lock_reason, lock_unlock, lock_mode
  `, deviceID).
 		Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status, &t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode)
@@ -817,6 +1025,14 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	if delaySeconds < 0 {
 		delaySeconds = 0 // 0 = дефолт агента; отрицательное значение бессмысленно
 	}
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "reboot"); err != nil {
+		return nil, err
+	}
 	const cols = `id, device_id, script_content, platform, priority, status, created_at, task_type,
 	              lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds`
 	scan := func(row pgx.Row, t *Task) error {
@@ -826,9 +1042,10 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	}
 
 	var t Task
-	err := scan(db.pool.QueryRow(ctx, `
-  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds)
-  VALUES ($1, '', COALESCE((SELECT os FROM devices WHERE id = $1), 'unknown'), 'high', 'pending', 'reboot', $2, $3)
+	err = scan(db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds, tenant_id)
+  SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'reboot', $2, $3, d.tenant_id
+  FROM devices d WHERE d.id = $1
   ON CONFLICT DO NOTHING
   RETURNING `+cols, deviceID, reason, delaySeconds), &t)
 	if err == nil {
@@ -839,7 +1056,7 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	}
 	// ON CONFLICT DO NOTHING → строк не вернулось: недоставленная заявка уже есть.
 	// Отдаём её, чтобы вызывающий не создал вторую перезагрузку под новым id.
-	err = scan(db.pool.QueryRow(ctx, `
+	err = scan(db.Q(ctx).QueryRow(ctx, `
   SELECT `+cols+` FROM tasks
   WHERE device_id = $1 AND task_type = 'reboot' AND status = 'pending'`, deviceID), &t)
 	if err != nil {
@@ -876,6 +1093,14 @@ var ErrSoftwareNotRemovable = errors.New("software has no uninstall method")
 // новой командой и снёс бы цель дважды — на втором заходе это уже ALREADY_ABSENT, но
 // оператор увидел бы две записи об одном действии.
 func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, uninstallID, reason string) (*Task, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "uninstall"); err != nil {
+		return nil, err
+	}
 	const cols = `id, device_id, script_content, platform, priority, status, created_at, task_type,
 	              lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds,
 	              uninstall_software_name, uninstall_version, uninstall_uninstall_id,
@@ -894,7 +1119,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	// списанной машины никуда не делся, и без этой проверки снос уехал бы на устройство,
 	// которое мы намеренно отрезали. Тот же гейт, что у скрипт-канала.
 	var active bool
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Q(ctx).QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM devices WHERE id::text = $1 AND status = 'active')`, deviceID).Scan(&active); err != nil {
 		return nil, err
 	}
@@ -906,7 +1131,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	// разных версий одного продукта в инвентаре может быть несколько. Пустой
 	// uninstall_id (macOS) сверяется как есть — там ключом служит install_location.
 	var tgt UninstallTarget
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
   SELECT software_name, COALESCE(version, ''), uninstall_id, install_location, uninstall_method, scope
   FROM device_software
   WHERE device_id::text = $1 AND software_name = $2 AND uninstall_id = $3
@@ -923,12 +1148,13 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	}
 
 	var t Task
-	err = scan(db.pool.QueryRow(ctx, `
+	err = scan(db.Q(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type,
                      uninstall_software_name, uninstall_version, uninstall_uninstall_id,
-                     uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason)
-  VALUES ($1::uuid, '', COALESCE((SELECT os FROM devices WHERE id = $1::uuid), 'unknown'), 'high', 'pending', 'uninstall',
-          $2, $3, $4, $5, $6, $7, $8)
+                     uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason, tenant_id)
+  SELECT $1::uuid, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'uninstall',
+          $2, $3, $4, $5, $6, $7, $8, d.tenant_id
+  FROM devices d WHERE d.id = $1::uuid
   ON CONFLICT DO NOTHING
   RETURNING `+cols,
 		deviceID, tgt.SoftwareName, tgt.Version, tgt.UninstallID,
@@ -940,7 +1166,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 		return nil, err
 	}
 	// ON CONFLICT DO NOTHING → строк нет: недоставленная заявка на эту цель уже есть.
-	err = scan(db.pool.QueryRow(ctx, `
+	err = scan(db.Q(ctx).QueryRow(ctx, `
   SELECT `+cols+` FROM tasks
   WHERE device_id::text = $1 AND task_type = 'uninstall' AND status = 'pending'
     AND uninstall_software_name = $2 AND uninstall_uninstall_id = $3`,
@@ -956,7 +1182,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 // Незнакомое значение сохраняется как есть: сервер, не понимающий новый исход агента,
 // обязан его показать, а не отвергнуть.
 func (db *DB) SetTaskUninstallOutcome(ctx context.Context, taskID, deviceID, outcome string) error {
-	_, err := db.pool.Exec(ctx, `
+	_, err := db.Q(ctx).Exec(ctx, `
   UPDATE tasks SET uninstall_outcome = $3
   WHERE id::text = $1 AND device_id::text = $2 AND task_type = 'uninstall'`, taskID, deviceID, outcome)
 	return err
@@ -971,7 +1197,7 @@ func (db *DB) FanOutRebootToGroup(ctx context.Context, groupID, reason string, d
 	if delaySeconds < 0 {
 		delaySeconds = 0
 	}
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds)
   SELECT m.device_id, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'reboot', $2, $3
   FROM device_group_members m
@@ -1001,7 +1227,7 @@ func (db *DB) FanOutRebootToGroup(ctx context.Context, groupID, reason string, d
 // фактическому числу, а не по размеру группы вместе со списанными.
 func (db *DB) CountActiveDevicesInGroup(ctx context.Context, groupID string) (int, error) {
 	var n int
-	err := db.pool.QueryRow(ctx, `
+	err := db.Q(ctx).QueryRow(ctx, `
   SELECT COUNT(*) FROM device_group_members m
   JOIN devices d ON d.id = m.device_id
   WHERE m.group_id = $1 AND d.status = 'active'`, groupID).Scan(&n)
@@ -1016,16 +1242,28 @@ func (db *DB) CountActiveDevicesInGroup(ctx context.Context, groupID string) (in
 // enrolled/pending) — списанная машина не оживает своим же прощальным heartbeat'ом.
 // Безусловный UPDATE: из любого статуса (active/blocked) → decommissioned терминален.
 func (db *DB) MarkDeviceDecommissioned(ctx context.Context, deviceID string) error {
-	_, err := db.pool.Exec(ctx,
+	_, err := db.Q(ctx).Exec(ctx,
 		`UPDATE devices SET status = 'decommissioned' WHERE id = $1`, deviceID)
 	return err
 }
 
 // GetDeviceStatusByID — статус устройства по его id (для guard'а админ-ручек).
 // "" (а не ошибка) при отсутствии строки: вызывающий сам решает 404.
-func (db *DB) GetDeviceStatusByID(ctx context.Context, id string) (string, error) {
+func (db *DB) GetDeviceStatusByID(ctx context.Context, tenantID, id string) (string, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return "", err
+		}
+		defer finish(true)
+	}
 	var s string
-	err := db.pool.QueryRow(ctx, `SELECT status FROM devices WHERE id = $1`, id).Scan(&s)
+	err = db.Q(ctx).QueryRow(ctx, `SELECT status FROM devices WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&s)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -1033,8 +1271,14 @@ func (db *DB) GetDeviceStatusByID(ctx context.Context, id string) (string, error
 }
 
 func (db *DB) GetDeviceLockStatus(ctx context.Context, deviceID string) (string, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return "", err
+	}
+	defer finish(true)
+
 	var s string
-	err := db.pool.QueryRow(ctx, `SELECT lock_status FROM devices WHERE id = $1`, deviceID).Scan(&s)
+	err = db.Q(ctx).QueryRow(ctx, `SELECT lock_status FROM devices WHERE id = $1`, deviceID).Scan(&s)
 	return s, err
 }
 
@@ -1049,11 +1293,16 @@ func (db *DB) GetDeviceLockStatus(ctx context.Context, deviceID string) (string,
 // LockCommand.RequestId). По нему ветка UNLOCKED отличает отчёт о снятии ТЕКУЩЕГО
 // лока от устаревшего, доехавшего из durable-outbox после выдачи нового (см.
 // миграцию 032). При снятии передаётся пустая строка вместе с hash/reason.
-func (db *DB) SetDeviceLockState(ctx context.Context, deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID string) error {
+func (db *DB) SetDeviceLockState(ctx context.Context, tenantID, deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID string) error {
 	if lockMode == "" {
 		lockMode = LockModeOverlay
 	}
-	_, err := db.pool.Exec(ctx,
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	_, err = db.Q(ctx).Exec(ctx,
 		`UPDATE devices SET lock_status = $2, lock_hash = $3, lock_reason = $4, lock_mode = $5, lock_request_id = $6 WHERE id = $1`,
 		deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID)
 	return err
@@ -1065,7 +1314,7 @@ func (db *DB) SetDeviceLockState(ctx context.Context, deviceID, lockStatus, lock
 // сделан) не портил desired — иначе реконсайлер отменил бы/повторил бы деструктив
 // (класс полевого re-lock-бага).
 func (db *DB) SetDeviceLockActualState(ctx context.Context, deviceID, state string) error {
-	_, err := db.pool.Exec(ctx,
+	_, err := db.Q(ctx).Exec(ctx,
 		`UPDATE devices SET lock_actual_state = $2, lock_actual_at = now() WHERE id = $1`,
 		deviceID, state)
 	return err
@@ -1095,7 +1344,7 @@ const LockActualStateStarted = "filevault_revoke_failed"
 // сеттером. Если под тем же устройством выдали НОВЫЙ лок, полу-ревокнутость от
 // предыдущего никуда не делась и остаётся более важной правдой.
 func (db *DB) SetDeviceLockActualStateNoDowngrade(ctx context.Context, deviceID, state string) (bool, error) {
-	tag, err := db.pool.Exec(ctx,
+	tag, err := db.Q(ctx).Exec(ctx,
 		`UPDATE devices SET lock_actual_state = $2, lock_actual_at = now()
 		 WHERE id = $1 AND COALESCE(lock_actual_state, '') <> $3`,
 		deviceID, state, LockActualStateStarted)
@@ -1110,7 +1359,13 @@ func (db *DB) SetDeviceLockActualStateNoDowngrade(ctx context.Context, deviceID,
 // lockMode пустой/NULL → overlay (fail-safe). lockRequestID пустой = лок выдан до
 // миграции 032, привязать отчёт о снятии к конкретному локу нельзя.
 func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockStatus, lockHash, lockReason, lockMode, lockRequestID string, err error) {
-	err = db.pool.QueryRow(ctx,
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return "", "", "", "", "", err
+	}
+	defer finish(true)
+
+	err = db.Q(ctx).QueryRow(ctx,
 		`SELECT COALESCE(lock_status,''), COALESCE(lock_hash,''), COALESCE(lock_reason,''), COALESCE(NULLIF(lock_mode,''),'overlay'), COALESCE(lock_request_id,'') FROM devices WHERE id = $1`,
 		deviceID).Scan(&lockStatus, &lockHash, &lockReason, &lockMode, &lockRequestID)
 	return lockStatus, lockHash, lockReason, lockMode, lockRequestID, err
@@ -1122,7 +1377,7 @@ func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockSta
 
 func (db *DB) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	var t Task
-	err := db.pool.QueryRow(ctx, `
+	err := db.Q(ctx).QueryRow(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
          task_type, lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds,
          uninstall_software_name, uninstall_version, uninstall_uninstall_id,
@@ -1155,36 +1410,68 @@ type PendingTaskRef struct {
 // (дедуп asynq по TaskID, перезапуск redis, отказ воркера) иначе оставляла бы задачу
 // в pending до следующего реконнекта устройства.
 func (db *DB) ListPendingTasksWithDeviceCN(ctx context.Context, limit int) ([]PendingTaskRef, error) {
-	rows, err := db.pool.Query(ctx, `
+	if limit <= 0 {
+		limit = 1000
+	}
+	tenants, err := db.ListTenants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var refs []PendingTaskRef
+	for _, tenant := range tenants {
+		if len(refs) >= limit {
+			break
+		}
+		tctx, finish, err := db.BindTenant(ctx, tenant.ID)
+		if err != nil {
+			return nil, err
+		}
+		remaining := limit - len(refs)
+		rows, err := db.Q(tctx).Query(tctx, `
 		SELECT t.id, d.cert_cn
 		FROM tasks t
 		JOIN devices d ON d.id = t.device_id
 		WHERE t.status = 'pending' AND COALESCE(d.cert_cn, '') <> ''
 		ORDER BY t.created_at
 		LIMIT $1
-	`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var refs []PendingTaskRef
-	for rows.Next() {
-		var ref PendingTaskRef
-		if err := rows.Scan(&ref.TaskID, &ref.DeviceCN); err != nil {
+	`, remaining)
+		if err != nil {
+			finish(false)
 			return nil, err
 		}
-		refs = append(refs, ref)
+		for rows.Next() {
+			var ref PendingTaskRef
+			if err := rows.Scan(&ref.TaskID, &ref.DeviceCN); err != nil {
+				rows.Close()
+				finish(false)
+				return nil, err
+			}
+			refs = append(refs, ref)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			finish(false)
+			return nil, err
+		}
+		rows.Close()
+		finish(true)
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 func (db *DB) GetPendingTasks(ctx context.Context, deviceID string) ([]Task, error) {
-	tx, err := db.pool.Begin(ctx)
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer finish(true)
+	tx, owned, err := db.beginScoped(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if owned {
+		defer func() { _ = tx.Rollback(ctx) }()
+	}
 
 	rows, err := tx.Query(ctx, `
 		SELECT id, device_id, script_content, platform, priority, status, created_at,
@@ -1211,7 +1498,12 @@ func (db *DB) GetPendingTasks(ctx context.Context, deviceID string) ([]Task, err
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return tasks, tx.Commit(ctx)
+	if owned {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return tasks, nil
 }
 
 type PolicyRule struct {
@@ -1260,18 +1552,31 @@ func policySetItem(fields ...string) string {
 }
 
 func (db *DB) FetchPolicyRules(ctx context.Context, fingerprint string) (*PolicyResult, error) {
+	id, tenantID, _, err := db.GetDeviceTenantByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("lookup device by fingerprint: %w", err)
+	}
 	var deviceID *string
 	var deviceOS string
-	if err := db.pool.QueryRow(ctx,
-		`SELECT id, COALESCE(os, '') FROM devices WHERE certificate_fingerprint = $1`, fingerprint,
-	).Scan(&deviceID, &deviceOS); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			// Реальная ошибка БД: не деградируем молча до global-only политики —
-			// иначе device-specific forbidden-правила перестают применяться (F-5).
-			return nil, fmt.Errorf("lookup device by fingerprint: %w", err)
+	scopeTenant := tenancy.DefaultTenantID
+	if id != "" {
+		scopeTenant = tenantID
+		deviceID = &id
+	}
+	ctx, finish, err := db.BindTenant(ctx, scopeTenant)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if deviceID != nil {
+		if err := db.Q(ctx).QueryRow(ctx,
+			`SELECT COALESCE(os, '') FROM devices WHERE id = $1`, id,
+		).Scan(&deviceOS); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("lookup device os: %w", err)
+			}
+			deviceID = nil
 		}
-		// Устройство не найдено — применяем только глобальные правила.
-		deviceID = nil
 	}
 
 	// Резолвинг scope: глобальные (device_id IS NULL AND group_id IS NULL) ∪
@@ -1294,7 +1599,7 @@ func (db *DB) FetchPolicyRules(ctx context.Context, fingerprint string) (*Policy
 		args = append(args, *deviceID)
 	}
 
-	rows, err := db.pool.Query(ctx, query, args...)
+	rows, err := db.Q(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1332,14 +1637,8 @@ func (db *DB) FetchPolicyRules(ctx context.Context, fingerprint string) (*Policy
 }
 
 func (db *DB) GetDeviceStatusByFingerprint(ctx context.Context, fingerprint string) (string, error) {
-	var status string
-	err := db.pool.QueryRow(ctx,
-		`SELECT COALESCE(status, '') FROM devices WHERE certificate_fingerprint = $1`, fingerprint,
-	).Scan(&status)
+	_, _, status, err := db.GetDeviceTenantByFingerprint(ctx, fingerprint)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
 		return "", err
 	}
 	return status, nil
@@ -1357,9 +1656,21 @@ func (db *DB) IsFingerprintRevoked(ctx context.Context, fingerprint string) (boo
 	return exists, err
 }
 
-func (db *DB) UpdateDeviceStatus(ctx context.Context, deviceID, status string) error {
-	_, err := db.pool.Exec(ctx,
-		`UPDATE devices SET status = $2 WHERE id = $1`, deviceID, status)
+func (db *DB) UpdateDeviceStatus(ctx context.Context, tenantID, deviceID, status string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx,
+		`UPDATE devices SET status = $3 WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID, status)
 	return err
 }
 
@@ -1374,12 +1685,20 @@ var ErrDeviceHasEscrow = errors.New("device has recovery-key escrow records")
 // (RESTRICT) → её наличие даёт ErrDeviceHasEscrow. found=false, если строки нет (→ 404).
 // ⚠️ Живой агент воскресит устройство следующим heartbeat (upsert по cert-fingerprint) —
 // удаление имеет смысл только для списанных/переустановленных машин.
-func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err error) {
-	tx, err := db.pool.Begin(ctx)
+func (db *DB) DeleteDevice(ctx context.Context, tenantID, id string) (found bool, err error) {
+	tenantID, err = requireTenant(tenantID)
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback(ctx)
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+	q := db.Q(ctx)
 
 	// Тумбстоун серта ДО удаления, в ОДНОЙ транзакции с ним. Серт на машине остаётся
 	// валидным; без отзыва агент по нему переподключится и Connect заведёт устройство
@@ -1387,8 +1706,8 @@ func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err erro
 	// критична: если DELETE упрётся в escrow-констрейнт, отзыв откатится вместе с ним —
 	// иначе отрезали бы живое устройство, которое так и не удалилось (см. миграцию 034).
 	var fp string
-	if err = tx.QueryRow(ctx,
-		`SELECT COALESCE(certificate_fingerprint, '') FROM devices WHERE id = $1`, id,
+	if err = q.QueryRow(ctx,
+		`SELECT COALESCE(certificate_fingerprint, '') FROM devices WHERE id = $1 AND tenant_id = $2`, id, tenantID,
 	).Scan(&fp); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil // устройства нет — нечего удалять (→ 404)
@@ -1396,14 +1715,14 @@ func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err erro
 		return false, err
 	}
 	if fp != "" {
-		if _, err = tx.Exec(ctx,
+		if _, err = q.Exec(ctx,
 			`INSERT INTO revoked_fingerprints (fingerprint, device_id) VALUES ($1, $2)
 			 ON CONFLICT (fingerprint) DO NOTHING`, fp, id); err != nil {
 			return false, err
 		}
 	}
 
-	tag, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
+	tag, err := q.Exec(ctx, `DELETE FROM devices WHERE id = $1 AND tenant_id = $2`, id, tenantID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		// Только escrow-констрейнт (ON DELETE RESTRICT) значит «у устройства есть эскроу».
@@ -1414,9 +1733,6 @@ func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err erro
 			pgErr.ConstraintName == "recovery_key_escrow_device_id_fkey" {
 			return false, ErrDeviceHasEscrow
 		}
-		return false, err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
@@ -1432,19 +1748,19 @@ func (db *DB) DeleteDevice(ctx context.Context, id string) (found bool, err erro
 //     иначе выглядит новым эпизодом и плодит alert каждый час. Мёртвое устройство (last_seen
 //     заморожен) и так даёт ровно один alert через клоз (1), так что cooldown его не трогает.
 //
-// cooldownMinutes<=0 отключает второй клоз. Возвращает число созданных.
-func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, cooldownMinutes int) (int64, error) {
-	if thresholdMinutes <= 0 {
-		return 0, nil
+// cooldownMinutes<=0 отключает второй клоз.
+func (db *DB) detectUnreachableDevicesForTenant(ctx context.Context, tenantID string, thresholdMinutes, cooldownMinutes int) (int64, error) {
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return 0, err
 	}
-	// severity подставляется параметром из той же карты, что и в CreateAlert:
-	// вписать 'low' строкой в SQL значило бы завести третью копию правила рядом с
-	// Go-картой и CASE в миграции 043, за которой уже некому следить.
-	res, err := db.pool.Exec(ctx, `
-		INSERT INTO alerts (device_id, alert_type, details, severity)
+	defer finish(true)
+	res, err := db.Q(ctx).Exec(ctx, `
+		INSERT INTO alerts (device_id, alert_type, details, severity, tenant_id)
 		SELECT d.id, 'agent_unreachable',
 		       'Не выходит на связь с ' || to_char(d.last_seen_at, 'YYYY-MM-DD HH24:MI'),
-		       $3::text
+		       $3::text,
+		       d.tenant_id
 		FROM devices d
 		WHERE d.status IN ('active', 'enrolled')
 		  AND d.last_seen_at IS NOT NULL
@@ -1468,6 +1784,26 @@ func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, co
 	return res.RowsAffected(), nil
 }
 
+// DetectUnreachableDevices — кросс-тенантный обход (ListTenants + BindTenant); суммирует созданные alerts.
+func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, cooldownMinutes int) (int64, error) {
+	if thresholdMinutes <= 0 {
+		return 0, nil
+	}
+	tenants, err := db.ListTenants(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, tenant := range tenants {
+		n, err := db.detectUnreachableDevicesForTenant(ctx, tenant.ID, thresholdMinutes, cooldownMinutes)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 // CreateAlert вставляет событие безопасности и сообщает, была ли строка РЕАЛЬНО
 // создана: created=false → подавленный дубль (звонить в Telegram не нужно).
 //
@@ -1481,6 +1817,11 @@ func (db *DB) DetectUnreachableDevices(ctx context.Context, thresholdMinutes, co
 // (оба пройдут проверку) — для последовательного агентского outbox неактуально;
 // строгую уникальность дал бы partial unique index, если понадобится.
 func (db *DB) CreateAlert(ctx context.Context, deviceID, alertType, details, adminAccessRequestID string) (bool, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return false, err
+	}
+	defer finish(true)
 	var adminReqID *string
 	if adminAccessRequestID != "" {
 		adminReqID = &adminAccessRequestID
@@ -1498,17 +1839,19 @@ func (db *DB) CreateAlert(ctx context.Context, deviceID, alertType, details, adm
 	// Значение фиксируется в строке (см. 041): правка карты по умолчанию не должна
 	// переписывать критичность уже разобранных инцидентов задним числом.
 	severity := string(alerting.DefaultFor(alertType))
-	tag, err := db.pool.Exec(ctx, `
-  INSERT INTO alerts (device_id, alert_type, details, admin_access_request_id, severity)
+	alertTenantID, _ := TenantIDFrom(ctx)
+	tag, err := db.Q(ctx).Exec(ctx, `
+  INSERT INTO alerts (device_id, alert_type, details, admin_access_request_id, severity, tenant_id)
   SELECT $1::uuid, $2::text, $3::text,
     (SELECT r.id FROM admin_access_requests r WHERE r.id = $4::uuid AND r.device_id = $1::uuid),
-    $5::text
+    $5::text,
+    COALESCE(NULLIF(current_setting('routineops.tenant_id', true), '')::uuid, $6::uuid)
   WHERE NOT EXISTS (
     SELECT 1 FROM alerts a
     WHERE a.device_id = $1::uuid AND a.alert_type = $2::text
       AND a.details = $3::text AND a.acknowledged_at IS NULL
   )
- `, deviceID, alertType, details, adminReqID, severity)
+ `, deviceID, alertType, details, adminReqID, severity, alertTenantID)
 	// 23503 = устройство/заявка удалены (гонка с удалением или retention-чисткой)
 	// до доставки события — тот же терминальный класс, что и в SaveScriptResult.
 	if err != nil {
@@ -1542,7 +1885,19 @@ func severityRank(expr string) string {
     ELSE 0 END`
 }
 
-func (db *DB) ListAlerts(ctx context.Context, deviceID string, limit int) ([]Alert, error) {
+func (db *DB) ListAlerts(ctx context.Context, tenantID, deviceID string, limit int) ([]Alert, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	query := `
   SELECT a.id, a.device_id, COALESCE(d.hostname, ''), a.alert_type, a.severity, a.details, a.created_at, a.acknowledged_at
   FROM alerts a
@@ -1557,15 +1912,15 @@ func (db *DB) ListAlerts(ctx context.Context, deviceID string, limit int) ([]Ale
 	// разобран человеком, и выталкивать им непринятые из окна LIMIT означало бы
 	// вернуть ровно тот баг, ради которого появилась сортировка по acknowledged_at.
 	order := ` ORDER BY (a.acknowledged_at IS NULL) DESC, ` + severityRank("a.severity") + ` DESC, a.created_at DESC`
-	args := []any{}
+	args := []any{tenantID}
 	if deviceID != "" {
-		query += ` WHERE a.device_id = $1` + order + ` LIMIT $2`
+		query += ` WHERE a.tenant_id = $1 AND a.device_id = $2` + order + ` LIMIT $3`
 		args = append(args, deviceID, limit)
 	} else {
-		query += order + ` LIMIT $1`
+		query += ` WHERE a.tenant_id = $1` + order + ` LIMIT $2`
 		args = append(args, limit)
 	}
-	rows, err := db.pool.Query(ctx, query, args...)
+	rows, err := db.Q(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1605,7 +1960,7 @@ func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinu
 		// ниже пропустил бы вообще каждый алерт, включая agent_unreachable.
 		return nil, fmt.Errorf("escalation: unknown min severity %q", minSeverity)
 	}
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
 		UPDATE alerts a SET escalated_at = now()
 		WHERE a.id IN (
 		  SELECT a2.id FROM alerts a2
@@ -1638,7 +1993,7 @@ func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinu
 	// машины бесполезно — оператор не поймёт, куда идти.
 	for i := range out {
 		var hostname string
-		if err := db.pool.QueryRow(ctx,
+		if err := db.Q(ctx).QueryRow(ctx,
 			`SELECT COALESCE(hostname, '') FROM devices WHERE id = $1`, out[i].DeviceID).Scan(&hostname); err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return nil, err
@@ -1652,8 +2007,14 @@ func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinu
 	return out, nil
 }
 
-func (db *DB) AcknowledgeAlert(ctx context.Context, alertID string) error {
-	tag, err := db.pool.Exec(ctx, `
+func (db *DB) AcknowledgeAlert(ctx context.Context, tenantID, alertID string) error {
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+
+	tag, err := db.Q(ctx).Exec(ctx, `
     UPDATE alerts SET acknowledged_at = now()
     WHERE id = $1 AND acknowledged_at IS NULL`, alertID)
 	if err != nil {
@@ -1675,11 +2036,23 @@ type PolicyRuleRow struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-func (db *DB) ListPolicyRules(ctx context.Context) ([]PolicyRuleRow, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListPolicyRules(ctx context.Context, tenantID string) ([]PolicyRuleRow, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
   SELECT id, software_name, rule_type, device_id, group_id, platforms, updated_at
-  FROM software_policy_rules ORDER BY updated_at DESC
- `)
+  FROM software_policy_rules WHERE tenant_id = $1 ORDER BY updated_at DESC
+ `, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -1695,17 +2068,29 @@ func (db *DB) ListPolicyRules(ctx context.Context) ([]PolicyRuleRow, error) {
 	return rules, rows.Err()
 }
 
-func (db *DB) CreatePolicyRule(ctx context.Context, softwareName, ruleType string, deviceID *string, platforms []string) (*PolicyRuleRow, error) {
+func (db *DB) CreatePolicyRule(ctx context.Context, tenantID, softwareName, ruleType string, deviceID *string, platforms []string) (*PolicyRuleRow, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var r PolicyRuleRow
 	var plat interface{} // nil → NULL (правило на всех платформах)
 	if len(platforms) > 0 {
 		plat = platforms
 	}
-	err := db.pool.QueryRow(ctx, `
-  INSERT INTO software_policy_rules (software_name, rule_type, device_id, platforms)
-  VALUES ($1, $2, $3, $4)
+	err = db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO software_policy_rules (tenant_id, software_name, rule_type, device_id, platforms)
+  VALUES ($1, $2, $3, $4, $5)
   RETURNING id, software_name, rule_type, device_id, group_id, platforms, updated_at
- `, softwareName, ruleType, deviceID, plat).
+ `, tenantID, softwareName, ruleType, deviceID, plat).
 		Scan(&r.ID, &r.SoftwareName, &r.RuleType, &r.DeviceID, &r.GroupID, &r.Platforms, &r.UpdatedAt)
 	return &r, err
 }
@@ -1738,8 +2123,20 @@ func platformMatches(platforms []string, p string) bool {
 	return false
 }
 
-func (db *DB) DeletePolicyRule(ctx context.Context, id string) error {
-	_, err := db.pool.Exec(ctx, `DELETE FROM software_policy_rules WHERE id = $1`, id)
+func (db *DB) DeletePolicyRule(ctx context.Context, tenantID, id string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM software_policy_rules WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	return err
 }
 
@@ -1765,8 +2162,23 @@ type SoftwarePolicyCompliance struct {
 //
 // Сопоставление имени — регистронезависимая подстрока, как findForbidden у агента.
 // Пустое software_name отсекается явно: strpos(x, ”) = 1, иначе «нарушают все».
-func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context) ([]SoftwarePolicyCompliance, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context, tenantID string) ([]SoftwarePolicyCompliance, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	// Явный tenant_id в JOIN: под суперюзером (локальные/прод-тесты на роли mdm)
+	// FORCE RLS не режет строки, а ListEnrolledDevices уже фильтрует по tenant —
+	// без этого in_scope раздувается чужими тенантами (см. TestListSoftwarePolicyCompliance).
+	rows, err := db.Q(ctx).Query(ctx, `
 		WITH scope AS (
 			SELECT r.id AS rule_id, r.rule_type, d.id AS device_id,
 			       EXISTS (
@@ -1777,7 +2189,9 @@ func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context) ([]SoftwarePolic
 			       ) AS installed
 			FROM software_policy_rules r
 			JOIN devices d
-			  ON d.status <> 'pending'
+			  ON d.tenant_id = $1
+			 AND r.tenant_id = $1
+			 AND d.status <> 'pending'
 			 AND (
 			       (r.device_id IS NULL AND r.group_id IS NULL)   -- глобальное
 			    OR d.id = r.device_id                             -- оверрайд устройства
@@ -1801,8 +2215,9 @@ func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context) ([]SoftwarePolic
 		       count(s.device_id) FILTER (WHERE s.rule_type = 'forbidden' AND s.installed)     AS fail
 		FROM software_policy_rules r
 		LEFT JOIN scope s ON s.rule_id = r.id
+		WHERE r.tenant_id = $1
 		GROUP BY r.id
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -1842,14 +2257,28 @@ type SoftwarePolicyDeviceCompliance struct {
 // ListSoftwarePolicyCompliance (глобальное ∪ device-оверрайд ∪ группа, платформенный
 // фильтр с fail-safe, регистронезависимая подстрока), но без агрегации: по строке на
 // каждое устройство в области правила. Нарушители первыми, дальше по hostname.
-func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID string) ([]SoftwarePolicyDeviceCompliance, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, tenantID, ruleID string) ([]SoftwarePolicyDeviceCompliance, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT d.id, d.hostname, COALESCE(d.os, ''), d.status,
 		       m.software_name IS NOT NULL AS installed,
 		       COALESCE(m.software_name, ''), COALESCE(m.version, ''), COALESCE(m.scope, '')
 		FROM software_policy_rules r
 		JOIN devices d
-		  ON d.status <> 'pending'
+		  ON d.tenant_id = $1
+		 AND r.tenant_id = $1
+		 AND d.status <> 'pending'
 		 AND (
 		       (r.device_id IS NULL AND r.group_id IS NULL)   -- глобальное
 		    OR d.id = r.device_id                             -- оверрайд устройства
@@ -1878,11 +2307,11 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, ruleID str
 		    ORDER BY (s.scope = 'user'), lower(s.software_name)
 		    LIMIT 1
 		) m ON true
-		-- id::text, а не id = $1: ruleID приходит сырым из URL, мусор вместо UUID
+		-- id::text, а не id = $2: ruleID приходит сырым из URL, мусор вместо UUID
 		-- дал бы 22P02 → 500; с ::text он просто ничего не находит (конвенция GetScript).
-		WHERE r.id::text = $1
+		WHERE r.id::text = $2
 		ORDER BY installed DESC, lower(d.hostname)
-	`, ruleID)
+	`, tenantID, ruleID)
 	if err != nil {
 		return nil, err
 	}
@@ -1916,17 +2345,32 @@ type ScriptPolicyCompliance struct {
 // Область действия — только через группы (policy_assignments → device_group_members):
 // прямого назначения политики на устройство в схеме нет. Устройства, отчитавшиеся, но
 // уже выкинутые из группы, в счётчики не попадают — авторитетен in_scope.
-func (db *DB) ListScriptPolicyCompliance(ctx context.Context) ([]ScriptPolicyCompliance, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListScriptPolicyCompliance(ctx context.Context, tenantID string) ([]ScriptPolicyCompliance, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	// Явный tenant_id: под суперюзером mdm FORCE RLS не режет (см. software compliance).
+	rows, err := db.Q(ctx).Query(ctx, `
 		WITH latest AS (
-			SELECT DISTINCT ON (device_id, policy_id) policy_id, device_id, exit_code
-			FROM script_results
-			ORDER BY device_id, policy_id, created_at DESC
+			SELECT DISTINCT ON (sr.device_id, sr.policy_id) sr.policy_id, sr.device_id, sr.exit_code
+			FROM script_results sr
+			JOIN policies p0 ON p0.id = sr.policy_id AND p0.tenant_id = $1
+			ORDER BY sr.device_id, sr.policy_id, sr.created_at DESC
 		), assigned AS (
 			SELECT DISTINCT pa.policy_id, m.device_id
 			FROM policy_assignments pa
+			JOIN policies p1 ON p1.id = pa.policy_id AND p1.tenant_id = $1
 			JOIN device_group_members m ON m.group_id = pa.group_id
-			JOIN devices d ON d.id = m.device_id AND d.status <> 'pending'
+			JOIN devices d ON d.id = m.device_id AND d.status <> 'pending' AND d.tenant_id = $1
 		)
 		SELECT p.id,
 		       count(a.device_id)                                        AS in_scope,
@@ -1935,8 +2379,9 @@ func (db *DB) ListScriptPolicyCompliance(ctx context.Context) ([]ScriptPolicyCom
 		FROM policies p
 		LEFT JOIN assigned a ON a.policy_id = p.id
 		LEFT JOIN latest   l ON l.policy_id = p.id AND l.device_id = a.device_id
+		WHERE p.tenant_id = $1
 		GROUP BY p.id
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -1953,14 +2398,22 @@ func (db *DB) ListScriptPolicyCompliance(ctx context.Context) ([]ScriptPolicyCom
 	return out, rows.Err()
 }
 
-func (db *DB) GetDeviceIDByFingerprint(ctx context.Context, fingerprint string) (string, error) {
-	var id string
-	err := db.pool.QueryRow(ctx,
-		`SELECT id FROM devices WHERE certificate_fingerprint = $1`, fingerprint).Scan(&id)
+func (db *DB) GetDeviceTenantByFingerprint(ctx context.Context, fingerprint string) (id, tenantID, status string, err error) {
+	err = db.pool.QueryRow(ctx,
+		`SELECT id::text, tenant_id::text, status FROM auth_device_by_fingerprint($1)`, fingerprint,
+	).Scan(&id, &tenantID, &status)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
+			return "", "", "", nil
 		}
+		return "", "", "", err
+	}
+	return id, tenantID, status, nil
+}
+
+func (db *DB) GetDeviceIDByFingerprint(ctx context.Context, fingerprint string) (string, error) {
+	id, _, _, err := db.GetDeviceTenantByFingerprint(ctx, fingerprint)
+	if err != nil {
 		return "", err
 	}
 	return id, nil
@@ -1981,10 +2434,26 @@ type AdminAccessRequest struct {
 	RevokedAt        *time.Time `json:"revoked_at"`
 }
 
-func (db *DB) GetSystemSetting(ctx context.Context, key string) (string, error) {
+func (db *DB) GetSystemSetting(ctx context.Context, tenantID, key string) (string, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return "", err
+		}
+		defer finish(true)
+	}
 	var value string
-	err := db.pool.QueryRow(ctx,
-		`SELECT value FROM system_settings WHERE key = $1`, key).Scan(&value)
+	err = db.Q(ctx).QueryRow(ctx, `
+		SELECT value FROM system_settings
+		WHERE key = $1 AND tenant_id IN ($2::uuid, $3::uuid)
+		ORDER BY (tenant_id = $2::uuid) DESC
+		LIMIT 1
+	`, key, tenantID, tenancy.InstallationSettingsTenantID).Scan(&value)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
@@ -1994,9 +2463,30 @@ func (db *DB) GetSystemSetting(ctx context.Context, key string) (string, error) 
 	return value, nil
 }
 
+func (db *DB) SetSystemSetting(ctx context.Context, tenantID, key, value string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `
+		INSERT INTO system_settings (key, tenant_id, value)
+		VALUES ($1, $2::uuid, $3)
+		ON CONFLICT (key, tenant_id) DO UPDATE SET value = EXCLUDED.value
+	`, key, tenantID, value)
+	return err
+}
+
 func (db *DB) CreateAdminAccessRequest(ctx context.Context, deviceID, requestedBy, reason string, requestedAt, pendingExpiresAt time.Time) (*AdminAccessRequest, error) {
 	var r AdminAccessRequest
-	err := db.pool.QueryRow(ctx, `
+	err := db.Q(ctx).QueryRow(ctx, `
 		INSERT INTO admin_access_requests (device_id, requested_by, reason, requested_at, pending_expires_at)
 		VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5)
 		RETURNING id, device_id, COALESCE(requested_by::text, ''), status, COALESCE(reason,''),
@@ -2013,8 +2503,14 @@ func (db *DB) CreateAdminAccessRequest(ctx context.Context, deviceID, requestedB
 // FetchActiveAdminRequest returns the latest PENDING or APPROVED request for a device.
 // Returns nil if no active request exists.
 func (db *DB) FetchActiveAdminRequest(ctx context.Context, deviceID string) (*AdminAccessRequest, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+
 	var r AdminAccessRequest
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
 		SELECT id, device_id, COALESCE(requested_by::text, ''), status, COALESCE(reason,''),
 		       requested_at, pending_expires_at, decided_by, decided_at, granted_at, expires_at, revoked_at
 		FROM admin_access_requests
@@ -2062,7 +2558,7 @@ func (db *DB) UpdateAdminAccessReport(ctx context.Context, requestID, deviceID, 
 // RespondToAdminRequest sets the IT admin's decision on a PENDING request.
 // expiresAt is only relevant for "approved" decisions.
 func (db *DB) RespondToAdminRequest(ctx context.Context, requestID, decision, decidedByUserID string, expiresAt *time.Time) error {
-	_, err := db.pool.Exec(ctx, `
+	_, err := db.Q(ctx).Exec(ctx, `
 		UPDATE admin_access_requests
 		SET status = $2, decided_by = $3, decided_at = now(), expires_at = $4
 		WHERE id = $1 AND status = 'pending'
@@ -2070,8 +2566,14 @@ func (db *DB) RespondToAdminRequest(ctx context.Context, requestID, decision, de
 	return err
 }
 
-func (db *DB) RevokeAdminAccessRequest(ctx context.Context, requestID string) error {
-	_, err := db.pool.Exec(ctx,
+func (db *DB) RevokeAdminAccessRequest(ctx context.Context, tenantID, requestID string) error {
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+
+	_, err = db.Q(ctx).Exec(ctx,
 		`UPDATE admin_access_requests SET status = 'revoked', revoked_at = NOW()
    WHERE id = $1 AND status = 'approved'`,
 		requestID)
@@ -2081,7 +2583,7 @@ func (db *DB) RevokeAdminAccessRequest(ctx context.Context, requestID string) er
 // ExpireStaleAdminRequests marks PENDING requests past their pending_expires_at
 // and APPROVED requests past their expires_at as EXPIRED.
 func (db *DB) ExpireStaleAdminRequests(ctx context.Context) (int64, error) {
-	result, err := db.pool.Exec(ctx, `
+	result, err := db.Q(ctx).Exec(ctx, `
 		UPDATE admin_access_requests
 		SET status = 'expired'
 		WHERE (status = 'pending' AND pending_expires_at < now())
@@ -2107,20 +2609,44 @@ type AdminAccessRequestRow struct {
 	GrantedAt        *time.Time `json:"granted_at"`
 	ExpiresAt        *time.Time `json:"expires_at"`
 	RevokedAt        *time.Time `json:"revoked_at"`
+	// Сводка улик — колонками в заявке, без JOIN/N+1 (контракт §5.2).
+	BaselineCapturedAt  *time.Time `json:"baseline_captured_at"`
+	ChangesFinalAt      *time.Time `json:"changes_final_at"`
+	ChangesCompleteness string     `json:"changes_completeness"`
+	ChangesRebooted     bool       `json:"changes_rebooted"`
+	ChangesTruncated    bool       `json:"changes_truncated"`
+	SoftwareHealth      string     `json:"software_health"`
+	ServicesHealth      string     `json:"services_health"`
+	LastWindowSeq       int32      `json:"last_window_seq"`
 }
 
-func (db *DB) ListAdminAccessRequests(ctx context.Context, statusFilter string) ([]AdminAccessRequestRow, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListAdminAccessRequests(ctx context.Context, tenantID, statusFilter string) ([]AdminAccessRequestRow, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT r.id, r.device_id, COALESCE(d.hostname, ''), COALESCE(r.requested_by::text, ''), COALESCE(u.email, ''),
 		       r.status, COALESCE(r.reason, ''), r.requested_at, r.pending_expires_at,
-		       r.decided_at, r.granted_at, r.expires_at, r.revoked_at
+		       r.decided_at, r.granted_at, r.expires_at, r.revoked_at,
+		       r.baseline_captured_at, r.changes_final_at, r.changes_completeness,
+		       r.changes_rebooted, r.changes_truncated, r.software_health, r.services_health,
+		       r.last_window_seq
 		FROM admin_access_requests r
 		LEFT JOIN devices d ON d.id = r.device_id
 		LEFT JOIN users u ON u.id = r.requested_by
-		WHERE ($1 = '' OR r.status = $1)
+		WHERE r.tenant_id = $1 AND ($2 = '' OR r.status = $2)
 		ORDER BY r.requested_at DESC
 		LIMIT 100
-	`, statusFilter)
+	`, tenantID, statusFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -2131,7 +2657,10 @@ func (db *DB) ListAdminAccessRequests(ctx context.Context, statusFilter string) 
 		var r AdminAccessRequestRow
 		if err := rows.Scan(&r.ID, &r.DeviceID, &r.DeviceHostname, &r.RequestedBy, &r.RequesterEmail,
 			&r.Status, &r.Reason, &r.RequestedAt, &r.PendingExpiresAt,
-			&r.DecidedAt, &r.GrantedAt, &r.ExpiresAt, &r.RevokedAt); err != nil {
+			&r.DecidedAt, &r.GrantedAt, &r.ExpiresAt, &r.RevokedAt,
+			&r.BaselineCapturedAt, &r.ChangesFinalAt, &r.ChangesCompleteness,
+			&r.ChangesRebooted, &r.ChangesTruncated, &r.SoftwareHealth, &r.ServicesHealth,
+			&r.LastWindowSeq); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -2150,9 +2679,22 @@ type Script struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func (db *DB) ListScripts(ctx context.Context) ([]Script, error) {
-	rows, err := db.pool.Query(ctx,
-		`SELECT id, name, platform, content, created_at, updated_at FROM scripts ORDER BY created_at DESC`)
+func (db *DB) ListScripts(ctx context.Context, tenantID string) ([]Script, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx,
+		`SELECT id, name, platform, content, created_at, updated_at FROM scripts
+		 WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2183,26 +2725,51 @@ func asDuplicateName(err error) error {
 	return err
 }
 
-func (db *DB) CreateScript(ctx context.Context, name, platform, content string) (*Script, error) {
+func (db *DB) CreateScript(ctx context.Context, tenantID, name, platform, content string) (*Script, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var s Script
-	err := db.pool.QueryRow(ctx, `
-		INSERT INTO scripts (name, platform, content)
-		VALUES ($1, $2, $3)
+	err = db.Q(ctx).QueryRow(ctx, `
+		INSERT INTO scripts (tenant_id, name, platform, content)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, name, platform, content, created_at, updated_at
-	`, name, platform, content).Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID, name, platform, content).Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, asDuplicateName(err)
 	}
 	return &s, nil
 }
 
-func (db *DB) GetScript(ctx context.Context, id string) (*Script, error) {
+func (db *DB) GetScript(ctx context.Context, tenantID, id string) (*Script, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var s Script
 	// id::text, а не id = $1: при кривом script_id (не UUID) сравнение с uuid-колонкой
 	// падает 22P02 → handler отдавал 500 вместо 404. Через ::text несуществующий/кривой
 	// id просто не находится → ErrNoRows → nil,nil → 404 (приём как у DeviceGroupExists).
-	err := db.pool.QueryRow(ctx,
-		`SELECT id, name, platform, content, created_at, updated_at FROM scripts WHERE id::text = $1`, id).
+	err = db.Q(ctx).QueryRow(ctx,
+		`SELECT id, name, platform, content, created_at, updated_at FROM scripts
+		 WHERE tenant_id = $1 AND id::text = $2`, tenantID, id).
 		Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2213,13 +2780,25 @@ func (db *DB) GetScript(ctx context.Context, id string) (*Script, error) {
 	return &s, nil
 }
 
-func (db *DB) UpdateScript(ctx context.Context, id, name, platform, content string) (*Script, error) {
+func (db *DB) UpdateScript(ctx context.Context, tenantID, id, name, platform, content string) (*Script, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var s Script
-	err := db.pool.QueryRow(ctx, `
-		UPDATE scripts SET name=$2, platform=$3, content=$4, updated_at=now()
-		WHERE id=$1
+	err = db.Q(ctx).QueryRow(ctx, `
+		UPDATE scripts SET name=$3, platform=$4, content=$5, updated_at=now()
+		WHERE tenant_id=$1 AND id=$2
 		RETURNING id, name, platform, content, created_at, updated_at
-	`, id, name, platform, content).Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
+	`, tenantID, id, name, platform, content).Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -2233,8 +2812,20 @@ func (db *DB) UpdateScript(ctx context.Context, id, name, platform, content stri
 // Удалять нельзя: иначе политика осталась бы без тела скрипта. Отдаётся как 409.
 var ErrScriptInUse = errors.New("script is referenced by script policies")
 
-func (db *DB) DeleteScript(ctx context.Context, id string) error {
-	_, err := db.pool.Exec(ctx, `DELETE FROM scripts WHERE id = $1`, id)
+func (db *DB) DeleteScript(ctx context.Context, tenantID, id string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM scripts WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	if errors.Is(wrapFKViolation(err), ErrForeignKeyViolation) {
 		return ErrScriptInUse
 	}
@@ -2258,21 +2849,34 @@ type ScriptPolicy struct {
 	GroupNames []string `json:"group_names"`
 }
 
-func (db *DB) ListScriptPolicies(ctx context.Context) ([]ScriptPolicy, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListScriptPolicies(ctx context.Context, tenantID string) ([]ScriptPolicy, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT p.id, p.name, p.script_id, COALESCE(s.name, ''), p.trigger_type,
 		       COALESCE(p.schedule_config::text, 'null'), COALESCE(p.event_trigger_config::text, 'null'),
 		       p.is_active, p.created_at,
 		       COALESCE(
 		         (SELECT array_agg(g.name ORDER BY g.name)
 		          FROM policy_assignments pa JOIN device_groups g ON g.id = pa.group_id
-		          WHERE pa.policy_id = p.id),
+		          WHERE pa.policy_id = p.id AND pa.tenant_id = $1),
 		         ARRAY[]::text[]
 		       ) AS group_names
 		FROM policies p
 		LEFT JOIN scripts s ON s.id = p.script_id
+		WHERE p.tenant_id = $1
 		ORDER BY p.created_at DESC
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2292,18 +2896,35 @@ func (db *DB) ListScriptPolicies(ctx context.Context) ([]ScriptPolicy, error) {
 	return policies, rows.Err()
 }
 
-func (db *DB) CreateScriptPolicy(ctx context.Context, name, scriptID, triggerType string, scheduleConfig, eventTriggerConfig []byte) (*ScriptPolicy, error) {
+func (db *DB) CreateScriptPolicy(ctx context.Context, tenantID, name, scriptID, triggerType string, scheduleConfig, eventTriggerConfig []byte) (*ScriptPolicy, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var p ScriptPolicy
 	var schedRaw, eventRaw string
-	err := db.pool.QueryRow(ctx, `
-		INSERT INTO policies (name, script_id, trigger_type, schedule_config, event_trigger_config)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+	// Скрипт обязан быть того же тенанта — иначе INSERT молча связал бы политику A со скриптом B.
+	err = db.Q(ctx).QueryRow(ctx, `
+		INSERT INTO policies (tenant_id, name, script_id, trigger_type, schedule_config, event_trigger_config)
+		SELECT $1, $2, s.id, $4, $5::jsonb, $6::jsonb
+		FROM scripts s WHERE s.id = $3 AND s.tenant_id = $1
 		RETURNING id, name, script_id, trigger_type,
 		          COALESCE(schedule_config::text, 'null'), COALESCE(event_trigger_config::text, 'null'),
 		          is_active, created_at
-	`, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
+	`, tenantID, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
 		Scan(&p.ID, &p.Name, &p.ScriptID, &p.TriggerType, &schedRaw, &eventRaw, &p.IsActive, &p.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // скрипта нет в этом тенанте
+		}
 		return nil, asDuplicateName(err)
 	}
 	p.ScheduleConfig = json.RawMessage(schedRaw)
@@ -2311,8 +2932,20 @@ func (db *DB) CreateScriptPolicy(ctx context.Context, name, scriptID, triggerTyp
 	return &p, nil
 }
 
-func (db *DB) DeleteScriptPolicy(ctx context.Context, id string) error {
-	_, err := db.pool.Exec(ctx, `DELETE FROM policies WHERE id = $1`, id)
+func (db *DB) DeleteScriptPolicy(ctx context.Context, tenantID, id string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM policies WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	return err
 }
 
@@ -2320,18 +2953,31 @@ func (db *DB) DeleteScriptPolicy(ctx context.Context, id string) error {
 // ToggleScriptPolicy). Нужен для идемпотентного YAML-apply: без него правка расписания
 // требовала бы delete+create, а это потеря истории результатов и id, на который
 // ссылаются назначения групп. (nil, nil) = политики нет → 404.
-func (db *DB) UpdateScriptPolicy(ctx context.Context, id, name, scriptID, triggerType string, scheduleConfig, eventTriggerConfig []byte) (*ScriptPolicy, error) {
+func (db *DB) UpdateScriptPolicy(ctx context.Context, tenantID, id, name, scriptID, triggerType string, scheduleConfig, eventTriggerConfig []byte) (*ScriptPolicy, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var p ScriptPolicy
 	var schedRaw, eventRaw string
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
 		UPDATE policies
-		SET    name = $2, script_id = $3, trigger_type = $4,
-		       schedule_config = $5::jsonb, event_trigger_config = $6::jsonb
-		WHERE  id::text = $1
+		SET    name = $3, script_id = $4, trigger_type = $5,
+		       schedule_config = $6::jsonb, event_trigger_config = $7::jsonb
+		WHERE  tenant_id = $1 AND id::text = $2
+		  AND EXISTS (SELECT 1 FROM scripts s WHERE s.id = $4 AND s.tenant_id = $1)
 		RETURNING id, name, script_id, trigger_type,
 		          COALESCE(schedule_config::text, 'null'), COALESCE(event_trigger_config::text, 'null'),
 		          is_active, created_at
-	`, id, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
+	`, tenantID, id, name, scriptID, triggerType, nullableJSON(scheduleConfig), nullableJSON(eventTriggerConfig)).
 		Scan(&p.ID, &p.Name, &p.ScriptID, &p.TriggerType, &schedRaw, &eventRaw, &p.IsActive, &p.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2344,8 +2990,20 @@ func (db *DB) UpdateScriptPolicy(ctx context.Context, id, name, scriptID, trigge
 	return &p, nil
 }
 
-func (db *DB) ToggleScriptPolicy(ctx context.Context, id string, active bool) error {
-	_, err := db.pool.Exec(ctx, `UPDATE policies SET is_active=$2 WHERE id=$1`, id, active)
+func (db *DB) ToggleScriptPolicy(ctx context.Context, tenantID, id string, active bool) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `UPDATE policies SET is_active=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, id, active)
 	return err
 }
 
@@ -2359,10 +3017,14 @@ func nullableJSON(b []byte) any {
 // ====== Device Groups ======
 
 type DeviceGroup struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Color     string    `json:"color"` // '#rrggbb', CHECK в миграции 027
-	CreatedAt time.Time `json:"created_at"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"` // '#rrggbb', CHECK в миграции 027
+	// UpdateChannel — канал обновлений участников группы (065): stable|beta.
+	// Канарейка — это группа канала beta, куда кладут несколько машин перед
+	// выкаткой на парк.
+	UpdateChannel string    `json:"update_channel"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // DefaultGroupColor — то же значение, что DEFAULT колонки color (миграция 027).
@@ -2384,9 +3046,22 @@ type DeviceGroupWithMembers struct {
 	SoftwareRules []GroupSoftwareRule `json:"software_rules"`
 }
 
-func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, error) {
-	rows, err := db.pool.Query(ctx,
-		`SELECT id, name, color, created_at FROM device_groups ORDER BY created_at DESC`)
+func (db *DB) ListDeviceGroups(ctx context.Context, tenantID string) ([]DeviceGroupWithMembers, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx,
+		`SELECT id, name, color, update_channel, created_at FROM device_groups
+		 WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2394,7 +3069,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, e
 	var groups []DeviceGroupWithMembers
 	for rows.Next() {
 		var g DeviceGroupWithMembers
-		if err := rows.Scan(&g.ID, &g.Name, &g.Color, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Color, &g.UpdateChannel, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		g.DeviceIDs = []string{}
@@ -2415,7 +3090,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, e
 		byID[groups[i].ID] = &groups[i]
 	}
 
-	members, err := db.pool.Query(ctx, `SELECT group_id, device_id FROM device_group_members`)
+	members, err := db.Q(ctx).Query(ctx, `SELECT group_id, device_id FROM device_group_members WHERE tenant_id = $1`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2433,7 +3108,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, e
 		return nil, err
 	}
 
-	assignments, err := db.pool.Query(ctx, `SELECT group_id, policy_id FROM policy_assignments`)
+	assignments, err := db.Q(ctx).Query(ctx, `SELECT group_id, policy_id FROM policy_assignments WHERE tenant_id = $1`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2452,8 +3127,9 @@ func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, e
 	}
 
 	// Групповые софт-правила (#2): привязаны через software_policy_rules.group_id.
-	sw, err := db.pool.Query(ctx,
-		`SELECT group_id, id, software_name, rule_type FROM software_policy_rules WHERE group_id IS NOT NULL`)
+	sw, err := db.Q(ctx).Query(ctx,
+		`SELECT group_id, id, software_name, rule_type FROM software_policy_rules
+		 WHERE tenant_id = $1 AND group_id IS NOT NULL`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2479,13 +3155,31 @@ func (db *DB) ListDeviceGroups(ctx context.Context) ([]DeviceGroupWithMembers, e
 var ErrDuplicateGroupName = errors.New("device group name already exists")
 
 // CreateDeviceGroup — пустой color не ошибка, а «на усмотрение БД» (DEFAULT из 027).
-// Валидацию формата делает хендлер, БД страхует CHECK'ом.
-func (db *DB) CreateDeviceGroup(ctx context.Context, name, color string) (*DeviceGroup, error) {
+// Валидацию формата делает хендлер, БД страхует CHECK'ом. Пустой channel — то же
+// самое: DEFAULT 'stable' из 065.
+func (db *DB) CreateDeviceGroup(ctx context.Context, tenantID, name, color, channel string) (*DeviceGroup, error) {
+	if channel != "" && !ValidChannel(channel) {
+		return nil, fmt.Errorf("неизвестный канал обновлений %q", channel)
+	}
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var g DeviceGroup
-	err := db.pool.QueryRow(ctx,
-		`INSERT INTO device_groups (name, color) VALUES ($1, COALESCE(NULLIF($2, ''), $3))
-		 RETURNING id, name, color, created_at`, name, color, DefaultGroupColor).
-		Scan(&g.ID, &g.Name, &g.Color, &g.CreatedAt)
+	err = db.Q(ctx).QueryRow(ctx,
+		`INSERT INTO device_groups (tenant_id, name, color, update_channel)
+		 VALUES ($1, $2, COALESCE(NULLIF($3, ''), $4), COALESCE(NULLIF($5, ''), $6))
+		 RETURNING id, name, color, update_channel, created_at`,
+		tenantID, name, color, DefaultGroupColor, channel, ChannelStable).
+		Scan(&g.ID, &g.Name, &g.Color, &g.UpdateChannel, &g.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -2496,18 +3190,34 @@ func (db *DB) CreateDeviceGroup(ctx context.Context, name, color string) (*Devic
 	return &g, nil
 }
 
-// UpdateDeviceGroup меняет имя и/или цвет. Пустая строка = «не трогать это поле»,
-// поэтому переименовать в пустое имя нельзя (и не нужно: CHECK 026 всё равно не даст).
-// Возвращает (nil, nil), если группы нет — хендлер отдаёт 404.
-func (db *DB) UpdateDeviceGroup(ctx context.Context, id, name, color string) (*DeviceGroup, error) {
+// UpdateDeviceGroup меняет имя, цвет и/или канал обновлений. Пустая строка = «не
+// трогать это поле», поэтому переименовать в пустое имя нельзя (и не нужно: CHECK 026
+// всё равно не даст). Возвращает (nil, nil), если группы нет — хендлер отдаёт 404.
+func (db *DB) UpdateDeviceGroup(ctx context.Context, tenantID, id, name, color, channel string) (*DeviceGroup, error) {
+	if channel != "" && !ValidChannel(channel) {
+		return nil, fmt.Errorf("неизвестный канал обновлений %q", channel)
+	}
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var g DeviceGroup
-	err := db.pool.QueryRow(ctx, `
+	err = db.Q(ctx).QueryRow(ctx, `
 		UPDATE device_groups
-		SET    name  = COALESCE(NULLIF($2, ''), name),
-		       color = COALESCE(NULLIF($3, ''), color)
-		WHERE  id::text = $1
-		RETURNING id, name, color, created_at
-	`, id, name, color).Scan(&g.ID, &g.Name, &g.Color, &g.CreatedAt)
+		SET    name           = COALESCE(NULLIF($3, ''), name),
+		       color          = COALESCE(NULLIF($4, ''), color),
+		       update_channel = COALESCE(NULLIF($5, ''), update_channel)
+		WHERE  tenant_id = $1 AND id::text = $2
+		RETURNING id, name, color, update_channel, created_at
+	`, tenantID, id, name, color, channel).Scan(&g.ID, &g.Name, &g.Color, &g.UpdateChannel, &g.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -2523,57 +3233,174 @@ func (db *DB) UpdateDeviceGroup(ctx context.Context, id, name, color string) (*D
 
 // DeviceGroupExists нужен там, где иначе молча получается no-op: запуск скрипта на
 // несуществующей группе возвращал 201 created:0.
-func (db *DB) DeviceGroupExists(ctx context.Context, id string) (bool, error) {
+func (db *DB) DeviceGroupExists(ctx context.Context, tenantID, id string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
 	var exists bool
 	// id::text, а не id: кривой UUID из URL иначе даёт 22P02 и превращается в 500.
-	err := db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM device_groups WHERE id::text = $1)`, id).Scan(&exists)
+	err = db.Q(ctx).QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM device_groups WHERE tenant_id = $1 AND id::text = $2)`,
+		tenantID, id).Scan(&exists)
 	return exists, err
 }
 
-func (db *DB) DeleteDeviceGroup(ctx context.Context, id string) error {
-	_, err := db.pool.Exec(ctx, `DELETE FROM device_groups WHERE id=$1`, id)
+func (db *DB) DeleteDeviceGroup(ctx context.Context, tenantID, id string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM device_groups WHERE tenant_id=$1 AND id=$2`, tenantID, id)
 	return err
 }
 
 // AddDeviceToGroup — несуществующее устройство/группа = ErrForeignKeyViolation (→400),
 // а не «internal error». То же у AssignPolicyToGroup / AssignSoftwarePolicyToGroup.
-func (db *DB) AddDeviceToGroup(ctx context.Context, deviceID, groupID string) error {
-	_, err := db.pool.Exec(ctx,
-		`INSERT INTO device_group_members (device_id, group_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-		deviceID, groupID)
+func (db *DB) AddDeviceToGroup(ctx context.Context, tenantID, deviceID, groupID string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	var ok bool
+	if err = db.Q(ctx).QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM devices d
+		  JOIN device_groups g ON g.tenant_id = d.tenant_id
+		  WHERE d.id = $2 AND g.id = $3 AND d.tenant_id = $1
+		)`, tenantID, deviceID, groupID).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: device_or_group", ErrForeignKeyViolation)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `
+		INSERT INTO device_group_members (tenant_id, device_id, group_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, tenantID, deviceID, groupID)
 	return wrapFKViolation(err)
 }
 
-func (db *DB) RemoveDeviceFromGroup(ctx context.Context, deviceID, groupID string) error {
-	_, err := db.pool.Exec(ctx,
-		`DELETE FROM device_group_members WHERE device_id=$1 AND group_id=$2`, deviceID, groupID)
+func (db *DB) RemoveDeviceFromGroup(ctx context.Context, tenantID, deviceID, groupID string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx,
+		`DELETE FROM device_group_members WHERE tenant_id=$1 AND device_id=$2 AND group_id=$3`,
+		tenantID, deviceID, groupID)
 	return err
 }
 
-func (db *DB) AssignPolicyToGroup(ctx context.Context, policyID, groupID string) error {
-	_, err := db.pool.Exec(ctx,
-		`INSERT INTO policy_assignments (policy_id, group_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-		policyID, groupID)
+func (db *DB) AssignPolicyToGroup(ctx context.Context, tenantID, policyID, groupID string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	var ok bool
+	if err = db.Q(ctx).QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM policies p
+		  JOIN device_groups g ON g.tenant_id = p.tenant_id
+		  WHERE p.id = $2 AND g.id = $3 AND p.tenant_id = $1
+		)`, tenantID, policyID, groupID).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: policy_or_group", ErrForeignKeyViolation)
+	}
+	_, err = db.Q(ctx).Exec(ctx, `
+		INSERT INTO policy_assignments (tenant_id, policy_id, group_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, tenantID, policyID, groupID)
 	return wrapFKViolation(err)
 }
 
-func (db *DB) UnassignPolicyFromGroup(ctx context.Context, policyID, groupID string) error {
-	_, err := db.pool.Exec(ctx,
-		`DELETE FROM policy_assignments WHERE policy_id=$1 AND group_id=$2`, policyID, groupID)
+func (db *DB) UnassignPolicyFromGroup(ctx context.Context, tenantID, policyID, groupID string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx,
+		`DELETE FROM policy_assignments WHERE tenant_id=$1 AND policy_id=$2 AND group_id=$3`,
+		tenantID, policyID, groupID)
 	return err
 }
 
 // AssignSoftwarePolicyToGroup создаёт групповое софт-правило (group_id set, #2).
 // Зеркалит CreatePolicyRule, но пишет group_id вместо device_id.
-func (db *DB) AssignSoftwarePolicyToGroup(ctx context.Context, groupID, softwareName, ruleType string) (*PolicyRuleRow, error) {
+func (db *DB) AssignSoftwarePolicyToGroup(ctx context.Context, tenantID, groupID, softwareName, ruleType string) (*PolicyRuleRow, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var r PolicyRuleRow
-	err := db.pool.QueryRow(ctx, `
-  INSERT INTO software_policy_rules (software_name, rule_type, group_id)
-  VALUES ($1, $2, $3)
+	err = db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO software_policy_rules (tenant_id, software_name, rule_type, group_id)
+  SELECT $1, $3, $4, g.id FROM device_groups g WHERE g.id = $2 AND g.tenant_id = $1
   RETURNING id, software_name, rule_type, device_id, group_id, updated_at
- `, softwareName, ruleType, groupID).
+ `, tenantID, groupID, softwareName, ruleType).
 		Scan(&r.ID, &r.SoftwareName, &r.RuleType, &r.DeviceID, &r.GroupID, &r.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: group", ErrForeignKeyViolation)
+		}
 		return nil, wrapFKViolation(err)
 	}
 	return &r, nil
@@ -2581,9 +3408,22 @@ func (db *DB) AssignSoftwarePolicyToGroup(ctx context.Context, groupID, software
 
 // UnassignSoftwarePolicyFromGroup удаляет групповое правило по id, ограничивая
 // удаление рамками группы (нельзя снести чужое/device/global правило этим маршрутом).
-func (db *DB) UnassignSoftwarePolicyFromGroup(ctx context.Context, groupID, ruleID string) error {
-	_, err := db.pool.Exec(ctx,
-		`DELETE FROM software_policy_rules WHERE id=$1 AND group_id=$2`, ruleID, groupID)
+func (db *DB) UnassignSoftwarePolicyFromGroup(ctx context.Context, tenantID, groupID, ruleID string) error {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		defer finish(true)
+	}
+	_, err = db.Q(ctx).Exec(ctx,
+		`DELETE FROM software_policy_rules WHERE tenant_id=$1 AND id=$2 AND group_id=$3`,
+		tenantID, ruleID, groupID)
 	return err
 }
 
@@ -2603,7 +3443,7 @@ func (db *DB) UnassignSoftwarePolicyFromGroup(ctx context.Context, groupID, rule
 // при рапорте «успех». Выравнивание этих двух семантик — открытый дизайн-вопрос (бэклог),
 // а не правка здесь: менять поведение без решения нельзя (тест закрепляет три-way).
 func (db *DB) FanOutScriptToGroup(ctx context.Context, groupID, scriptContent, platform, priority string) ([]Task, error) {
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status)
   SELECT m.device_id, $2, $3, $4, 'pending'
   FROM device_group_members m
@@ -2658,7 +3498,19 @@ type EffectivePoliciesResult struct {
 // (via device groups) to the device identified by its cert fingerprint.
 // Server resolves group membership; the agent never sees groups directly (ADR-1).
 func (db *DB) GetEffectiveScriptPoliciesForDevice(ctx context.Context, fingerprint string) (*EffectivePoliciesResult, error) {
-	rows, err := db.pool.Query(ctx, `
+	id, tenantID, _, err := db.GetDeviceTenantByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return &EffectivePoliciesResult{}, nil
+	}
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT DISTINCT ON (p.id)
 		       p.id, p.name, s.content, s.platform, p.trigger_type,
 		       COALESCE(p.schedule_config->>'cron', ''),
@@ -2717,7 +3569,7 @@ type ScriptResultInput struct {
 }
 
 func (db *DB) SaveScriptResult(ctx context.Context, r ScriptResultInput) error {
-	_, err := db.pool.Exec(ctx, `
+	_, err := db.Q(ctx).Exec(ctx, `
 		INSERT INTO script_results
 		       (policy_id, device_id, run_id, exit_code, stdout, stderr, trigger, started_at, finished_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
@@ -2746,11 +3598,20 @@ type ScriptResultRow struct {
 
 // ListScriptResultsByPolicy — история результатов запусков script-политики (по убыванию
 // времени), с хостнеймом устройства. limit ограничен для защиты от гигантских выборок.
-func (db *DB) ListScriptResultsByPolicy(ctx context.Context, policyID string, limit int) ([]ScriptResultRow, error) {
+func (db *DB) ListScriptResultsByPolicy(ctx context.Context, tenantID, policyID string, limit int) ([]ScriptResultRow, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := db.pool.Query(ctx, `
+	// BindTenant строго ДО запроса и запрос через Q(ctx): иначе SELECT уходит мимо
+	// транзакции с выставленным GUC routineops.tenant_id, и tenant-скоуп не применяется
+	// вовсе (до 049 — чужие строки, после — пустая выборка под RLS).
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT r.id, r.policy_id, r.device_id, COALESCE(d.hostname, ''), r.run_id,
 		       r.exit_code, COALESCE(r.stdout, ''), COALESCE(r.stderr, ''), r.trigger,
 		       r.started_at, r.finished_at, r.created_at
@@ -2764,6 +3625,7 @@ func (db *DB) ListScriptResultsByPolicy(ctx context.Context, policyID string, li
 		return nil, err
 	}
 	defer rows.Close()
+
 	var out []ScriptResultRow
 	for rows.Next() {
 		var r ScriptResultRow
@@ -2779,15 +3641,27 @@ func (db *DB) ListScriptResultsByPolicy(ctx context.Context, policyID string, li
 
 // ====== Device Tasks ======
 
-func (db *DB) ListDeviceTasks(ctx context.Context, deviceID string) ([]Task, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListDeviceTasks(ctx context.Context, tenantID, deviceID string) ([]Task, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
          task_type, uninstall_software_name, uninstall_version, uninstall_uninstall_id,
          uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason,
          uninstall_outcome
-  FROM tasks WHERE device_id = $1
+  FROM tasks WHERE device_id = $1 AND tenant_id = $2
   ORDER BY created_at DESC LIMIT 50
- `, deviceID)
+ `, deviceID, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2822,28 +3696,40 @@ var macSeparators = strings.NewReplacer(":", "", "-", "", ".", "", " ", "")
 // собирает агент (инвентарь + сеть) плюс серверные идентификаторы. uuid и int
 // кастуются в text: ILIKE по ним напрямую невозможен.
 const deviceSearchColumns = `
-	     COALESCE(d.hostname, '')       ILIKE $2
-	  OR COALESCE(d.os, '')             ILIKE $2
-	  OR COALESCE(d.os_version, '')     ILIKE $2
-	  OR COALESCE(d.ip_address, '')     ILIKE $2
-	  OR COALESCE(d.public_ip, '')      ILIKE $2
-	  OR COALESCE(d.mac_address, '')    ILIKE $2
-	  OR COALESCE(d.serial_number, '')  ILIKE $2
-	  OR COALESCE(d.cpu, '')            ILIKE $2
-	  OR COALESCE(d.disk, '')           ILIKE $2
-	  OR COALESCE(d.agent_version, '')  ILIKE $2
-	  OR COALESCE(d.cert_cn, '')        ILIKE $2
-	  OR COALESCE(d.ram::text, '')      ILIKE $2
-	  OR d.id::text                     ILIKE $2
-	  OR ($3 <> '' AND translate(COALESCE(d.mac_address, ''), ':-. ', '') ILIKE $3)
-	  OR ($3 <> '' AND translate(COALESCE(d.serial_number, ''), ':-. ', '') ILIKE $3)`
+	     COALESCE(d.hostname, '')       ILIKE $3
+	  OR COALESCE(d.os, '')             ILIKE $3
+	  OR COALESCE(d.os_version, '')     ILIKE $3
+	  OR COALESCE(d.ip_address, '')     ILIKE $3
+	  OR COALESCE(d.public_ip, '')      ILIKE $3
+	  OR COALESCE(d.mac_address, '')    ILIKE $3
+	  OR COALESCE(d.serial_number, '')  ILIKE $3
+	  OR COALESCE(d.cpu, '')            ILIKE $3
+	  OR COALESCE(d.disk, '')           ILIKE $3
+	  OR COALESCE(d.agent_version, '')  ILIKE $3
+	  OR COALESCE(d.cert_cn, '')        ILIKE $3
+	  OR COALESCE(d.ram::text, '')      ILIKE $3
+	  OR d.id::text                     ILIKE $3
+	  OR ($4 <> '' AND translate(COALESCE(d.mac_address, ''), ':-. ', '') ILIKE $4)
+	  OR ($4 <> '' AND translate(COALESCE(d.serial_number, ''), ':-. ', '') ILIKE $4)`
 
 // ListEnrolledDevices возвращает все не-pending устройства. Непустой query фильтрует
 // по подстроке ЛЮБОГО атрибута (см. deviceSearchColumns): достаточно хвоста серийника
 // или куска IP. Пустой query — весь список, как раньше. Непустой groupID оставляет
 // только членов этой группы; сравнение через group_id::text, иначе кривой UUID из
 // URL даёт 22P02 и превращается в 500 вместо пустой выдачи.
-func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string, limit, offset int) ([]Device, int, error) {
+func (db *DB) ListEnrolledDevices(ctx context.Context, tenantID, query, groupID string, limit, offset int) ([]Device, int, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer finish(true)
+	}
 	limit, offset = clampPage(limit, offset)
 	q := strings.TrimSpace(query)
 	pattern, stripped := "", ""
@@ -2859,20 +3745,21 @@ func (db *DB) ListEnrolledDevices(ctx context.Context, query, groupID string, li
 	// Порядок дополнен id: last_seen_at у устройств одной волны раскатки совпадает
 	// с точностью до секунды, а нестабильный порядок постранично = строки, которые
 	// перепрыгивают со страницы на страницу и «пропадают» из выдачи.
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT d.id, d.hostname, d.os, COALESCE(d.os_version, ''), COALESCE(d.ip_address, ''),
 		       d.status, d.last_seen_at, d.created_at, COALESCE(d.agent_version, ''),
 		       COALESCE(d.mac_address, ''), COALESCE(d.serial_number, ''), COALESCE(d.public_ip, ''),
 		       d.outbox_unavailable, COALESCE(d.degraded_detail, ''), d.degraded_since,
 		       COUNT(*) OVER() AS total
 		FROM devices d
-		WHERE d.status != 'pending'
-		  AND ($1 = '' OR (`+deviceSearchColumns+`))
-		  AND ($4 = '' OR EXISTS (SELECT 1 FROM device_group_members m
-		                          WHERE m.device_id = d.id AND m.group_id::text = $4))
+		WHERE d.tenant_id = $1
+		  AND d.status != 'pending'
+		  AND ($2 = '' OR (`+deviceSearchColumns+`))
+		  AND ($5 = '' OR EXISTS (SELECT 1 FROM device_group_members m
+		                          WHERE m.device_id = d.id AND m.group_id::text = $5 AND m.tenant_id = $1))
 		ORDER BY d.last_seen_at DESC NULLS LAST, d.id
-		LIMIT $5 OFFSET $6
-	`, q, pattern, stripped, strings.TrimSpace(groupID), limit, offset)
+		LIMIT $6 OFFSET $7
+	`, tenantID, q, pattern, stripped, strings.TrimSpace(groupID), limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2912,7 +3799,13 @@ func (db *DB) attachDeviceGroups(ctx context.Context, devices []Device) error {
 		ids[i] = devices[i].ID
 		byID[devices[i].ID] = &devices[i]
 	}
-	rows, err := db.pool.Query(ctx, `
+	// Q(ctx), а НЕ db.pool: оба вызывающих уже держат скоуп тенанта, а запрос идёт по
+	// двум таблицам под RLS. Через пул он брал соседнее соединение, на котором
+	// routineops.tenant_id остался ПУСТОЙ СТРОКОЙ: кастомный GUC после
+	// транзакционного set_config(...,true) возвращается не в «не задан», а в '', и
+	// предикат 046 падает на ''::uuid. Итог на проде 30.07 — GET /api/v1/devices
+	// отдавал 500 для всей панели, хотя сам список устройств был корректен.
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT m.device_id, g.id, g.name, g.color
 		FROM device_group_members m
 		JOIN device_groups g ON g.id = m.group_id
@@ -2938,16 +3831,43 @@ func (db *DB) attachDeviceGroups(ctx context.Context, devices []Device) error {
 
 // ---- Users ----
 
+// LookupUserEmail возвращает email по PK без скоупа тенанта. Нужен reset-flow: JWT ещё нет,
+// а тенант неизвестен. Не использовать для panel list/get.
+func (db *DB) LookupUserEmail(ctx context.Context, id string) (string, bool, error) {
+	var email string
+	err := db.Q(ctx).QueryRow(ctx, `SELECT email FROM users WHERE id::text = $1`, id).Scan(&email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return email, true, nil
+}
+
 // GetUserByID ищет по id::text, а не по id: до появления ручки удаления функцию звали
 // только с идентификатором из проверенного JWT, а теперь в неё едет строка прямо из URL.
 // Голое сравнение с uuid на кривом значении даёт 22P02 — то есть 500 вместо 404, и
 // ловится это не глазами, а тестом на «not-a-uuid». Правка в общей функции, а не в
 // вызывающем: остальным она не мешает, а следующий такой вызывающий появится незаметно.
-func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
+func (db *DB) GetUserByID(ctx context.Context, tenantID, id string) (*User, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var u User
-	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at FROM users WHERE id::text = $1
-	`, id).Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
+	err = db.Q(ctx).QueryRow(ctx, `
+		SELECT id, identity_id, name, email, role, created_at FROM users
+		WHERE tenant_id = $1 AND id::text = $2
+	`, tenantID, id).Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -2957,10 +3877,23 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	return &u, nil
 }
 
-func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := db.pool.Query(ctx, `
-		SELECT id, name, email, password_hash, role, created_at FROM users ORDER BY created_at
-	`)
+func (db *DB) ListUsers(ctx context.Context, tenantID string) ([]User, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
+		SELECT id, identity_id, name, email, role, created_at FROM users
+		WHERE tenant_id = $1 ORDER BY created_at
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2968,7 +3901,7 @@ func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -3001,20 +3934,29 @@ const AdminGuardLockKey = 4030407
 // сервисные токены и токены сброса пароля — CASCADE, приглашения и раскрытия эскроу —
 // SET NULL (журнал переживает удаление), заявки на локальные права — SET NULL.
 // Живые JWT умирают сами: jwtMiddleware отвергает токен, если пользователя больше нет.
-func (db *DB) DeleteUser(ctx context.Context, id string) (bool, error) {
-	tx, err := db.pool.Begin(ctx)
+func (db *DB) DeleteUser(ctx context.Context, tenantID, id string) (bool, error) {
+	tenantID, err := requireTenant(tenantID)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return false, err
+		}
+		defer finish(true)
+	}
+	q := db.Q(ctx)
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(AdminGuardLockKey)); err != nil {
+	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(AdminGuardLockKey)); err != nil {
 		return false, err
 	}
 
 	// id::text — кривой UUID из URL иначе даёт 22P02 и превращается в 500 вместо 404.
+	// Последний it_admin считается В ПРЕДЕЛАХ тенанта: чужой тенант не спасает от lockout.
 	var role string
-	err = tx.QueryRow(ctx, `SELECT role FROM users WHERE id::text = $1`, id).Scan(&role)
+	err = q.QueryRow(ctx, `SELECT role FROM users WHERE tenant_id = $1 AND id::text = $2`, tenantID, id).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -3023,7 +3965,9 @@ func (db *DB) DeleteUser(ctx context.Context, id string) (bool, error) {
 	}
 	if role == "it_admin" {
 		var admins int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE role = 'it_admin'`).Scan(&admins); err != nil {
+		if err := q.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE tenant_id = $1 AND role = 'it_admin'`, tenantID,
+		).Scan(&admins); err != nil {
 			return false, err
 		}
 		if admins <= 1 {
@@ -3031,46 +3975,50 @@ func (db *DB) DeleteUser(ctx context.Context, id string) (bool, error) {
 		}
 	}
 
-	tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id::text = $1`, id)
+	tag, err := q.Exec(ctx, `DELETE FROM users WHERE tenant_id = $1 AND id::text = $2`, tenantID, id)
 	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
 }
 
-// UpdateUserPassword меняет хэш пароля И двигает password_changed_at=now()
-// (token-epoch): все ранее выпущенные JWT становятся недействительны (см.
-// GetUserPasswordChangedAt + jwtMiddleware). Общий путь для in-app смены и
-// reset-flow — обе инвалидируют старые токены.
-func (db *DB) UpdateUserPassword(ctx context.Context, userID, passwordHash string) error {
-	_, err := db.pool.Exec(ctx,
-		`UPDATE users SET password_hash = $2, password_changed_at = now() WHERE id = $1`,
-		userID, passwordHash)
-	return err
+// UserEpoch — то, что jwtMiddleware обязан перечитывать из БД на каждый запрос
+// (ADR-6, ADR-7): тенант активного членства, момент последней смены пароля и
+// признак надзора. Ничего из этого не лежит в JWT — иначе отзыв прав ждал бы
+// истечения токена.
+type UserEpoch struct {
+	PasswordChangedAt time.Time
+	TenantID          string
+	IdentityID        string
+	IsProviderAdmin   bool
 }
 
-// GetUserPasswordChangedAt возвращает момент последней смены пароля (token-epoch)
-// и exists=false, если пользователя больше нет (живой токен удалённого юзера →
-// jwtMiddleware отвергает). Лёгкий однострочный lookup для middleware.
-func (db *DB) GetUserPasswordChangedAt(ctx context.Context, userID string) (time.Time, bool, error) {
-	var t time.Time
-	err := db.pool.QueryRow(ctx, `SELECT password_changed_at FROM users WHERE id = $1`, userID).Scan(&t)
+// GetUserEpoch возвращает состояние членства по его user_id. nil, nil — членства
+// больше нет (живой токен удалённого пользователя → jwtMiddleware отвергает).
+//
+// password_changed_at и is_provider_admin приходят с ЛИЧНОСТИ, а не с членства:
+// пароль у человека один, поэтому его смена обязана гасить токены во всех
+// тенантах сразу, а надзор не зависит от того, какой тенант сейчас активен.
+func (db *DB) GetUserEpoch(ctx context.Context, userID string) (*UserEpoch, error) {
+	var e UserEpoch
+	err := db.pool.QueryRow(ctx,
+		`SELECT password_changed_at, tenant_id::text, is_provider_admin, identity_id::text
+		 FROM auth_user_password_epoch($1::uuid)`, userID,
+	).Scan(&e.PasswordChangedAt, &e.TenantID, &e.IsProviderAdmin, &e.IdentityID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return nil, err
 	}
-	return t, true, nil
+	return &e, nil
 }
 
 // ---- Invitations ----
 
 type Invitation struct {
 	ID         string     `json:"id"`
+	TenantID   string     `json:"-"`
 	Email      string     `json:"email"`
 	Role       string     `json:"role"`
 	Token      string     `json:"token"`
@@ -3080,13 +4028,25 @@ type Invitation struct {
 	AcceptedAt *time.Time `json:"accepted_at"`
 }
 
-func (db *DB) CreateInvitation(ctx context.Context, email, role, token, invitedBy string) (*Invitation, error) {
+func (db *DB) CreateInvitation(ctx context.Context, tenantID, email, role, token, invitedBy string) (*Invitation, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
 	var inv Invitation
-	err := db.pool.QueryRow(ctx, `
-		INSERT INTO invitation_tokens (email, role, token, invited_by)
-		VALUES ($1, $2, $3, $4)
+	err = db.Q(ctx).QueryRow(ctx, `
+		INSERT INTO invitation_tokens (tenant_id, email, role, token, invited_by)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, email, role, token, invited_by, created_at, expires_at, accepted_at
-	`, email, role, token, invitedBy).
+	`, tenantID, email, role, token, invitedBy).
 		Scan(&inv.ID, &inv.Email, &inv.Role, &inv.Token, &inv.InvitedBy,
 			&inv.CreatedAt, &inv.ExpiresAt, &inv.AcceptedAt)
 	return &inv, err
@@ -3095,9 +4055,9 @@ func (db *DB) CreateInvitation(ctx context.Context, email, role, token, invitedB
 func (db *DB) GetInvitationByToken(ctx context.Context, token string) (*Invitation, error) {
 	var inv Invitation
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, email, role, token, invited_by, created_at, expires_at, accepted_at
-		FROM invitation_tokens WHERE token = $1
-	`, token).Scan(&inv.ID, &inv.Email, &inv.Role, &inv.Token, &inv.InvitedBy,
+		SELECT id, tenant_id::text, email, role, token, invited_by, created_at, expires_at, accepted_at
+		FROM auth_invitation_by_token($1)
+	`, token).Scan(&inv.ID, &inv.TenantID, &inv.Email, &inv.Role, &inv.Token, &inv.InvitedBy,
 		&inv.CreatedAt, &inv.ExpiresAt, &inv.AcceptedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -3109,7 +4069,19 @@ func (db *DB) GetInvitationByToken(ctx context.Context, token string) (*Invitati
 }
 
 func (db *DB) AcceptInvitation(ctx context.Context, token string) error {
-	_, err := db.pool.Exec(ctx, `
+	inv, err := db.GetInvitationByToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	if inv == nil {
+		return nil
+	}
+	ctx, finish, err := db.BindTenant(ctx, inv.TenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	_, err = db.Q(ctx).Exec(ctx, `
 		UPDATE invitation_tokens SET accepted_at = now() WHERE token = $1
 	`, token)
 	return err
@@ -3119,6 +4091,7 @@ func (db *DB) AcceptInvitation(ctx context.Context, token string) error {
 
 type PasswordResetToken struct {
 	ID        string     `json:"id"`
+	TenantID  string     `json:"-"`
 	UserID    string     `json:"user_id"`
 	Token     string     `json:"token"`
 	CreatedAt time.Time  `json:"created_at"`
@@ -3126,8 +4099,21 @@ type PasswordResetToken struct {
 	UsedAt    *time.Time `json:"used_at"`
 }
 
+// CreatePasswordResetToken заводит одноразовый токен сброса пароля.
+//
+// Скоуп по пользователю обязателен: таблица тенантская, и вставка без привязанного
+// тенанта не проходит `WITH CHECK` предиката 046 — то есть токен НЕ создаётся.
+// Полевой e2e 30.07: письмо со ссылкой при этом уходило (ошибку вставки вызывающий
+// отбрасывал), а сброс потом отвечал «invalid or expired token» — пользователь видел
+// «ссылка истекла» на ссылку, которой никогда не существовало.
 func (db *DB) CreatePasswordResetToken(ctx context.Context, userID, token string) error {
-	_, err := db.pool.Exec(ctx, `
+	ctx, finish, err := db.bindTenantForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+
+	_, err = db.Q(ctx).Exec(ctx, `
 		INSERT INTO password_reset_tokens (user_id, token) VALUES ($1, $2)
 	`, userID, token)
 	return err
@@ -3136,9 +4122,9 @@ func (db *DB) CreatePasswordResetToken(ctx context.Context, userID, token string
 func (db *DB) GetPasswordResetToken(ctx context.Context, token string) (*PasswordResetToken, error) {
 	var t PasswordResetToken
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, user_id, token, created_at, expires_at, used_at
-		FROM password_reset_tokens WHERE token = $1
-	`, token).Scan(&t.ID, &t.UserID, &t.Token, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt)
+		SELECT id, user_id, tenant_id::text, token, created_at, expires_at, used_at
+		FROM auth_password_reset_by_token($1)
+	`, token).Scan(&t.ID, &t.UserID, &t.TenantID, &t.Token, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -3149,7 +4135,19 @@ func (db *DB) GetPasswordResetToken(ctx context.Context, token string) (*Passwor
 }
 
 func (db *DB) MarkPasswordResetTokenUsed(ctx context.Context, token string) error {
-	_, err := db.pool.Exec(ctx, `
+	tok, err := db.GetPasswordResetToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	if tok == nil {
+		return nil
+	}
+	ctx, finish, err := db.BindTenant(ctx, tok.TenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	_, err = db.Q(ctx).Exec(ctx, `
 		UPDATE password_reset_tokens SET used_at = now() WHERE token = $1
 	`, token)
 	return err
@@ -3158,7 +4156,7 @@ func (db *DB) MarkPasswordResetTokenUsed(ctx context.Context, token string) erro
 // CleanupOldData чистит устаревшие записи. Операционные данные (alerts, script_results)
 // — по dataRetentionDays; audit_log — по отдельному auditRetentionDays (журнал
 // безопасности хранится дольше). Для любого срока 0/отриц = хранить бессрочно.
-func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetentionDays int) (int64, error) {
+func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetentionDays int, archiveDir string) (int64, error) {
 	var total int64
 	purge := func(table, extraWhere string, days int) error {
 		if days <= 0 {
@@ -3169,7 +4167,7 @@ func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetent
 		if extraWhere != "" {
 			q += ` AND ` + extraWhere
 		}
-		res, err := db.pool.Exec(ctx, q, cutoff)
+		res, err := db.Q(ctx).Exec(ctx, q, cutoff)
 		if err != nil {
 			return fmt.Errorf("cleanup %s: %w", table, err)
 		}
@@ -3186,8 +4184,78 @@ func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetent
 	if err := purge("script_results", "", dataRetentionDays); err != nil {
 		return total, err
 	}
-	if err := purge("audit_log", "", auditRetentionDays); err != nil {
+	if auditRetentionDays > 0 {
+		// 🔴 FAIL-CLOSED: чистим журнал ТОЛЬКО если есть куда его выгрузить. Иначе
+		// tamper-evident цепочка, ради которой она и строилась, умирала бы по
+		// расписанию — а выглядело бы это как штатная работа retention. Отсутствие
+		// AUDIT_ARCHIVE_DIR при заданном AUDIT_RETENTION_DAYS — ошибка конфигурации,
+		// и молчать о ней нельзя: удалённые улики не восстанавливаются.
+		if archiveDir == "" {
+			return total, fmt.Errorf(
+				"audit retention %d дней задан, а AUDIT_ARCHIVE_DIR пуст: журнал НЕ чищен, "+
+					"иначе записи удалились бы без архива", auditRetentionDays)
+		}
+		cutoff := time.Now().AddDate(0, 0, -auditRetentionDays)
+		if err := db.archiveAuditLogs(ctx, cutoff, archiveDir); err != nil {
+			return total, fmt.Errorf("archive audit logs: %w", err)
+		}
+		if err := purge("audit_log", "", auditRetentionDays); err != nil {
+			return total, err
+		}
+	}
+	// Улики сессии админ-прав — по сроку аудита, не DataRetentionDays (контракт §5.2).
+	if err := purge("admin_session_changes", "", auditRetentionDays); err != nil {
 		return total, err
 	}
 	return total, nil
+}
+
+// CreateFileVaultProvisionTask ставит задачу дозавершения provisioning FileVault.
+//
+// Оператор-путь взамен «зайти в терминал каждого мака и ввести пароль»: раскаткой это
+// не является, а без пароля держателя Secure Token ключ восстановления не получить.
+// Задача доезжает до агента обычным каналом, а пароль он запрашивает у сотрудника
+// через трей — служба сама его взять не может и не должна.
+//
+// Как и перезагрузка, задача одна на устройство: ON CONFLICT DO NOTHING, повторный
+// вызов отдаёт уже стоящую в очереди. Иначе нетерпеливый оператор насоздавал бы
+// очередь диалогов, которые вылезут сотруднику один за другим.
+func (db *DB) CreateFileVaultProvisionTask(ctx context.Context, deviceID, reason string) (*Task, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	if err := db.assertAgentSupports(ctx, deviceID, "filevault_provision"); err != nil {
+		return nil, err
+	}
+
+	const cols = `id, device_id, script_content, platform, priority, status, created_at, task_type,
+	              lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds`
+	scan := func(row pgx.Row, t *Task) error {
+		return row.Scan(&t.ID, &t.DeviceID, &t.ScriptContent, &t.Platform, &t.Priority, &t.Status,
+			&t.CreatedAt, &t.TaskType, &t.LockHash, &t.LockReason, &t.LockUnlock, &t.LockMode,
+			&t.RebootReason, &t.RebootDelaySeconds)
+	}
+
+	var t Task
+	err = scan(db.Q(ctx).QueryRow(ctx, `
+  INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, tenant_id)
+  SELECT $1, '', COALESCE(d.os, 'unknown'), 'normal', 'pending', 'filevault_provision', $2, d.tenant_id
+  FROM devices d WHERE d.id = $1
+  ON CONFLICT DO NOTHING
+  RETURNING `+cols, deviceID, reason), &t)
+	if err == nil {
+		return &t, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	err = scan(db.Q(ctx).QueryRow(ctx, `
+  SELECT `+cols+` FROM tasks
+  WHERE device_id = $1 AND task_type = 'filevault_provision' AND status = 'pending'`, deviceID), &t)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }

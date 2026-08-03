@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 // seedAgentUser создаёт пользователя-агента (без пароля) и возвращает его ID.
 func seedAgentUser(t *testing.T, db *storage.DB, email string) string {
 	t.Helper()
-	u, err := db.CreateUser(context.Background(), "Agent", email, "x", "user")
+	u, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Agent", email, "x", "user")
 	if err != nil {
 		t.Fatalf("seedAgentUser: %v", err)
 	}

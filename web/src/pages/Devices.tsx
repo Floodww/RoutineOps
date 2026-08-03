@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
+// i18n-инстанс нужен модульным функциям: хук доступен только внутри компонента,
+// а подсказка о совпадении собирается вне React-дерева.
+import i18n from "@/i18n/config"
 import { useNavigate } from "react-router-dom"
 import { Copy, Check, ChevronRight } from "lucide-react"
 import api, { Device, CreateDeviceResponse, DeviceGroup, DEVICE_STATUS, PAGE_SIZE, totalCount } from "@/lib/api"
@@ -26,12 +30,13 @@ function isOnline(device: Device): boolean {
 }
 
 function OnlineBadge({ device }: { device: Device }) {
+  const { t } = useTranslation()
   const online = isOnline(device)
   return (
     <span className="flex items-center gap-1.5">
       <span className={`h-2 w-2 rounded-full flex-shrink-0 ${online ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
       <span className={`text-[13px] ${online ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
-        {online ? "Онлайн" : "Офлайн"}
+        {online ? t("devices.online") : t("devices.offline")}
       </span>
     </span>
   )
@@ -58,7 +63,7 @@ function matchHint(d: Device, query: string): string | null {
 
   if (hits(d.serial_number)) return `S/N ${d.serial_number}`
   if (hits(d.mac_address)) return `MAC ${d.mac_address}`
-  if (hits(d.public_ip)) return `Внешний IP ${d.public_ip}`
+  if (hits(d.public_ip)) return i18n.t("devices.externalIP", { ip: d.public_ip })
   return null
 }
 
@@ -76,6 +81,7 @@ function osIcon(os: string) {
 const ALL_GROUPS = "all"
 
 export default function Devices() {
+  const { t } = useTranslation()
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<DeviceGroup[]>([])
   const [groupId, setGroupId] = useState(ALL_GROUPS)
@@ -206,7 +212,7 @@ export default function Devices() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("common.loading")}</div>
 
   const searching = query.trim() !== ""
   const filtering = searching || groupId !== ALL_GROUPS
@@ -221,21 +227,21 @@ export default function Devices() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-foreground">Устройства</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("devices.title")}</h1>
         {isAdmin && (
         <Dialog open={dialogOpen} onOpenChange={(o) => { setDialogOpen(o); if (!o) resetDialog() }}>
           <DialogTrigger asChild>
-            <Button size="sm">Добавить устройство</Button>
+            <Button size="sm">{t("devices.add")}</Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{step === "form" ? "Добавить устройство" : "Устройство создано"}</DialogTitle>
+              <DialogTitle>{step === "form" ? t("devices.add") : t("devices.created")}</DialogTitle>
             </DialogHeader>
 
             {step === "form" && (
               <div className="space-y-4 pt-2">
                 <div className="space-y-1.5">
-                  <Label>ОС</Label>
+                  <Label>{t("devices.os")}</Label>
                   <Select
                     value={os}
                     onChange={setOs}
@@ -247,7 +253,7 @@ export default function Devices() {
                   />
                 </div>
                 <Button className="w-full" onClick={createDevice} disabled={creating}>
-                  {creating ? "Создание..." : "Создать"}
+                  {creating ? t("devices.creating") : t("common.create")}
                 </Button>
               </div>
             )}
@@ -255,7 +261,7 @@ export default function Devices() {
             {step === "token" && result && (
               <div className="space-y-4 pt-2">
                 <p className="text-sm text-muted-foreground">
-                  Запустите на целевой машине. Токен действует 24ч.
+                  {t("devices.installerHint")}
                 </p>
                 <div className="relative">
                   <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono text-soft break-all whitespace-pre-wrap pr-10">
@@ -275,11 +281,11 @@ export default function Devices() {
                 </div>
                 {result.device.os === "windows" ? (
                   <a href={`${apiBase()}/downloads/RoutineOps-agent.msi`} download className="block">
-                    <Button variant="outline" className="w-full">Скачать MSI (Windows)</Button>
+                    <Button variant="outline" className="w-full">{t("devices.downloadMSI")}</Button>
                   </a>
                 ) : result.device.os === "darwin" ? (
                   <a href={`${apiBase()}/downloads/RoutineOps-agent.pkg`} download className="block">
-                    <Button variant="outline" className="w-full">Скачать PKG (macOS)</Button>
+                    <Button variant="outline" className="w-full">{t("devices.downloadPKG")}</Button>
                   </a>
                 ) : (
                   <div className="flex gap-2 items-center">
@@ -296,12 +302,12 @@ export default function Devices() {
                       download
                       className="flex-1"
                     >
-                      <Button variant="outline" className="w-full">Скачать установщик (.sh)</Button>
+                      <Button variant="outline" className="w-full">{t("devices.downloadSH")}</Button>
                     </a>
                   </div>
                 )}
                 <Button className="w-full" variant="outline" onClick={() => { setDialogOpen(false); resetDialog() }}>
-                  Готово
+                  {t("devices.done")}
                 </Button>
               </div>
             )}
@@ -315,7 +321,7 @@ export default function Devices() {
           за скругление), а он обрезал бы выпадашку Select'а. */}
       <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
         <Input
-          placeholder="Поиск: имя, IP, MAC, серийник, ОС, CPU..."
+          placeholder={t("devices.search")}
           value={query}
           onChange={(e) => { setQuery(e.target.value); setOffset(0) }}
           className="max-w-sm"
@@ -325,7 +331,7 @@ export default function Devices() {
           onChange={(v) => { setGroupId(v); setOffset(0) }}
           className="w-56"
           options={[
-            { value: ALL_GROUPS, label: "Все устройства" },
+            { value: ALL_GROUPS, label: t("devices.allDevices") },
             ...groups.map((g) => ({ value: g.id, label: g.name })),
           ]}
         />
@@ -335,19 +341,19 @@ export default function Devices() {
         <Table>
           <TableHeader>
             <TableRow className="border-t-0 hover:bg-transparent">
-              <TableHead className="text-xs">Устройство</TableHead>
-              <TableHead className="text-xs">Группа</TableHead>
+              <TableHead className="text-xs">{t("devices.colDevice")}</TableHead>
+              <TableHead className="text-xs">{t("devices.colGroup")}</TableHead>
               <TableHead className="text-xs">IP</TableHead>
-              <TableHead className="text-xs">Статус</TableHead>
-              <TableHead className="text-xs">Агент</TableHead>
-              <TableHead className="text-xs">Последний раз</TableHead>
+              <TableHead className="text-xs">{t("devices.colStatus")}</TableHead>
+              <TableHead className="text-xs">{t("devices.colAgent")}</TableHead>
+              <TableHead className="text-xs">{t("devices.colLastSeen")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
-                  {filtering ? "Ничего не найдено" : "Нет устройств"}
+                  {filtering ? t("devices.nothingFound") : t("devices.empty")}
                 </TableCell>
               </TableRow>
             )}
@@ -388,7 +394,7 @@ export default function Devices() {
                     <OnlineBadge device={d} />
                     {d.status !== "active" && (
                       <Badge variant={DEVICE_STATUS[d.status]?.variant ?? "outline"}>
-                        {DEVICE_STATUS[d.status]?.label ?? d.status}
+                        {DEVICE_STATUS[d.status] ? t(DEVICE_STATUS[d.status].label) : d.status}
                       </Badge>
                     )}
                     {/* Ровно рядом с онлайн-бейджем, и это не украшение: такая машина
@@ -396,8 +402,8 @@ export default function Devices() {
                         строка выглядит здоровее любой другой. */}
                     {d.outbox_unavailable && (
                       <Badge variant="outline" className="border-violet-500 text-violet-600 dark:text-violet-400"
-                             title={d.degraded_detail || "Очередь отчётов агента недоступна"}>
-                        🕳 Ослеп
+                             title={d.degraded_detail || t("devices.outboxDown")}>
+                        {t("devices.blind")}
                       </Badge>
                     )}
                   </div>

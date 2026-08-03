@@ -4,10 +4,12 @@ import { useMe } from "@/lib/useMe"
 import Layout from "@/components/Layout"
 import Toaster from "@/components/Toaster"
 import Dashboard from "@/pages/Dashboard"
+import Compliance from "@/pages/Compliance"
 import Login from "@/pages/Login"
 import ForgotPassword from "@/pages/ForgotPassword"
 import ResetPassword from "@/pages/ResetPassword"
 import AcceptInvite from "@/pages/AcceptInvite"
+import MFASetup from "@/pages/MFASetup"
 import Devices from "@/pages/Devices"
 import DeviceDetail from "@/pages/DeviceDetail"
 import Alerts from "@/pages/Alerts"
@@ -23,7 +25,13 @@ import Users from "@/pages/Users"
 import License from "@/pages/License"
 import APITokens from "@/pages/APITokens"
 import Directory from "@/pages/Directory"
+import OIDC from "@/pages/OIDC"
+import SAML from "@/pages/SAML"
+import SIEM from "@/pages/SIEM"
+import Rollout from "@/pages/Rollout"
 import Profile from "@/pages/Profile"
+import Tenants from "@/pages/Tenants"
+import AcrossTenants from "@/pages/AcrossTenants"
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated() ? <>{children}</> : <Navigate to="/login" replace />
@@ -38,6 +46,12 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return isAdmin ? <>{children}</> : <Navigate to="/" replace />
 }
 
+function ProviderRoute({ children }: { children: React.ReactNode }) {
+  const { isProvider, loading } = useMe()
+  if (loading) return null
+  return isProvider ? <>{children}</> : <Navigate to="/" replace />
+}
+
 export default function App() {
   return (
     <>
@@ -47,6 +61,7 @@ export default function App() {
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="/accept-invite" element={<AcceptInvite />} />
+        <Route path="/mfa-setup" element={<MFASetup />} />
         <Route
           path="/"
           element={
@@ -56,6 +71,7 @@ export default function App() {
           }
         >
           <Route index element={<Dashboard />} />
+          <Route path="compliance" element={<Compliance />} />
           <Route path="dashboard" element={<Navigate to="/" replace />} />
           <Route path="devices" element={<Devices />} />
           <Route path="devices/:id" element={<DeviceDetail />} />
@@ -72,7 +88,13 @@ export default function App() {
           <Route path="license" element={<AdminRoute><License /></AdminRoute>} />
           <Route path="api-tokens" element={<AdminRoute><APITokens /></AdminRoute>} />
           <Route path="directory" element={<AdminRoute><Directory /></AdminRoute>} />
+          <Route path="sso" element={<AdminRoute><OIDC /></AdminRoute>} />
+          <Route path="saml" element={<AdminRoute><SAML /></AdminRoute>} />
+          <Route path="siem" element={<AdminRoute><SIEM /></AdminRoute>} />
+          <Route path="rollout" element={<Rollout />} />
           <Route path="profile" element={<Profile />} />
+          <Route path="tenants" element={<ProviderRoute><Tenants /></ProviderRoute>} />
+          <Route path="across-tenants" element={<ProviderRoute><AcrossTenants /></ProviderRoute>} />
         </Route>
       </Routes>
     </>

@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	pb "github.com/Floodww/RoutineOps/proto"
@@ -23,23 +24,23 @@ func TestFetchScriptPolicies_GatedForPendingApproval(t *testing.T) {
 
 	// скрипт → политика → группа → устройство в группе → политика группе
 	suffix := devID[:8]
-	script, err := db.CreateScript(ctx, "bulk-script-"+suffix, "Windows", "Write-Host hi")
+	script, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "bulk-script-"+suffix, "Windows", "Write-Host hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	policy, err := db.CreateScriptPolicy(ctx, "bulk-policy-"+suffix, script.ID, "schedule",
+	policy, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, "bulk-policy-"+suffix, script.ID, "schedule",
 		[]byte(`{"cron":"*/5 * * * *"}`), nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
-	group, err := db.CreateDeviceGroup(ctx, "bulk-gate-grp-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "bulk-gate-grp-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
-	if err := db.AddDeviceToGroup(ctx, devID, group.ID); err != nil {
+	if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, devID, group.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
-	if err := db.AssignPolicyToGroup(ctx, policy.ID, group.ID); err != nil {
+	if err := db.AssignPolicyToGroup(ctx, tenancy.DefaultTenantID, policy.ID, group.ID); err != nil {
 		t.Fatalf("AssignPolicyToGroup: %v", err)
 	}
 
@@ -53,7 +54,7 @@ func TestFetchScriptPolicies_GatedForPendingApproval(t *testing.T) {
 	}
 
 	// pending_approval → гейт → пусто (машина в очереди не исполняет скрипты)
-	if err := db.UpdateDeviceStatus(ctx, devID, "pending_approval"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, devID, "pending_approval"); err != nil {
 		t.Fatalf("UpdateDeviceStatus pending_approval: %v", err)
 	}
 	resp, err = gw.FetchScriptPolicies(certCtx, &pb.FetchScriptPoliciesRequest{})
@@ -65,7 +66,7 @@ func TestFetchScriptPolicies_GatedForPendingApproval(t *testing.T) {
 	}
 
 	// approve → active → снова видна
-	if ok, err := db.ApproveDevice(ctx, devID); err != nil || !ok {
+	if ok, err := db.ApproveDevice(ctx, tenancy.DefaultTenantID, devID); err != nil || !ok {
 		t.Fatalf("ApproveDevice: ok=%v err=%v", ok, err)
 	}
 	resp, err = gw.FetchScriptPolicies(certCtx, &pb.FetchScriptPoliciesRequest{})
@@ -86,7 +87,7 @@ func TestFetchPolicy_EmptyForPendingApproval(t *testing.T) {
 	certCtx, fp := makeCertCtx(t, "pending-softpolicy-dev")
 	registerDevice(t, db, "pending-softpolicy-dev", fp)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fp)
-	if err := db.UpdateDeviceStatus(ctx, devID, "pending_approval"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, devID, "pending_approval"); err != nil {
 		t.Fatalf("UpdateDeviceStatus: %v", err)
 	}
 
@@ -108,7 +109,7 @@ func TestConnect_RejectedDevice(t *testing.T) {
 	c, fp := makeCertCtx(t, "rejected-dev")
 	registerDevice(t, db, "rejected-dev", fp)
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fp)
-	if err := db.UpdateDeviceStatus(ctx, devID, "rejected"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, devID, "rejected"); err != nil {
 		t.Fatalf("UpdateDeviceStatus rejected: %v", err)
 	}
 

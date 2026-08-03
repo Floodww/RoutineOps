@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-
-	"github.com/go-chi/chi/v5"
 )
 
 // Восстановление адреса клиента за обратным прокси.
@@ -87,7 +85,7 @@ func ParseTrustedProxies(raw string) ([]netip.Prefix, error) {
 // WithTrustedProxies задаёт список доверенных прокси. Без него действует
 // defaultTrustedProxies.
 func WithTrustedProxies(prefixes []netip.Prefix) RouterOption {
-	return func(h *Handler, _ chi.Router) { h.trustedProxies = prefixes }
+	return func(h *Handler) { h.trustedProxies = prefixes }
 }
 
 func isTrusted(addr netip.Addr, trusted []netip.Prefix) bool {

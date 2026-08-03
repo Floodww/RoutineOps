@@ -6,6 +6,10 @@ export interface Me {
   email: string
   name: string
   role: string
+  // ADR-7: надзор над инсталляцией — признак личности, а не роль в тенанте.
+  // Он не меняется при переключении тенанта, поэтому и приходит отдельным полем.
+  is_provider_admin?: boolean
+  mfa_enabled?: boolean
 }
 
 // Модульный кэш: /me тянется один раз на сессию (роль редко меняется в рамках сессии),
@@ -28,7 +32,12 @@ export function useMe() {
       .finally(() => setLoading(false))
   }, [])
 
-  return { me, isAdmin: me?.role === "it_admin", loading }
+  return {
+    me,
+    isAdmin: me?.role === "it_admin",
+    isProvider: me?.is_provider_admin === true,
+    loading,
+  }
 }
 
 export function clearMeCache() {

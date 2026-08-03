@@ -34,6 +34,13 @@ const callTimeout = 30 * time.Second
 // maxRuntime — жёсткий потолок на выполнение одного скрипта задачи (захардкожен).
 const maxRuntime = 5 * time.Minute
 
+// provisionTimeout — потолок на дозавершение FileVault-provisioning. Внутри
+// диалог, который ждёт ответа сотрудника (filevault.DialogTimeout = 10 мин), плюс
+// сами системные операции и доставка результата. Скриптовый maxRuntime здесь
+// не годится: он резал бы диалог на середине и отчитывался ошибкой по машине, где
+// человек ещё вводит пароль.
+const provisionTimeout = 15 * time.Minute
+
 // maxConcurrentTasks — потолок ОДНОВРЕМЕННО исполняемых скриптов задач. Без него
 // всплеск Task по стриму спавнил бы неограниченно интерпретаторов от root
 // (форк-бомба/исчерпание PID и памяти). Control-plane команды (lock/decommission)
@@ -122,10 +129,24 @@ type Executor struct {
 	// (та же логика, что у rebooter).
 	uninstaller Uninstaller
 
+	// fvProvisioner дозавершает FileVault-provisioning по команде оператора.
+	// nil (free-сборка, не macOS) = команда отклоняется с ОШИБКОЙ.
+	fvProvisioner FileVaultProvisioner
+
+	// screen принимает приглашения на интерактивный сеанс.
+	// nil (free-сборка, ОС без захвата) = приглашение отклоняется с ОШИБКОЙ и кодом
+	// причины: оператор, ждущий кадров от агента без этой фичи, обязан увидеть отказ.
+	screen ScreenSessioner
+
 	// inventoryNudge просит репортер снять инвентарь вне очереди — чтобы карточка
 	// устройства обновилась сразу после снятия ПО, а не через цикл. nil = не
 	// подключён (штатный цикл всё равно догонит).
 	inventoryNudge func()
+
+	// agentVersion попадает в текст отказа для неизвестного типа задачи: оператор
+	// в панели должен видеть, КАКАЯ версия агента не умеет эту задачу, иначе
+	// «не поддерживается» ничего не говорит про парк из разных версий.
+	agentVersion string
 }
 
 // LockApplier применяет команды блокировки/разблокировки устройства (реализуется
@@ -178,6 +199,22 @@ type Rebooter interface {
 // задач.
 func (e *Executor) SetRebooter(r Rebooter) { e.rebooter = r }
 
+// FileVaultProvisioner дозавершает FileVault-provisioning на уже энролленном
+// маке: спрашивает пароль у сотрудника в его графической сессии и выполняет то,
+// что headless-постустановка выполнить не могла.
+//
+// Возвращает ошибку на ЛЮБОЙ неуспех, включая отказ человека и таймаут: по
+// контракту команды (proto: FileVaultProvisionCommand) тихий Skip запрещён —
+// оператор должен видеть причину, а не «выполнено» на непровиженной машине.
+type FileVaultProvisioner interface {
+	Provision(ctx context.Context, requestID, reason string) error
+}
+
+// SetFileVaultProvisioner подключает исполнителя provisioning. nil (по умолчанию
+// — free-сборка или не macOS) → команда отчитывается ОШИБКОЙ, той же логикой, что
+// rebooter/uninstaller.
+func (e *Executor) SetFileVaultProvisioner(p FileVaultProvisioner) { e.fvProvisioner = p }
+
 // Uninstaller снимает установленное ПО. Реализуется uninstall.Manager; вынесен
 // интерфейсом по тому же паттерну, что LockApplier и Rebooter.
 //
@@ -192,6 +229,45 @@ type Uninstaller interface {
 // команда отчитывается ОШИБКОЙ (см. handleUninstall), а не тихо игнорируется.
 // Вызывать до старта приёма задач.
 func (e *Executor) SetUninstaller(u Uninstaller) { e.uninstaller = u }
+
+// ScreenSessioner принимает приглашение на интерактивный сеанс. Реализуется
+// screen.Manager; вынесен интерфейсом по тому же паттерну, что LockApplier и Rebooter, —
+// пакет screen собирается только под тегом enterprise, и executor не имеет права от него
+// зависеть.
+//
+// Первое возвращаемое значение — КОД ОТКАЗА (EndReason), а не текст. Пустой код при
+// nil-ошибке означает «сеанс принят сервером и захват пошёл»; всё остальное — отказ,
+// который оператор обязан прочитать кодом (§1 контракта).
+type ScreenSessioner interface {
+	StartSession(ctx context.Context, taskID string, cmd *pb.ScreenSessionCommand) (string, error)
+}
+
+// SetScreenSessioner подключает менеджер интерактивных сеансов. nil (free-сборка или ОС
+// без захвата) → приглашение отчитывается ОШИБКОЙ с кодом причины, а не тихо
+// игнорируется. Вызывать до старта приёма задач.
+func (e *Executor) SetScreenSessioner(s ScreenSessioner) { e.screen = s }
+
+// screenStartTimeout — потолок ожидания старта сеанса.
+//
+// Складывается из запуска захватчика в сессии пользователя (до 20 с: на Retina первый
+// снимок делается ДО подключения к каналу) и подтверждения регистрации сервером (15 с).
+// Сорок пять секунд — с запасом к сумме; меньше означало бы отказывать исправной машине
+// под нагрузкой, больше — держать оператора в неведении дольше, чем он готов ждать.
+const screenStartTimeout = 45 * time.Second
+
+// SetAgentVersion сообщает исполнителю версию агента — она уходит в текст отказа
+// для неизвестных типов задач. Вызывать до старта приёма задач.
+func (e *Executor) SetAgentVersion(v string) { e.agentVersion = v }
+
+// unsupportedTaskError — текст, который увидит оператор в панели. Явно говорит, что
+// работа НЕ выполнялась: «не поддерживается» без этого читается как «сделано иначе».
+func unsupportedTaskError(agentVersion string) string {
+	v := agentVersion
+	if v == "" {
+		v = "версия неизвестна"
+	}
+	return "тип задачи не поддерживается этой версией агента (" + v + ") — задача НЕ выполнялась; обновите агента на устройстве"
+}
 
 // SetInventoryNudge подключает внеочередной пересбор инвентаря. Вызывается
 // ПОСЛЕ фактического снятия ПО: без него карточка устройства до пяти минут
@@ -338,10 +414,17 @@ func (e *Executor) handle(task *pb.Task) {
 	//  (б) connect тоже после слота — тысячи ждущих слот горутин иначе держали бы
 	//      открытые gRPC-соединения (исчерпание FD/памяти при bulk-push).
 	// lock/decommission/reboot (control-plane) семафором НЕ гейтим: не форк-бомба и
-	// не должны ждать за скриптами. Удаление ПО (Task.uninstall) в этот список
+	// не должны ждать за скриптами. FileVault-provisioning тоже: он не считает и не
+	// порождает нагрузку, а ЖДЁТ ответа человека до десяти минут — занимать этим
+	// слот исполнителя скриптов значит подпирать очередь чужой работы. Удаление ПО (Task.uninstall) в этот список
 	// НЕ входит осознанно — оно порождает процесс деинсталлятора и подчиняется
 	// тому же потолку, что скрипты.
-	if task.GetLock() == nil && task.GetDecommission() == nil && task.GetReboot() == nil {
+	// Приглашение на интерактивный сеанс (Task.screen_session) в этот же список: оно не
+	// считает и не порождает нагрузку, а ЖДЁТ — запуска захватчика в сессии пользователя и
+	// подтверждения сеанса сервером, до двадцати секунд. Держать этим слот исполнителя
+	// скриптов значит подпирать чужую очередь ожиданием.
+	if task.GetLock() == nil && task.GetDecommission() == nil && task.GetReboot() == nil &&
+		task.GetFilevaultProvision() == nil && task.GetScreenSession() == nil {
 		select {
 		case e.sem <- struct{}{}:
 			defer func() { <-e.sem }()
@@ -408,6 +491,36 @@ func (e *Executor) handle(task *pb.Task) {
 		return
 	}
 
+	// Дозавершение FileVault-provisioning приезжает в Task.filevault_provision.
+	if fc := task.GetFilevaultProvision(); fc != nil {
+		e.handleFileVaultProvision(client, id, fc)
+		return
+	}
+
+	// Приглашение на интерактивный сеанс приезжает в Task.screen_session.
+	if sc := task.GetScreenSession(); sc != nil {
+		e.handleScreenSession(client, id, sc)
+		return
+	}
+
+	// Дошли сюда — ни одна известная команда не заполнена. Пустой script_content
+	// означает одно из двух: сервер прислал ТИП ЗАДАЧИ, которого этот агент не знает
+	// (он новее агента), либо скрипт-задачу с пустым телом. Раньше и то, и другое
+	// уезжало в runScript с пустой строкой, интерпретатор отрабатывал вхолостую и
+	// возвращал 0 — оператор в панели видел «выполнено», хотя на устройстве не
+	// произошло НИЧЕГО. Молчаливый успех хуже отказа: рассинхрон версий выглядит как
+	// сделанная работа. Поэтому — явный отказ с причиной.
+	if task.GetScriptContent() == "" {
+		e.log.Error("task: тип задачи не поддерживается этой версией агента — задача НЕ выполнялась",
+			slog.String("task_id", id), slog.String("agent_version", e.agentVersion))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:   id,
+			Status:   pb.TaskStatus_TASK_STATUS_ERROR,
+			ErrorLog: unsupportedTaskError(e.agentVersion),
+		})
+		return
+	}
+
 	// Семафор скрипт-задачи уже захвачен в начале handle (см. коммент там).
 	e.log.Info("выполняю задачу", slog.String("task_id", id), slog.String("platform", task.GetPlatform()))
 	runCtx, cancel := context.WithTimeout(e.execCtx, maxRuntime)
@@ -422,6 +535,107 @@ func (e *Executor) handle(task *pb.Task) {
 	} else {
 		result.Status = pb.TaskStatus_TASK_STATUS_SUCCESS
 		e.log.Info("задача выполнена успешно", slog.String("task_id", id))
+	}
+	e.deliver(client, result)
+}
+
+// handleFileVaultProvision дозавершает FileVault-provisioning: спрашивает пароль у
+// сотрудника в его графической сессии и выполняет то, что headless-постустановка
+// выполнить не могла.
+//
+// Любой неуспех — ERROR с причиной, включая отказ человека и таймаут. Это прямое
+// требование контракта (proto: FileVaultProvisionCommand): тихий Skip здесь
+// означал бы «оператор нажал кнопку, панель показала выполнено, диск остался без
+// эскроу» — тот же класс молчаливого вранья, что незнакомый тип задачи,
+// отчитанный успехом.
+//
+// Потолок времени — provisionTimeout, а не maxRuntime: внутри диалог, который ждёт
+// живого человека, и пять минут скриптового потолка резали бы его на середине.
+func (e *Executor) handleFileVaultProvision(client pb.AgentServiceClient, taskID string, fc *pb.FileVaultProvisionCommand) {
+	reqID := fc.GetRequestId()
+	if reqID == "" {
+		reqID = taskID
+	}
+	if e.fvProvisioner == nil {
+		e.log.Error("filevault: команда provisioning получена, но исполнитель не сконфигурирован",
+			slog.String("task_id", taskID))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:   taskID,
+			Status:   pb.TaskStatus_TASK_STATUS_ERROR,
+			ErrorLog: "FileVault-provisioning недоступен на этом агенте: сборка без поддержки FileVault либо не macOS",
+		})
+		return
+	}
+
+	e.log.Info("filevault: дозавершаю provisioning по команде оператора",
+		slog.String("task_id", taskID), slog.String("request_id", reqID))
+	ctx, cancel := context.WithTimeout(e.execCtx, provisionTimeout)
+	defer cancel()
+
+	result := &pb.TaskResult{TaskId: taskID}
+	if err := e.fvProvisioner.Provision(ctx, reqID, fc.GetReason()); err != nil {
+		result.Status = pb.TaskStatus_TASK_STATUS_ERROR
+		result.ErrorLog = err.Error()
+		e.log.Warn("filevault: provisioning не завершён", slog.String("task_id", taskID), slog.Any("error", err))
+	} else {
+		result.Status = pb.TaskStatus_TASK_STATUS_SUCCESS
+		e.log.Info("filevault: provisioning завершён", slog.String("task_id", taskID))
+	}
+	e.deliver(client, result)
+}
+
+// handleScreenSession принимает приглашение на интерактивный сеанс.
+//
+// Результат задачи отдаётся по исходу ЗАПРОСА, а не по концу сеанса (§9.2 контракта).
+// Причина конкретная: FailStaleAckedTasks помечает failed любую задачу, подтверждённую
+// больше пятнадцати минут назад и не приславшую результат (единственное исключение в SQL —
+// lock). Часовой сеанс без этого правила всегда выглядел бы провалившимся, а второе
+// исключение в предикате sweep'а превратило бы его в список частных случаев.
+//
+// Дальнейшая жизнь сеанса живёт в screen_sessions на сервере, а не в строке задачи.
+func (e *Executor) handleScreenSession(client pb.AgentServiceClient, taskID string, sc *pb.ScreenSessionCommand) {
+	if e.screen == nil {
+		// Free-сборка или ОС без захвата. Молчаливый успех здесь был бы худшим исходом:
+		// оператор ждал бы кадров от агента, который физически не содержит этой фичи.
+		e.log.Error("screen: приглашение получено, но удалённый стол не собран в этом агенте",
+			slog.String("task_id", taskID))
+		e.deliver(client, &pb.TaskResult{
+			TaskId:        taskID,
+			Status:        pb.TaskStatus_TASK_STATUS_ERROR,
+			ScreenRefusal: "PLATFORM_UNSUPPORTED",
+			ErrorLog:      "удалённый рабочий стол недоступен на этом агенте: сборка без поддержки либо ОС без захвата экрана",
+		})
+		return
+	}
+
+	e.log.Info("screen: приглашение на сеанс",
+		slog.String("task_id", taskID), slog.String("session", sc.GetSessionId()),
+		slog.String("operator", sc.GetOperatorName()))
+
+	ctx, cancel := context.WithTimeout(e.execCtx, screenStartTimeout)
+	defer cancel()
+
+	refusal, err := e.screen.StartSession(ctx, taskID, sc)
+	result := &pb.TaskResult{TaskId: taskID}
+	switch {
+	case refusal != "":
+		// Отказ по потолку ОС — не сбой агента, но и не успех: сеанса не будет, и
+		// оператор обязан прочитать ПОЧЕМУ отдельным кодом, а не подстрокой в тексте.
+		result.Status = pb.TaskStatus_TASK_STATUS_ERROR
+		result.ScreenRefusal = refusal
+		if err != nil {
+			result.ErrorLog = err.Error()
+		} else {
+			result.ErrorLog = "сеанс не начат: " + refusal
+		}
+		e.log.Warn("screen: сеанс не начат", slog.String("task_id", taskID), slog.String("reason", refusal))
+	case err != nil:
+		result.Status = pb.TaskStatus_TASK_STATUS_ERROR
+		result.ErrorLog = err.Error()
+		e.log.Error("screen: сеанс не начат", slog.String("task_id", taskID), slog.Any("error", err))
+	default:
+		result.Status = pb.TaskStatus_TASK_STATUS_SUCCESS
+		result.Output = "сеанс начат"
 	}
 	e.deliver(client, result)
 }

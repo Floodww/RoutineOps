@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -148,8 +149,21 @@ func TestEnrollHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("права ключа = %v, want 0600", info.Mode().Perm())
+	// Режим файла проверяем только там, где он что-то значит. На Windows Go
+	// отображает в Mode() лишь флаг read-only, а реальный доступ определяет ACL,
+	// унаследованный от каталога, — 0600 там не выполняется и выполниться не
+	// может. Красный тест на этом месте сообщал бы не о дефекте раскладки, а о
+	// том, что unix-права проверяют на не-unix.
+	//
+	// Чем ключ защищён на Windows — вопрос НЕ этого теста и на сегодня открытый:
+	// при cert-source=file (значение по умолчанию) ключ остаётся файлом в
+	// каталоге установки, а прав на него не ставит ни .wxs, ни агент (admin-only
+	// DACL от EnsureDataDir накрывает только ProgramData\RoutineOps\state).
+	// Проверять это надо на живой машине, а не режимом файла в юнит-тесте.
+	if runtime.GOOS != "windows" {
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("права ключа = %v, want 0600", info.Mode().Perm())
+		}
 	}
 	if _, err := tls.LoadX509KeyPair(req.CertOut, req.KeyOut); err != nil {
 		t.Fatalf("серт и ключ не парные: %v", err)

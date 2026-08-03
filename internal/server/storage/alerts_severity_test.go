@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/alerting"
@@ -30,7 +31,7 @@ func TestCreateAlert_AssignsSeverity(t *testing.T) {
 		if _, err := db.CreateAlert(ctx, d.ID, c.alertType, `{}`, ""); err != nil {
 			t.Fatalf("CreateAlert(%s): %v", c.alertType, err)
 		}
-		alerts, err := db.ListAlerts(ctx, d.ID, 10)
+		alerts, err := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
 		if err != nil {
 			t.Fatalf("ListAlerts: %v", err)
 		}
@@ -58,7 +59,7 @@ func TestDetectUnreachableDevices_AssignsSeverity(t *testing.T) {
 	if _, err := db.DetectUnreachableDevices(ctx, 10, 0); err != nil {
 		t.Fatalf("DetectUnreachableDevices: %v", err)
 	}
-	alerts, err := db.ListAlerts(ctx, d.ID, 10)
+	alerts, err := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -83,8 +84,8 @@ func TestListAlerts_OrdersUnackedThenSeverity(t *testing.T) {
 	if _, err := db.CreateAlert(ctx, d.ID, "lock_tamper", `{"n":1}`, ""); err != nil {
 		t.Fatalf("CreateAlert critical: %v", err)
 	}
-	acked, _ := db.ListAlerts(ctx, d.ID, 10)
-	if err := db.AcknowledgeAlert(ctx, acked[0].ID); err != nil {
+	acked, _ := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
+	if err := db.AcknowledgeAlert(ctx, tenancy.DefaultTenantID, acked[0].ID); err != nil {
 		t.Fatalf("AcknowledgeAlert: %v", err)
 	}
 	// Непринятые low и high.
@@ -95,7 +96,7 @@ func TestListAlerts_OrdersUnackedThenSeverity(t *testing.T) {
 		t.Fatalf("CreateAlert high: %v", err)
 	}
 
-	got, err := db.ListAlerts(ctx, d.ID, 10)
+	got, err := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -200,8 +201,8 @@ func TestTakeEscalations_SkipsAcknowledged(t *testing.T) {
 	if _, err := db.CreateAlert(ctx, d.ID, "lock_tamper", `{}`, ""); err != nil {
 		t.Fatalf("CreateAlert: %v", err)
 	}
-	list, _ := db.ListAlerts(ctx, d.ID, 10)
-	if err := db.AcknowledgeAlert(ctx, list[0].ID); err != nil {
+	list, _ := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
+	if err := db.AcknowledgeAlert(ctx, tenancy.DefaultTenantID, list[0].ID); err != nil {
 		t.Fatalf("AcknowledgeAlert: %v", err)
 	}
 	if _, err := db.Pool().Exec(ctx,

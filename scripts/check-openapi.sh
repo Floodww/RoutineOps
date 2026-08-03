@@ -106,32 +106,157 @@ ent_ops = {
     if m in METHODS
 }
 
-# r.Get(...), r.With(...).Post(...) — внутренние скобки у With непусты (httprate),
-# поэтому допускаем один уровень вложенности вместо нежадного .*?. re.S обязателен:
-# gofmt переносит r.With(...) на несколько строк, стоит списку middleware стать длиннее
-# строки, и однострочный регексп переставал видеть такой маршрут вообще.
-pattern = re.compile(
-    r'r\.(?:With\((?:[^()]|\([^()]*\))*\)\.)?'
-    r'(Get|Post|Put|Patch|Delete|Head|Options)\(\s*"([^"]+)"',
-    re.S,
-)
-# chi-регистрация готового http.Handler (а не HandlerFunc): r.Method / r.MethodFunc.
-# Штатная форма, которой гард не видел вовсе.
-method_pattern = re.compile(
-    r'r\.Method(?:Func)?\(\s*(?:http\.Method([A-Za-z]+)|"([A-Za-z]+)")\s*,\s*"([^"]+)"'
+# ── Разбор маршрутов ──────────────────────────────────────────────────────
+#
+# 🔴 Раньше маршруты вынимались одним регекспом по ПЛОСКОМУ тексту, и у этого было
+# два молчаливых провала, из-за которых гард годами зеленел на разошедшейся спеке:
+#
+#   1) Вложенный r.Route("/oidc", func(r chi.Router){ r.Get("/providers", …) })
+#      давал путь «/api/v1/providers» — то есть НЕ ТОТ, что в спецификации. Такая
+#      ручка не находилась ни как описанная, ни как лишняя: она просто жила своей
+#      жизнью под выдуманным именем.
+#   2) Сканировались только handler.go и файлы под //go:build enterprise. Швы вроде
+#      oidc_seam.go — обычный файл открытого пакета, регистрирующий роуты
+#      RouterOption'ом, — не попадали НИ В ОДНУ категорию, и все ручки /oidc/* были
+#      для гарда невидимы целиком.
+#
+# Поэтому здесь настоящий разбор с учётом вложенности: сканер идёт по тексту,
+# пропускает строки и комментарии, считает фигурные скобки и держит стек префиксов
+# r.Route(...). А файлы отбираются по признаку «импортирует chi и регистрирует
+# маршрут», а не по списку имён, который надо помнить.
+
+ROUTE_GROUP = re.compile(r'\.Route\(\s*"([^"]*)"')
+ROUTE_CALL = re.compile(r'\.(Get|Post|Put|Patch|Delete|Head|Options)\(\s*"([^"]*)"')
+METHOD_CALL = re.compile(
+    r'\.Method(?:Func)?\(\s*(?:http\.Method([A-Za-z]+)|"([A-Za-z]+)")\s*,\s*"([^"]*)"'
 )
 # r.Handle/r.HandleFunc/r.Mount HTTP-метод не называют — сопоставить их со
 # спецификацией принципиально нельзя. Молчаливый пропуск здесь = ручка проезжает мимо
 # гарда, поэтому всё, что не статика, — жёсткая ошибка с файлом и строкой.
-opaque_pattern = re.compile(r'r\.(Handle|HandleFunc|Mount)\(\s*"([^"]+)"')
+OPAQUE_CALL = re.compile(r'\.(Handle|HandleFunc|Mount)\(\s*"([^"]*)"')
 STATIC_PREFIXES = ("/*", "/downloads")
 
-# Enterprise-роуты монтируются RouterOption'ами из СВОИХ пакетов (escrow, license), а
-# не из handler.go — без них гард видел только часть реальности, из-за чего
-# /escrow/status и /license годами жили неописанными, а описанный reveal ронял CI Free.
-# Ищем их по build-тегу, а не списком путей: список пришлось бы помнить при каждой новой
-# ручке, а забытый файл выглядел бы как «ручка не описана».
-SKIP_DIRS = {".git", "node_modules", "web", "build", "vendor", "releases"}
+IDENT_TAIL = re.compile(r'[A-Za-z0-9_]$')
+
+def is_router_call(text, dot):
+    """Правда ли, что вызов в позиции dot сделан НА РОУТЕРЕ, а не на чём попало.
+
+    🔴 Без этой проверки под шаблон `.Get("…")` попадает `r.URL.Query().Get("arch")`
+    и `req.Header.Get("…")` — то есть гард начинает считать имена query-параметров
+    маршрутами и требовать описать «GET /api/v1arch». Мусор в выводе гарда хуже,
+    чем его отсутствие: его перестают читать.
+
+    Принимаются две формы:
+      r.Get(…)            — получатель это одиночный идентификатор;
+      r.With(…).Get(…)    — цепочка через With, штатная в этом проекте.
+    Всё, что стоит после закрывающей скобки ЛЮБОГО другого вызова, отвергается.
+    """
+    j = dot - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return False
+    if text[j] == ")":
+        # Цепочка вызовов: принимаем только .With(...) — на нём в chi и строятся
+        # маршруты с миддлварами.
+        level, k = 0, j
+        while k >= 0:
+            if text[k] == ")":
+                level += 1
+            elif text[k] == "(":
+                level -= 1
+                if level == 0:
+                    break
+            k -= 1
+        if k < 0:
+            return False
+        e = k - 1
+        while e >= 0 and IDENT_TAIL.match(text[e]):
+            e -= 1
+        return text[e + 1:k] == "With"
+    if not IDENT_TAIL.match(text[j]):
+        return False
+    e = j
+    while e >= 0 and IDENT_TAIL.match(text[e]):
+        e -= 1
+    # Получатель — часть более длинной цепочки (req.Header.Get): не роутер.
+    return not (e >= 0 and text[e] == ".")
+
+def join_path(prefixes, path):
+    joined = "".join(prefixes) + path
+    joined = re.sub(r'/{2,}', '/', joined)
+    if len(joined) > 1 and joined.endswith("/"):
+        joined = joined[:-1]
+    return joined or "/"
+
+def scan_routes(text):
+    """Возвращает (ops, opaque): ops — [(METHOD, path, line)], opaque — [(call, path, line)]."""
+    ops, opaque = [], []
+    stack = []      # [(prefix, depth)] — префиксы активных r.Route
+    pending = None  # префикс, ждущий своей '{'
+    depth = 0
+    i, n = 0, len(text)
+    line = 1
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            line += 1; i += 1; continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            seg = text[i:(n if j < 0 else j + 2)]
+            line += seg.count("\n")
+            i = n if j < 0 else j + 2
+            continue
+        if c == "`":
+            j = text.find("`", i + 1)
+            seg = text[i:(n if j < 0 else j + 1)]
+            line += seg.count("\n")
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2; continue
+                if text[j] == '"':
+                    break
+                j += 1
+            i = j + 1
+            continue
+        if c == "{":
+            depth += 1
+            if pending is not None:
+                stack.append((pending, depth)); pending = None
+            i += 1; continue
+        if c == "}":
+            while stack and stack[-1][1] == depth:
+                stack.pop()
+            depth -= 1; i += 1; continue
+        if c == ".":
+            m = ROUTE_GROUP.match(text, i)
+            if m and is_router_call(text, i):
+                pending = m.group(1); i = m.end(); continue
+            m = METHOD_CALL.match(text, i)
+            if m and is_router_call(text, i):
+                meth = (m.group(1) or m.group(2)).upper()
+                ops.append((meth, join_path([p for p, _ in stack], m.group(3)), line))
+                i = m.end(); continue
+            m = ROUTE_CALL.match(text, i)
+            if m and is_router_call(text, i):
+                ops.append((m.group(1).upper(), join_path([p for p, _ in stack], m.group(2)), line))
+                i = m.end(); continue
+            m = OPAQUE_CALL.match(text, i)
+            if m and is_router_call(text, i):
+                opaque.append((m.group(1), join_path([p for p, _ in stack], m.group(2)), line))
+                i = m.end(); continue
+        i += 1
+    return ops, opaque
+
+SKIP_DIRS = {".git", "node_modules", "web", "build", "vendor", "releases", "docs"}
 
 # Go разрешает комментарии и пустые строки ПЕРЕД //go:build (лицензионная шапка), а сам
 # тег бывает составным (`linux && enterprise`). Прежний startswith() ни того, ни другого
@@ -144,7 +269,12 @@ def has_enterprise_tag(text):
     m = BUILD_LINE.search(head)
     return bool(m) and re.search(r'(^|[^!])\benterprise\b', m.group(1))
 
-ent_files = []
+# Файл интересен, если он импортирует chi И регистрирует хотя бы один маршрут.
+# Признак, а не список имён: список пришлось бы помнить при каждом новом шве, а
+# забытый файл выглядел бы как «ручек нет».
+CHI_IMPORT = re.compile(r'"github\.com/go-chi/chi/v\d+(?:/\w+)?"')
+
+route_files, ent_files = [], []
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
     for fn in sorted(filenames):
@@ -155,34 +285,37 @@ for dirpath, dirnames, filenames in os.walk(root):
             text = open(p, encoding="utf-8").read()
         except OSError:
             continue
-        if has_enterprise_tag(text) and pattern.search(text):
+        if not CHI_IMPORT.search(text):
+            continue
+        ops, opaque_hits = scan_routes(text)
+        if not ops and not opaque_hits:
+            continue
+        route_files.append(p)
+        if has_enterprise_tag(text):
             ent_files.append(p)
 
-def norm(path):
-    # Роуты внутри r.Route("/api/v1", ...) объявлены без префикса.
-    if not path.startswith("/api/v1") and path not in ("/healthz", "/ca.crt"):
-        return "/api/v1" + path
-    return path
+if not route_files:
+    print("ОШИБКА: не найдено ни одного файла с маршрутами — гард проверял бы пустоту.")
+    sys.exit(1)
 
 code_ops = set()
 opaque = []
-for path_ in [src_path] + ent_files:
-    src = open(path_, encoding="utf-8").read()
-    for m in opaque_pattern.finditer(src):
-        if m.group(2).startswith(STATIC_PREFIXES):
+for path_ in route_files:
+    text = open(path_, encoding="utf-8").read()
+    ops, opaque_hits = scan_routes(text)
+    rel = os.path.relpath(path_, root)
+    for call, path, line in opaque_hits:
+        if path.startswith(STATIC_PREFIXES):
             continue  # статика SPA и файловая раздача — не API
-        line = src.count("\n", 0, m.start()) + 1
-        opaque.append(f'{os.path.relpath(path_, root)}:{line}: r.{m.group(1)}("{m.group(2)}")')
-    for hm, lm, mpath in method_pattern.findall(src):
-        code_ops.add(f"{(hm or lm).upper()} {norm(mpath)}")
-    for method, path in pattern.findall(src):
-        if path.startswith("/*") or path.startswith("/downloads"):
-            continue  # статика SPA и файловая раздача — не API
-        # Роуты внутри r.Route("/api/v1", ...) объявлены без префикса. Enterprise-роуты
-        # монтируются в ту же группу, поэтому правило одно на всех.
+        opaque.append(f'{rel}:{line}: r.{call}("{path}")')
+    for meth, path, _ in ops:
+        if path.startswith(STATIC_PREFIXES):
+            continue
+        # Роуты внутри r.Route("/api/v1", …) объявлены без префикса, и enterprise-опции
+        # монтируются в ту же группу из своих пакетов — там префикса нет лексически.
         if not path.startswith("/api/v1") and path not in ("/healthz", "/ca.crt"):
             path = "/api/v1" + path
-        code_ops.add(f"{method.upper()} {path}")
+        code_ops.add(f"{meth} {path}")
 
 missing = sorted(code_ops - spec_ops)   # есть в коде, не описано
 extra = sorted(spec_ops - code_ops)     # описано, но в коде нет

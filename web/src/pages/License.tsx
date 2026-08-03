@@ -1,4 +1,5 @@
 import { useEffect, useState, FormEvent } from "react"
+import { useTranslation } from "react-i18next"
 import api, { LicenseStatus, errStatus } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -6,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import ConfirmDialog from "@/components/ConfirmDialog"
 import { toast } from "@/lib/toast"
+import { formatDate } from "@/lib/time"
 
 // Порог «скоро истечёт»: за месяц до конца срока продление ещё успевает пройти
 // по обычному закупочному циклу, поэтому предупреждаем заранее, а не в последний день.
@@ -26,11 +28,12 @@ function hasExpiry(iso?: string): iso is string {
 // featuresLabel: пустой список фич в лицензии означает «вся редакция целиком»
 // (семантика Claims.Has на сервере), а не «ничего не разрешено» — показать здесь
 // прочерк значило бы соврать ровно наоборот.
-function featuresLabel(features?: string[]): string {
-  return features?.length ? features.join(", ") : "вся редакция"
+function featuresLabel(features: string[] | undefined, t: (key: string) => string): string {
+  return features?.length ? features.join(", ") : t("license.wholeEdition")
 }
 
 export default function License() {
+  const { t } = useTranslation()
   const [status, setStatus] = useState<LicenseStatus | null>(null)
   // Три исхода загрузки, а не два. status === null означает «неизвестно», и его нельзя
   // рендерить как «не задана»: на enterprise-сервере с живой лицензией любой 500/502
@@ -58,7 +61,7 @@ export default function License() {
       if (errStatus(e) === 404) setUnavailable(true)
       else {
         setLoadError(true)
-        toast({ title: "Не удалось загрузить статус лицензии", variant: "destructive" })
+        toast({ title: t("license.loadFailed"), variant: "destructive" })
       }
     } finally {
       setLoading(false)
@@ -90,20 +93,20 @@ export default function License() {
       // (подпись верна, а фичи не включились). Зелёный тост в этих случаях врал бы.
       if (r.data.persist_warning) {
         toast({
-          title: license ? "Применена, но не сохранена на диск" : "Отключена, но не удалена с диска",
+          title: license ? t("license.appliedNotPersisted") : t("license.disabledNotRemoved"),
           description: r.data.persist_warning,
           variant: "destructive",
         })
       } else if (license && !r.data.valid) {
         toast({
-          title: "Лицензия принята, но не в сроке",
-          description: "Подпись верна, однако период действия ещё не начался или уже закончился — enterprise-функции не включены.",
+          title: t("license.acceptedNotInTerm"),
+          description: t("license.acceptedNotInTermHint"),
           variant: "destructive",
         })
       } else {
         toast({
-          title: license ? "Лицензия применена" : "Лицензия деактивирована",
-          description: license ? "Изменения действуют сразу, без рестарта." : "Сервер работает в редакции Free.",
+          title: license ? t("license.applied") : t("license.deactivated"),
+          description: license ? t("license.immediate") : t("license.nowFree"),
           variant: "success",
         })
       }
@@ -119,21 +122,19 @@ export default function License() {
     submit(blob.trim(), password)
   }
 
-  if (loading) return <p className="text-muted-foreground text-sm">Загрузка...</p>
+  if (loading) return <p className="text-muted-foreground text-sm">{t("common.loading")}</p>
 
   if (unavailable) {
     return (
       <div className="flex flex-col gap-5 max-w-2xl">
-        <h1 className="text-xl font-semibold text-foreground">Лицензия</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("license.title")}</h1>
         <div className="glass px-5 py-[18px] space-y-2">
           <div className="flex items-center gap-2">
             <Badge variant="secondary">Free</Badge>
-            <span className="text-[15px] font-semibold text-foreground">Лицензирование недоступно в этой редакции</span>
+            <span className="text-[15px] font-semibold text-foreground">{t("license.unavailable")}</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            Эта сборка — open-core RoutineOps: весь операционный MDM работает без лицензии и
-            без ограничений. Лицензионный ключ нужен только редакции Enterprise (SSO, FileVault,
-            расширенный compliance, мульти-тенантность).
+            {t("license.openCoreNote")}
           </p>
         </div>
       </div>
@@ -153,7 +154,7 @@ export default function License() {
 
   return (
     <div className="flex flex-col gap-5 max-w-2xl">
-      <h1 className="text-xl font-semibold text-foreground">Лицензия</h1>
+      <h1 className="text-xl font-semibold text-foreground">{t("license.title")}</h1>
 
       {persistWarning && (
         <div className="glass bg-red-500/[0.08] px-5 py-[18px] text-sm text-destructive dark:text-[hsl(0_72%_66%)]">
@@ -163,41 +164,39 @@ export default function License() {
 
       {loadError ? (
         <div className="glass px-5 py-[18px] space-y-3 text-sm">
-          <p className="text-[15px] font-semibold text-foreground">Не удалось получить статус лицензии</p>
+          <p className="text-[15px] font-semibold text-foreground">{t("license.statusFailed")}</p>
           <p className="text-muted-foreground">
-            Состояние неизвестно — сервер не ответил. Это не значит, что лицензии нет.
+            {t("license.unknownState")}
           </p>
           <Button variant="outline" size="sm" onClick={load}>
-            Повторить
+            {t("license.retry")}
           </Button>
         </div>
       ) : (
         <div className="glass px-5 py-[18px] space-y-2 text-sm">
           <div className="flex items-center gap-2">
-            <span className="text-soft">Статус:</span>
-            {!status?.configured && <Badge variant="secondary">Не задана</Badge>}
-            {status?.valid && <Badge variant="success">Активна</Badge>}
-            {notYet && <Badge variant="secondary">Ещё не действует</Badge>}
-            {expired && <Badge variant="destructive">Истекла</Badge>}
+            <span className="text-soft">{t("license.status")}</span>
+            {!status?.configured && <Badge variant="secondary">{t("license.notSet")}</Badge>}
+            {status?.valid && <Badge variant="success">{t("license.active")}</Badge>}
+            {notYet && <Badge variant="secondary">{t("license.notYet")}</Badge>}
+            {expired && <Badge variant="destructive">{t("license.expired")}</Badge>}
           </div>
 
           {!status?.configured && (
             <p className="text-muted-foreground">
-              Лицензия не установлена — сервер работает в редакции Free.
+              {t("license.notInstalled")}
             </p>
           )}
 
           {expired && (
             <p className="text-destructive dark:text-[hsl(0_72%_66%)]">
-              Срок действия закончился, enterprise-функции отключены. Данные не затронуты:
-              после применения новой лицензии всё вернётся.
+              {t("license.expiredNote")}
             </p>
           )}
 
           {notYet && (
             <p className="text-muted-foreground">
-              Период действия ещё не начался, поэтому enterprise-функции пока выключены.
-              Если дата уже должна была наступить — проверьте часы сервера.
+              {t("license.notYetNote")}
             </p>
           )}
 
@@ -205,37 +204,37 @@ export default function License() {
             /* В светлой теме #f59e0b на стекле даёт ~2.2:1 — берём затемнённый
                той же тональности, в тёмной остаётся статусный amber. */
             <p className="text-[#b45309] dark:text-[#f59e0b]">
-              Срок истёк, функции пока работают на отсрочке — продлите лицензию.
+              {t("license.graceNote")}
             </p>
           )}
 
           {status?.configured && (
             <>
               <div className="text-foreground">
-                <span className="text-soft">Кому выдана: </span>
+                <span className="text-soft">{t("license.licensee")}</span>
                 {status.licensee || "—"}
               </div>
               <div className="text-foreground">
-                <span className="text-soft">Редакция: </span>
+                <span className="text-soft">{t("license.edition")}</span>
                 {status.edition || "—"}
               </div>
               <div className="text-foreground">
-                <span className="text-soft">Функции: </span>
-                {featuresLabel(status.features)}
+                <span className="text-soft">{t("license.features")}</span>
+                {featuresLabel(status.features, t)}
               </div>
               {status.seats ? (
                 <div className="text-foreground">
-                  <span className="text-soft">Устройств по договору: </span>
+                  <span className="text-soft">{t("license.seats")}</span>
                   {status.seats}
                 </div>
               ) : null}
               {hasExpiry(status.expires_at) && (
                 <div className={expiringSoon ? "text-[#b45309] dark:text-[#f59e0b]" : "text-foreground"}>
-                  <span className={expiringSoon ? "" : "text-soft"}>Действует до: </span>
-                  {new Date(status.expires_at).toLocaleDateString("ru-RU")}
+                  <span className={expiringSoon ? "" : "text-soft"}>{t("license.until")}</span>
+                  {formatDate(status.expires_at)}
                   {/* Срок словами, а не только жёлтым цветом: цвет как единственный
                       носитель смысла — это WCAG 1.4.1. */}
-                  {left !== null && left > 0 && ` — осталось ${left} дн.`}
+                  {left !== null && left > 0 && t("license.daysLeft", { count: left })}
                 </div>
               )}
             </>
@@ -245,20 +244,20 @@ export default function License() {
 
       <form onSubmit={handleApply} className="glass px-5 py-[18px] space-y-4">
         <h2 className="text-[15px] font-semibold text-foreground">
-          {status?.configured ? "Заменить лицензию" : "Применить лицензию"}
+          {status?.configured ? t("license.replace") : t("license.apply")}
         </h2>
         <div className="space-y-1.5">
-          <Label htmlFor="license-blob" className="text-soft">Лицензионный ключ</Label>
+          <Label htmlFor="license-blob" className="text-soft">{t("license.key")}</Label>
           <textarea
             id="license-blob"
             className="flex min-h-32 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
-            placeholder="eyJwYXlsb2FkIjoi... — одна строка base64, как её выдал routineops-license"
+            placeholder={t("license.keyPlaceholder")}
             value={blob}
             onChange={(e) => setBlob(e.target.value)}
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="license-password" className="text-soft">Пароль активации</Label>
+          <Label htmlFor="license-password" className="text-soft">{t("license.activationPassword")}</Label>
           <Input
             id="license-password"
             type="password"
@@ -268,11 +267,11 @@ export default function License() {
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          Применяется сразу, без перезапуска сервера. Отклонённый ключ не сбрасывает текущую лицензию.
+          {t("license.applyNote")}
         </p>
         <div className="flex gap-2">
           <Button type="submit" disabled={submitting || !blob.trim() || !password}>
-            {submitting ? "Применение..." : "Применить"}
+            {submitting ? t("license.applying") : t("license.applyShort")}
           </Button>
           {status?.configured && (
             <Button
@@ -281,9 +280,7 @@ export default function License() {
               className="text-destructive border-destructive/30 hover:bg-destructive/10"
               disabled={submitting}
               onClick={() => setConfirmDeactivate(true)}
-            >
-              Деактивировать
-            </Button>
+            >{t("license.deactivate")}</Button>
           )}
         </div>
       </form>
@@ -291,9 +288,9 @@ export default function License() {
       <ConfirmDialog
         open={confirmDeactivate}
         onOpenChange={setConfirmDeactivate}
-        title="Деактивировать лицензию?"
-        description="Сервер сразу перейдёт в редакцию Free: enterprise-функции отключатся, ключ будет удалён с диска. Данные не удаляются, лицензию можно применить снова."
-        confirmLabel="Деактивировать"
+        title={t("license.deactivateQ")}
+        description={t("license.deactivateWarn")}
+        confirmLabel={t("license.deactivate")}
         destructive
         onConfirm={() => submit("", "")}
       />

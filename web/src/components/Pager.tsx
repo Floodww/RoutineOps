@@ -1,4 +1,6 @@
+import i18n from "@/i18n/config"
 import { ChevronLeft, ChevronRight } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 
 interface Props {
@@ -11,15 +13,16 @@ interface Props {
 // pageLabel — «51–100 из 320». Диапазон, а не номер страницы: оператор ищет запись,
 // а не листает по номерам, и ему важно, какую часть выдачи он сейчас видит.
 export function pageLabel(offset: number, limit: number, total: number): string {
-  if (total === 0) return "0 записей"
+  if (total === 0) return i18n.t("pager.empty")
   const from = offset + 1
   const to = Math.min(offset + limit, total)
-  return `${from}–${to} из ${total}`
+  return i18n.t("pager.range", { from, to, total })
 }
 
 // Пагинатор постраничных списков. Прячется целиком, когда вся выдача уместилась на
 // одной странице: кнопки «назад/вперёд» при десяти записях — чистый шум.
 export default function Pager({ offset, limit, total, onChange }: Props) {
+  const { t } = useTranslation()
   if (total <= limit && offset === 0) return null
   const last = offset + limit >= total
   return (
@@ -33,10 +36,10 @@ export default function Pager({ offset, limit, total, onChange }: Props) {
           onClick={() => onChange(Math.max(0, offset - limit))}
         >
           <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} />
-          Назад
+          {t("pager.prev")}
         </Button>
         <Button variant="outline" size="sm" disabled={last} onClick={() => onChange(offset + limit)}>
-          Вперёд
+          {t("pager.next")}
           <ChevronRight className="h-3.5 w-3.5" strokeWidth={2} />
         </Button>
       </div>

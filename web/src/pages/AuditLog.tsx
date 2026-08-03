@@ -1,4 +1,5 @@
 import { useEffect, useState, type ElementType, type CSSProperties } from "react"
+import { useTranslation } from "react-i18next"
 import { Monitor, FileCode2, ShieldAlert, KeyRound, UserCog } from "lucide-react"
 import api, { PAGE_SIZE, totalCount } from "@/lib/api"
 import Pager, { pageLabel } from "@/components/Pager"
@@ -8,6 +9,7 @@ import { Label } from "@/components/ui/label"
 
 interface AuditEntry {
   id: string
+  seq: number | null
   user_email: string
   action: string
   target_type: string
@@ -16,48 +18,13 @@ interface AuditEntry {
   created_at: string
 }
 
-const ACTION_LABELS: Record<string, string> = {
-  block_device:          "Заблокировал устройство",
-  unblock_device:        "Разблокировал устройство",
-  approve_admin_request: "Одобрил заявку на права",
-  reject_admin_request:  "Отклонил заявку на права",
-  revoke_admin_request:  "Отозвал права администратора",
-  create_device:         "Добавил устройство",
-  reenroll_device:       "Перерегистрировал устройство",
-  apply_license:         "Применил лицензию",
-  deactivate_license:    "Деактивировал лицензию",
-  approve_device:        "Одобрил устройство",
-  reject_device:         "Отклонил устройство",
-  approve_pending_bulk:  "Одобрил очередь энроллмента",
-  reject_pending_bulk:   "Отклонил очередь энроллмента",
-  create_bulk_token:     "Выпустил массовый токен",
-  decommission_device:   "Вывел устройство из эксплуатации",
-  reboot_device:         "Перезагрузил устройство",
-  reboot_group:          "Перезагрузил группу устройств",
-  create_api_token:      "Выпустил API-токен",
-  revoke_api_token:      "Отозвал API-токен",
-}
 
 // Таксономия событий ленты — та же, что на Обзоре: security должно цепляться
 // взглядом сразу, остальные категории различаются иконкой и сдержанным акцентом.
-type EventCategory = "security" | "auth" | "admin" | "device" | "content"
 
-const ACTION_CATEGORY: Record<string, EventCategory> = {
-  login_failed: "security", block_device: "security", lock_device: "security",
-  login: "auth", logout: "auth", change_password: "auth",
-  password_reset: "auth", password_reset_requested: "auth",
-  invite_user: "admin", accept_invite: "admin",
-  approve_admin_request: "admin", reject_admin_request: "admin", revoke_admin_request: "admin",
-  create_device: "device", delete_device: "device", reenroll_device: "device",
-  unblock_device: "device", unlock_device: "device",
-  create_bulk_token: "security", approve_device: "security", approve_pending_bulk: "security",
-  create_api_token: "security", revoke_api_token: "security",
-  reject_device: "device", reject_pending_bulk: "device", decommission_device: "device",
-  run_script: "device", run_script_on_group: "device",
-  create_device_group: "device", update_device_group: "device", delete_device_group: "device",
-  add_device_to_group: "device", remove_device_from_group: "device",
-  // всё остальное (скрипты/политики/алерты/лицензии) — content по умолчанию
-}
+
+import { actionCategory, actionLabelCap, eventNumber, type EventCategory } from "@/lib/auditActions"
+import { formatDateTime } from "@/lib/time"
 
 const CATEGORY_STYLE: Record<EventCategory, { icon: ElementType; fg: string; bg: string }> = {
   // red-700 в светлой теме: red-500 на белом даёт 3.57:1 — ниже AA для text-xs.
@@ -78,6 +45,7 @@ function dayBound(date: string, end: boolean): string {
 }
 
 export default function AuditLog() {
+  const { t } = useTranslation()
   const [entries, setEntries] = useState<AuditEntry[]>([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
@@ -121,16 +89,16 @@ export default function AuditLog() {
 
   return (
     <div className="flex flex-col gap-5">
-      <h1 className="text-xl font-semibold text-foreground">Журнал действий</h1>
+      <h1 className="text-xl font-semibold text-foreground">{t("audit.title")}</h1>
       {loading ? (
-        <p className="text-sm text-muted-foreground">Загрузка...</p>
+        <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
       ) : entries.length === 0 && !filtering ? (
-        <p className="text-sm text-muted-foreground">Нет записей</p>
+        <p className="text-sm text-muted-foreground">{t("audit.empty")}</p>
       ) : (
         <>
         <div className="glass px-5 py-[18px] flex flex-wrap items-end gap-3">
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">С</Label>
+            <Label className="text-xs text-muted-foreground">{t("audit.from")}</Label>
             <input
               type="date"
               value={from}
@@ -139,7 +107,7 @@ export default function AuditLog() {
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">По</Label>
+            <Label className="text-xs text-muted-foreground">{t("audit.when")}</Label>
             <input
               type="date"
               value={to}
@@ -151,10 +119,10 @@ export default function AuditLog() {
               последних 200 событий. Постранично такой список показывал бы только тех,
               кто попал на текущую страницу; подстрока честнее и ищет по всему журналу. */}
           <div className="space-y-1 min-w-48">
-            <Label className="text-xs text-muted-foreground">Кто</Label>
+            <Label className="text-xs text-muted-foreground">{t("audit.who")}</Label>
             <Input
               value={who}
-              placeholder="email или agent:"
+              placeholder={t("audit.filterPlaceholder")}
               onChange={(e) => { setWho(e.target.value); setOffset(0) }}
             />
           </div>
@@ -164,26 +132,26 @@ export default function AuditLog() {
               onClick={() => { setFrom(""); setTo(""); setWho(""); setOffset(0) }}
               className="h-9 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              Сбросить
+              {t("audit.reset")}
             </button>
           )}
         </div>
 
         <div className="glass">
           <div className="px-5 pt-4 pb-3">
-            <h2 className="text-[15px] font-semibold text-foreground">События</h2>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("audit.events")}</h2>
             <p className="text-xs text-muted-foreground">{pageLabel(offset, PAGE_SIZE, total)}</p>
           </div>
           {entries.length === 0 && (
             <p className="text-xs text-muted-foreground px-5 py-8 text-center border-t border-border">
-              Ничего не найдено
+              {t("audit.nothingFound")}
             </p>
           )}
           {entries.map((e, i) => {
             const summary = e.details
               ? Object.entries(e.details).map(([k, v]) => `${k}: ${v}`).join(", ")
               : null
-            const cat = ACTION_CATEGORY[e.action] ?? "content"
+            const cat = actionCategory(e.action)
             const { icon: CatIcon, fg, bg } = CATEGORY_STYLE[cat]
             return (
               <div
@@ -200,7 +168,7 @@ export default function AuditLog() {
                     <span className="font-medium text-foreground">{e.user_email}</span>
                     {" "}
                     <span className={cat === "security" ? fg : "text-muted-foreground"}>
-                      {ACTION_LABELS[e.action] ?? e.action}
+                      {actionLabelCap(e.action)}
                     </span>
                   </p>
                   {summary && (
@@ -209,9 +177,13 @@ export default function AuditLog() {
                     </p>
                   )}
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {new Date(e.created_at).toLocaleString("ru-RU")}
+                    {formatDateTime(e.created_at)}
                     {" · "}
-                    <span className="font-mono">{e.target_id.slice(0, 8)}</span>
+                    {/* Номер события есть у КАЖДОЙ записи. Раньше здесь стоял
+                        target_id — идентификатор ОБЪЕКТА, которого у логина,
+                        выхода и надзорного просмотра нет вовсе, и строка
+                        обрывалась на середине. */}
+                    <span className="font-mono">{eventNumber(e.seq)}</span>
                   </p>
                 </div>
               </div>
@@ -225,12 +197,12 @@ export default function AuditLog() {
       <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{selected ? (ACTION_LABELS[selected.action] ?? selected.action) : ""}</DialogTitle>
+            <DialogTitle>{selected ? actionLabelCap(selected.action) : ""}</DialogTitle>
           </DialogHeader>
           {selected && (
             <div className="space-y-3 pt-1">
               <div className="flex gap-4 text-sm text-muted-foreground">
-                <span>{new Date(selected.created_at).toLocaleString("ru-RU")}</span>
+                <span>{formatDateTime(selected.created_at)}</span>
                 <span>{selected.user_email}</span>
               </div>
               <div className="px-5 py-[18px]">
@@ -245,7 +217,10 @@ export default function AuditLog() {
                   </tbody>
                 </table>
               </div>
-              <p className="text-xs text-muted-foreground font-mono">ID: {selected.target_id}</p>
+              <p className="text-xs text-muted-foreground font-mono">{t("audit.event", { n: eventNumber(selected.seq) })}</p>
+              {selected.target_id && (
+                <p className="text-xs text-muted-foreground font-mono">{t("audit.object", { id: selected.target_id })}</p>
+              )}
             </div>
           )}
         </DialogContent>

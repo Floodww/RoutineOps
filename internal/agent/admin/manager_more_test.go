@@ -63,7 +63,7 @@ func TestGrantPrivError(t *testing.T) {
 	m := &Manager{
 		log:         quietLog(),
 		priv:        ep,
-		consoleUser: func() string { return "bob" },
+		consoleUser: func() (string, bool) { return "bob", true },
 		fetch: func(context.Context) (*pb.FetchAdminStatusResponse, error) {
 			return approved("r1", time.Now().Add(time.Hour)), nil
 		},
@@ -94,7 +94,7 @@ func TestRevokePrivError(t *testing.T) {
 	m := &Manager{
 		log:         quietLog(),
 		priv:        ep,
-		consoleUser: func() string { return user },
+		consoleUser: func() (string, bool) { return user, true },
 		fetch: func(context.Context) (*pb.FetchAdminStatusResponse, error) {
 			return approved("r1", time.Now().Add(time.Hour)), nil
 		},
@@ -140,7 +140,7 @@ func TestRunPollsAndStops(t *testing.T) {
 		interval:    time.Millisecond,
 		log:         quietLog(),
 		priv:        &fakePriv{},
-		consoleUser: func() string { return "alice" },
+		consoleUser: func() (string, bool) { return "alice", true },
 		fetch: func(context.Context) (*pb.FetchAdminStatusResponse, error) {
 			atomic.AddInt32(&polls, 1)
 			return &pb.FetchAdminStatusResponse{}, nil
@@ -203,7 +203,7 @@ func TestNewManagerDryRun(t *testing.T) {
 		atomic.AddInt32(&enqCalls, 1)
 		return nil
 	}
-	m := NewManager(nil, enqueue, 42*time.Second, quietLog(), true)
+	m := NewManager(nil, enqueue, 42*time.Second, quietLog(), true, nil)
 
 	if _, ok := m.priv.(dryRunPriv); !ok {
 		t.Fatalf("при dryRun ожидали dryRunPriv, got %T", m.priv)

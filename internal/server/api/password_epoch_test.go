@@ -90,13 +90,14 @@ func TestResetPassword_InvalidatesOldTokens(t *testing.T) {
 	assertMe(t, rtr, token, http.StatusOK)
 
 	time.Sleep(1100 * time.Millisecond)
-	u, err := db.GetUserByEmail(context.Background(), "epoch-reset@test.com")
-	if err != nil || u == nil {
-		t.Fatalf("GetUserByEmail: %v", err)
+	// ADR-7: token-epoch двигает смена пароля ЛИЧНОСТИ — членство пароля не имеет.
+	id, err := db.GetIdentityByEmail(context.Background(), "epoch-reset@test.com")
+	if err != nil || id == nil {
+		t.Fatalf("GetIdentityByEmail: %v", err)
 	}
 	newHash, _ := bcrypt.GenerateFromPassword([]byte("Reset999!"), bcrypt.DefaultCost)
-	if err := db.UpdateUserPassword(context.Background(), u.ID, string(newHash)); err != nil {
-		t.Fatalf("UpdateUserPassword: %v", err)
+	if err := db.UpdateIdentityPassword(context.Background(), id.ID, string(newHash)); err != nil {
+		t.Fatalf("UpdateIdentityPassword: %v", err)
 	}
 
 	assertMe(t, rtr, token, http.StatusUnauthorized)

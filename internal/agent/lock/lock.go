@@ -287,7 +287,22 @@ func truncateMarker(s string) string {
 // New собирает Manager. path — файл состояния (машинный каталог), locker —
 // платформенный замок.
 func New(path string, locker Locker, log *slog.Logger) *Manager {
+	// Локеру, который поднимает оверлей ОТДЕЛЬНЫМ процессом (Linux), нужен путь
+	// состояния: дочерний процесс стартует из юзер-сессии и сам вычислил бы ДРУГОЙ
+	// путь по умолчанию — прочитал бы пустоту и тихо вышел, оставив «заблокированное»
+	// устройство с чистым экраном.
+	if sp, ok := locker.(statePathAware); ok {
+		sp.SetStatePath(path)
+	}
 	return &Manager{path: path, log: log, locker: locker, tamperCooldown: tamperReportInterval}
+}
+
+// statePathAware — необязательная возможность локера: принять путь файла состояния.
+// Отдельным интерфейсом, а не параметром NewPlatformLocker, чтобы не тащить лишний
+// аргумент в платформы, которым он не нужен (Windows и macOS запускают оверлей в той
+// же раскладке путей).
+type statePathAware interface {
+	SetStatePath(path string)
 }
 
 // SetTamperReporter подключает доставку события ИБ о подделке файла состояния.

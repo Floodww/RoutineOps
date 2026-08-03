@@ -3,13 +3,14 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 )
 
 func TestCreateUser_ReturnsUserWithID(t *testing.T) {
 	db := newDB(t)
 	email := fmt.Sprintf("create-%s@test.com", uniq(t))
-	u, err := db.CreateUser(context.Background(), "Alice", email, "hash", "user")
+	u, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Alice", email, "hash", "user")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -29,7 +30,7 @@ func TestGetUserByEmail_Found(t *testing.T) {
 	email := fmt.Sprintf("getbyemail-%s@test.com", uniq(t))
 	created := mustCreateUser(t, db, email)
 
-	got, err := db.GetUserByEmail(context.Background(), email)
+	got, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, email)
 	if err != nil {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestGetUserByEmail_Found(t *testing.T) {
 
 func TestGetUserByEmail_NotFound_ReturnsNil(t *testing.T) {
 	db := newDB(t)
-	got, err := db.GetUserByEmail(context.Background(), "nobody@nowhere.com")
+	got, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "nobody@nowhere.com")
 	if err != nil {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}

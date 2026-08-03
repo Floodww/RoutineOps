@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"log/slog"
 	"os"
@@ -63,6 +64,18 @@ func setupDeviceWithCN(t *testing.T, db *storage.DB) (deviceID, cn string) {
 		IPAddress:       "192.0.2.1",
 	}); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
+	}
+	// Версия агента приходит инвентарём, а не heartbeat'ом. Без неё гейт
+	// capability (storage: assertAgentSupports) отказывает в задачах тех типов, у
+	// которых есть минимальная версия — здесь мы проверяем доставку, а не гейт,
+	// поэтому даём заведомо новую версию, которая переживёт будущие минимумы.
+	if err := db.UpsertInventory(ctx, storage.InventoryData{
+		CertFingerprint: fingerprint,
+		Hostname:        cn,
+		OS:              "macos",
+		AgentVersion:    "999.0.0",
+	}); err != nil {
+		t.Fatalf("UpsertInventory: %v", err)
 	}
 	id, err := db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil || id == "" {
@@ -160,6 +173,46 @@ func TestProcessTask_DeliversToConnectedDevice(t *testing.T) {
 	}
 }
 
+// filevault_provision обязан ехать СВОИМ полем контракта. Пока поля не было, задача
+// уезжала пустым Task (без скрипта, без команды) — агент не мог отличить её от скрипта
+// с пустым телом и отчитывался успехом, ничего не сделав. Ровно тот же класс тихого
+// вранья закрыт на агенте отказом на незнакомый тип; здесь закрыта его причина.
+func TestProcessTask_DeliversFileVaultProvision(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	deviceID, cn := setupDeviceWithCN(t, db)
+
+	const reason = "нужен пароль для дозавершения FileVault"
+	task, err := db.CreateFileVaultProvisionTask(ctx, deviceID, reason)
+	if err != nil {
+		t.Fatalf("CreateFileVaultProvisionTask: %v", err)
+	}
+
+	reg := registry.New()
+	ch, cancel := reg.Register(cn)
+	defer cancel()
+
+	h := worker.NewHandler(db, reg, discardLogger())
+	if err := h.ProcessTask(ctx, deliverTask(task.ID)); err != nil {
+		t.Fatalf("ProcessTask вернул ошибку: %v", err)
+	}
+
+	select {
+	case got := <-ch:
+		if got.FilevaultProvision == nil {
+			t.Fatal("filevault_provision не заполнен — агенту приедет пустая задача")
+		}
+		if got.FilevaultProvision.RequestId != task.ID {
+			t.Errorf("RequestId = %q, ожидался %q", got.FilevaultProvision.RequestId, task.ID)
+		}
+		if got.FilevaultProvision.Reason != reason {
+			t.Errorf("Reason = %q, ожидался %q", got.FilevaultProvision.Reason, reason)
+		}
+	default:
+		t.Fatal("задача не попала в канал устройства")
+	}
+}
+
 // Битый JSON в payload → ошибка unmarshal.
 func TestProcessTask_BadPayload_ReturnsError(t *testing.T) {
 	db := newDB(t)
@@ -233,13 +286,13 @@ func TestProcessTask_EmptyCN_ReturnsError(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 	// CreatePendingDevice оставляет cert_cn = NULL → GetDeviceCN вернёт "".
-	dev, err := db.CreatePendingDevice(ctx, "pending-host-"+fmt.Sprintf("%d", time.Now().UnixNano()), "macos")
+	dev, err := db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, "pending-host-"+fmt.Sprintf("%d", time.Now().UnixNano()), "macos")
 	if err != nil {
 		t.Fatalf("CreatePendingDevice: %v", err)
 	}
 	// Активируем (cert_cn остаётся NULL): CreateTask гейтит по status='active', а тест
 	// проверяет именно ветку пустого cert_cn в ProcessTask, а не гейт создания задачи.
-	if err := db.UpdateDeviceStatus(ctx, dev.ID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, dev.ID, "active"); err != nil {
 		t.Fatalf("UpdateDeviceStatus: %v", err)
 	}
 	task, err := db.CreateTask(ctx, dev.ID, "echo hi", "macos", "normal")

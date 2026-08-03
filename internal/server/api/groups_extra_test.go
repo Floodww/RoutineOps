@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
 	"testing"
 
@@ -108,7 +109,7 @@ func TestRunScriptOnGroup_Created(t *testing.T) {
 	deviceID, _ := createDevice(t, rtr, tok, "run-host", "macos")
 	// Скрипты гоняются только на active (безопасность: pending/pending_approval не
 	// исполняют скрипты). Активируем устройство — иначе fan-out его не таргетит.
-	if err := db.UpdateDeviceStatus(context.Background(), deviceID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 		t.Fatalf("activate device: %v", err)
 	}
 

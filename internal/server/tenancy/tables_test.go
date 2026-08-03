@@ -47,6 +47,96 @@ func migrationTables(t *testing.T) map[string]string {
 	return found
 }
 
+// reparentArrayRe вытаскивает элементы массива таблиц из FOREACH ... IN ARRAY ARRAY[...]
+// в теле миграции. Разбор грубый и намеренно такой: массив жёстко зашит в plpgsql, и
+// «правильного» способа прочитать его без запущенной БД не существует. Промах парсера
+// делает список пустым, а пустой список валит тест — не молча пропускает.
+var reparentArrayRe = regexp.MustCompile(`(?s)FOREACH\s+t\s+IN\s+ARRAY\s+ARRAY\[(.*?)\]`)
+
+// tablesInArrays собирает объединение всех массивов таблиц из файла миграции.
+func tablesInArrays(t *testing.T, file string) map[string]bool {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", file))
+	if err != nil {
+		t.Fatalf("не читается %s: %v", file, err)
+	}
+	out := map[string]bool{}
+	for _, m := range reparentArrayRe.FindAllStringSubmatch(string(body), -1) {
+		for _, raw := range strings.Split(m[1], ",") {
+			name := strings.Trim(strings.TrimSpace(raw), "'")
+			if name != "" {
+				out[name] = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("в %s не найдено ни одного массива таблиц — сломался парсер, а не миграция", file)
+	}
+	return out
+}
+
+// movedByMigrations — где сегодня живут актуальные тела admin_reparent_tenant и
+// admin_move_device_tenant.
+//
+// Тела ПЕРЕСОЗДАЮТСЯ более поздними миграциями (CREATE OR REPLACE), поэтому смотреть надо
+// на последнюю версию, а не на ту, где функция появилась. Добавляешь таблицу в массив
+// новой миграцией — правь и эти константы, иначе гейт продолжит проверять устаревшее тело
+// и зазеленеет на пустом месте.
+const (
+	reparentTenantFile = "067_screen_sessions.sql"
+	moveDeviceFile     = "067_screen_sessions.sql"
+)
+
+// reparentExempt — тенантские таблицы, которых в массивах переноса НЕТ, и это
+// зафиксированное состояние на момент миграции 067, а не разрешение так делать.
+//
+// Список существует ровно затем, чтобы гейт ловил НОВЫЕ пропуски. Всё, что здесь
+// перечислено, унаследовано и относится к серверной зоне: решение по каждой строке —
+// за владельцем серверной части, а не за этим тестом.
+var reparentExempt = map[string]string{
+	"audit_log":     "журнал с хеш-цепочкой на тенанта; перенос строк порвал бы цепочку — вероятно, намеренно",
+	"audit_anchors": "якоря той же цепочки, что audit_log",
+	"saml_providers": "рядом стоящий oidc_providers в массиве ЕСТЬ, а этот нет — похоже на пропуск, " +
+		"вопрос к серверной зоне",
+	"siem_integrations":      "заведена позже массива (061), в него не дописана",
+	"device_vulnerabilities": "производная от devices, но при переносе устройства не едет — похоже на пропуск",
+}
+
+// TestScopedTablesAreReparented — вторая половина гейта тенантности.
+//
+// TestEveryTableClassified проверяет, что у таблицы ЕСТЬ решение о скоупе. Этого мало:
+// классификация живёт в Go, а перенос тенанта и перенос устройства — в жёстко зашитых
+// массивах внутри plpgsql, которых Go не видит вовсе. Таблицу можно классифицировать,
+// гейт зазеленеет, а строки при переносе тихо останутся в старом тенанте — под RLS они
+// станут невидимы, но никуда не денутся (§6 контракта удалёнки).
+func TestScopedTablesAreReparented(t *testing.T) {
+	reparent := tablesInArrays(t, reparentTenantFile)
+	moved := tablesInArrays(t, moveDeviceFile)
+
+	for name, tbl := range tenancy.Tables {
+		if tbl.Scope != tenancy.ScopeOwn && tbl.Scope != tenancy.ScopeDerived {
+			continue
+		}
+		if why, ok := reparentExempt[name]; ok {
+			if reparent[name] {
+				t.Errorf("таблица %s есть в массиве переноса тенанта, но числится исключением (%q) — "+
+					"список исключений устарел", name, why)
+			}
+			continue
+		}
+		if !reparent[name] {
+			t.Errorf("таблица %s тенантская, но НЕ входит в массив admin_reparent_tenant (%s): "+
+				"при слиянии тенанта её строки останутся в старом", name, reparentTenantFile)
+		}
+		// Производные от devices обязаны переезжать и при переносе ОДНОГО устройства.
+		if tbl.Scope == tenancy.ScopeDerived && tbl.Parent == "devices" && !moved[name] {
+			t.Errorf("таблица %s производна от devices, но НЕ входит в массив "+
+				"admin_move_device_tenant (%s): при переносе устройства её строки останутся "+
+				"в старом тенанте", name, moveDeviceFile)
+		}
+	}
+}
+
 // TestEveryTableClassified — гейт ретрофита мультитенантности.
 //
 // Новая таблица в migrations/ без записи в tenancy.Tables роняет этот тест. Это
@@ -157,6 +247,7 @@ func TestScoped(t *testing.T) {
 		{"devices", true},
 		{"alerts", true},
 		{"software_policy_rules", true},
+		{"tenants", false},
 		{"agent_releases", false},
 		{"revoked_fingerprints", false},
 		{"token_blocklist", false},

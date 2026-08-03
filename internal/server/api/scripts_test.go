@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -24,18 +25,31 @@ func TestCreateScript_HappyPath_Returns201(t *testing.T) {
 	rtr := newRouterFull(t, db)
 	tok := authToken(t, rtr, db)
 
-	for _, platform := range []string{"linux", "macOS", "Windows"} {
+	// Вход принимается в любом регистре, наружу и в БД едет КАНОН macOS | Windows | Linux —
+	// тот же набор, что у политик ПО. Раньше эта ручка требовала строго "linux", соседняя
+	// (/policies) строго "Linux", и обе отвечали 400 на вариант соседа.
+	cases := []struct{ in, want string }{
+		{"linux", "Linux"}, // старое значение клиента продолжает приниматься
+		{"Linux", "Linux"},
+		{"macos", "macOS"},
+		{"macOS", "macOS"},
+		{"windows", "Windows"},
+		{"Windows", "Windows"},
+	}
+	for i, c := range cases {
+		// Имя с индексом: уникальность имени скрипта регистронезависима, и пара
+		// "linux"/"Linux" дала бы 409 вместо проверки нормализации.
 		body, _ := json.Marshal(map[string]string{
-			"name": "script-happy-" + platform, "platform": platform, "content": "echo hello",
+			"name": fmt.Sprintf("script-happy-%d-%s", i, c.in), "platform": c.in, "content": "echo hello",
 		})
 		w := authedDo(t, rtr, http.MethodPost, "/api/v1/scripts", body, tok)
 		if w.Code != http.StatusCreated {
-			t.Fatalf("platform %s: got %d, want 201; body: %s", platform, w.Code, w.Body)
+			t.Fatalf("platform %q: got %d, want 201; body: %s", c.in, w.Code, w.Body)
 		}
 		var s map[string]any
 		json.NewDecoder(w.Body).Decode(&s)
-		if s["platform"] != platform {
-			t.Errorf("platform = %q, want %q", s["platform"], platform)
+		if s["platform"] != c.want {
+			t.Errorf("вход %q → platform = %q, want %q", c.in, s["platform"], c.want)
 		}
 		if id, _ := s["id"].(string); id == "" {
 			t.Error("expected non-empty script id")

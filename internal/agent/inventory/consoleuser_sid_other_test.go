@@ -13,7 +13,7 @@ import "testing"
 //     бы в SID-поле — здесь это ловится: SID обязан быть пуст НЕЗАВИСИМО от
 //     того, нашёлся ли консольный пользователь.
 func TestBuild_ConsoleUserSIDEmptyOffWindows(t *testing.T) {
-	di := build("1.2.3").GetDeviceInfo()
+	di := build("1.2.3", nil).GetDeviceInfo()
 	if got := di.GetConsoleUserSid(); got != "" {
 		t.Errorf("console_user_sid = %q вне Windows, want «» (console_user = %q — своп полей?)",
 			got, di.GetConsoleUser())

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,7 @@ import (
 func seedUser(t *testing.T, db *storage.DB, email, password, role string) {
 	t.Helper()
 	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	_, err := db.CreateUser(context.Background(), "Test User", email, string(hash), role)
+	_, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Test User", email, string(hash), role)
 	if err != nil {
 		t.Fatalf("seedUser: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestForgotPassword_MissingEmail_Returns400(t *testing.T) {
 func TestResetPassword_ValidToken_Returns200(t *testing.T) {
 	rtr, db := newRouterWithDB(t)
 	seedUser(t, db, "reset@test.com", "secret123", "admin")
-	user, _ := db.GetUserByEmail(context.Background(), "reset@test.com")
+	user, _ := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "reset@test.com")
 
 	db.CreatePasswordResetToken(context.Background(), user.ID, "valid-token")
 
@@ -157,7 +158,7 @@ func TestResetPassword_ExpiredToken_Returns400(t *testing.T) {
 func TestResetPassword_TokenAlreadyUsed_Returns400(t *testing.T) {
 	rtr, db := newRouterWithDB(t)
 	seedUser(t, db, "reset2@test.com", "secret123", "admin")
-	user, _ := db.GetUserByEmail(context.Background(), "reset2@test.com")
+	user, _ := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "reset2@test.com")
 
 	db.CreatePasswordResetToken(context.Background(), user.ID, "used-token")
 
@@ -182,7 +183,7 @@ func TestResetPassword_TokenAlreadyUsed_Returns400(t *testing.T) {
 func TestResetPassword_LowComplexity_Returns400(t *testing.T) {
 	rtr, db := newRouterWithDB(t)
 	seedUser(t, db, "reset-cplx@test.com", "secret123", "admin")
-	user, _ := db.GetUserByEmail(context.Background(), "reset-cplx@test.com")
+	user, _ := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "reset-cplx@test.com")
 
 	db.CreatePasswordResetToken(context.Background(), user.ID, "cplx-token")
 
@@ -202,7 +203,7 @@ func TestResetPassword_LowComplexity_Returns400(t *testing.T) {
 func TestResetPassword_ShortPassword_Returns400(t *testing.T) {
 	rtr, db := newRouterWithDB(t)
 	seedUser(t, db, "reset3@test.com", "secret123", "admin")
-	user, _ := db.GetUserByEmail(context.Background(), "reset3@test.com")
+	user, _ := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "reset3@test.com")
 
 	db.CreatePasswordResetToken(context.Background(), user.ID, "short-token")
 

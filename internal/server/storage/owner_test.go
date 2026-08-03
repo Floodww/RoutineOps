@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -23,7 +24,7 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fp)
 
 	// Ручная карточка: ФИО + почта, никакого аккаунта и приглашения.
-	p, err := db.CreateManualPerson(ctx, "Иван Иванов", "ivanov-"+u+"@test.com")
+	p, err := db.CreateManualPerson(ctx, tenancy.DefaultTenantID, "Иван Иванов", "ivanov-"+u+"@test.com")
 	if err != nil {
 		t.Fatalf("create person: %v", err)
 	}
@@ -31,11 +32,11 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 		t.Fatalf("source = %q, want manual", p.Source)
 	}
 
-	found, err := db.SetDeviceOwnerPerson(ctx, devID, p.ID)
+	found, err := db.SetDeviceOwnerPerson(ctx, tenancy.DefaultTenantID, devID, p.ID)
 	if err != nil || !found {
 		t.Fatalf("set owner: found=%v err=%v", found, err)
 	}
-	d, _, err := db.GetDevice(ctx, devID)
+	d, _, err := db.GetDevice(ctx, tenancy.DefaultTenantID, devID)
 	if err != nil || d == nil {
 		t.Fatalf("get device: %v", err)
 	}
@@ -45,10 +46,10 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 	}
 
 	// Снятие → пусто.
-	if _, err := db.SetDeviceOwnerPerson(ctx, devID, ""); err != nil {
+	if _, err := db.SetDeviceOwnerPerson(ctx, tenancy.DefaultTenantID, devID, ""); err != nil {
 		t.Fatalf("clear owner: %v", err)
 	}
-	d, _, _ = db.GetDevice(ctx, devID)
+	d, _, _ = db.GetDevice(ctx, tenancy.DefaultTenantID, devID)
 	if d.OwnerPersonID != "" || d.OwnerPersonName != "" {
 		t.Errorf("после снятия владелец не пуст: id=%q name=%q", d.OwnerPersonID, d.OwnerPersonName)
 	}
@@ -67,13 +68,13 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 	if err := db.SetDeviceOwnerDirectory(ctx, devID, pid); err != nil {
 		t.Fatalf("set dir owner: %v", err)
 	}
-	d, _, _ = db.GetDevice(ctx, devID)
+	d, _, _ = db.GetDevice(ctx, tenancy.DefaultTenantID, devID)
 	if d.OwnerPersonName != "Пётр Петров" {
 		t.Errorf("владелец из каталога: %q; want %q", d.OwnerPersonName, "Пётр Петров")
 	}
 
 	// Несуществующая карточка → ошибка (FK), не тихий успех.
-	if _, err := db.SetDeviceOwnerPerson(ctx, devID, "00000000-0000-0000-0000-000000000000"); err == nil {
+	if _, err := db.SetDeviceOwnerPerson(ctx, tenancy.DefaultTenantID, devID, "00000000-0000-0000-0000-000000000000"); err == nil {
 		t.Error("привязка к несуществующей карточке должна падать (FK)")
 	}
 }
@@ -85,7 +86,7 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 	ctx := context.Background()
 	u := uniq(t)
 
-	p, err := db.CreateManualPerson(ctx, "Ручной Человек", "")
+	p, err := db.CreateManualPerson(ctx, tenancy.DefaultTenantID, "Ручной Человек", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 		t.Errorf("пустая почта должна остаться пустой, got %q", p.Email)
 	}
 
-	ok, err := db.UpdateManualPerson(ctx, p.ID, "Ручной Человек 2", "manual-"+u+"@test.com")
+	ok, err := db.UpdateManualPerson(ctx, tenancy.DefaultTenantID, p.ID, "Ручной Человек 2", "manual-"+u+"@test.com")
 	if err != nil || !ok {
 		t.Fatalf("update: ok=%v err=%v", ok, err)
 	}
@@ -105,7 +106,7 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 	var ldapID string
-	persons, err := db.ListDirectoryPersons(ctx)
+	persons, err := db.ListDirectoryPersons(ctx, tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -117,18 +118,18 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 	if ldapID == "" {
 		t.Fatal("каталожная карточка не найдена")
 	}
-	if _, err := db.UpdateManualPerson(ctx, ldapID, "Подмена", ""); !errors.Is(err, storage.ErrPersonNotManual) {
+	if _, err := db.UpdateManualPerson(ctx, tenancy.DefaultTenantID, ldapID, "Подмена", ""); !errors.Is(err, storage.ErrPersonNotManual) {
 		t.Errorf("правка каталожной: err=%v, want ErrPersonNotManual", err)
 	}
-	if _, err := db.DeleteManualPerson(ctx, ldapID); !errors.Is(err, storage.ErrPersonNotManual) {
+	if _, err := db.DeleteManualPerson(ctx, tenancy.DefaultTenantID, ldapID); !errors.Is(err, storage.ErrPersonNotManual) {
 		t.Errorf("удаление каталожной: err=%v, want ErrPersonNotManual", err)
 	}
 
 	// Ручную удаляем; несуществующая — не ошибка, а false.
-	if ok, err := db.DeleteManualPerson(ctx, p.ID); err != nil || !ok {
+	if ok, err := db.DeleteManualPerson(ctx, tenancy.DefaultTenantID, p.ID); err != nil || !ok {
 		t.Fatalf("delete: ok=%v err=%v", ok, err)
 	}
-	if ok, err := db.DeleteManualPerson(ctx, "00000000-0000-0000-0000-000000000000"); err != nil || ok {
+	if ok, err := db.DeleteManualPerson(ctx, tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000"); err != nil || ok {
 		t.Errorf("удаление несуществующей: ok=%v err=%v; want false,nil", ok, err)
 	}
 }
@@ -141,7 +142,7 @@ func TestManualPerson_SurvivesDirectorySync(t *testing.T) {
 	ctx := context.Background()
 	u := uniq(t)
 
-	manual, err := db.CreateManualPerson(ctx, "Пережил Синк", "")
+	manual, err := db.CreateManualPerson(ctx, tenancy.DefaultTenantID, "Пережил Синк", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestManualPerson_SurvivesDirectorySync(t *testing.T) {
 		t.Fatalf("mark stale: %v", err)
 	}
 
-	persons, err := db.ListDirectoryPersons(ctx)
+	persons, err := db.ListDirectoryPersons(ctx, tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

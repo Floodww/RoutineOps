@@ -1,3 +1,4 @@
+import i18n from "@/i18n/config"
 import axios from "axios"
 import { toast } from "./toast"
 
@@ -11,7 +12,7 @@ export function errMessage(e: unknown): string {
     return e.message
   }
   if (e instanceof Error) return e.message
-  return "Неизвестная ошибка"
+  return i18n.t("common.unknownError")
 }
 
 // errStatus — HTTP-код ошибки (0, если ответа не было). Нужен, чтобы отличить
@@ -38,14 +39,25 @@ api.interceptors.response.use(
   (err) => {
     if (err.response?.status === 401) {
       sessionStorage.removeItem("session")
-      window.location.href = "/login"
+      // 🔴 На публичных страницах редирект НЕ делаем. Иначе 401 от фонового запроса
+      // самой такой страницы даёт бесконечную перезагрузку: страница логина
+      // спрашивает список SSO-провайдеров, а ручка /api/v1/oidc/providers сидит под
+      // requireRole("it_admin") → 401 → редирект на /login → страница снова
+      // спрашивает провайдеров. Поймано на проде 30.07 сразу после перехода на
+      // enterprise-сборку: в open-core этой ручки нет вовсе, 404 редирект не
+      // вызывал, и петля не проявлялась. Свой .catch() у страницы не спасает —
+      // интерсептор срабатывает раньше.
+      const PUBLIC_PATHS = ["/login", "/forgot-password", "/reset-password", "/accept-invite"]
+      if (!PUBLIC_PATHS.some((p) => window.location.pathname.startsWith(p))) {
+        window.location.href = "/login"
+      }
       return Promise.reject(err)
     }
     // Авто-тост только для мутаций (POST/PUT/PATCH/DELETE) — действий пользователя.
     // Фоновые GET обрабатываются страницами (loading/catch), их не шумим.
     const method = (err.config?.method ?? "get").toLowerCase()
     if (method !== "get") {
-      toast({ title: "Ошибка", description: errMessage(err), variant: "destructive" })
+      toast({ title: i18n.t("common.error"), description: errMessage(err), variant: "destructive" })
     }
     return Promise.reject(err)
   }
@@ -81,13 +93,13 @@ export const DEVICE_STATUS: Record<DeviceStatus, {
   variant: "success" | "default" | "secondary" | "destructive" | "outline"
   dot: string
 }> = {
-  active:           { label: "Активен",              variant: "success",     dot: "bg-emerald-500" },
-  enrolled:         { label: "Зарегистрирован",      variant: "default",     dot: "bg-blue-500"    },
-  pending:          { label: "Ожидает",              variant: "secondary",   dot: "bg-slate-400"   },
-  pending_approval: { label: "Ожидает одобрения",    variant: "secondary",   dot: "bg-amber-500"   },
-  rejected:         { label: "Отклонено",            variant: "destructive", dot: "bg-rose-600"    },
-  blocked:          { label: "Заблокирован",         variant: "destructive", dot: "bg-red-500"     },
-  decommissioned:   { label: "Выведен из эксплуатации", variant: "outline",  dot: "bg-slate-500"   },
+  active: { label: "deviceStatus.active",              variant: "success",     dot: "bg-emerald-500" },
+  enrolled: { label: "deviceStatus.enrolled",      variant: "default",     dot: "bg-blue-500"    },
+  pending: { label: "deviceStatus.pending",              variant: "secondary",   dot: "bg-slate-400"   },
+  pending_approval: { label: "deviceStatus.pending_approval",    variant: "secondary",   dot: "bg-amber-500"   },
+  rejected: { label: "deviceStatus.rejected",            variant: "destructive", dot: "bg-rose-600"    },
+  blocked: { label: "deviceStatus.blocked",         variant: "destructive", dot: "bg-red-500"     },
+  decommissioned: { label: "deviceStatus.decommissioned", variant: "outline",  dot: "bg-slate-500"   },
 }
 
 export interface Device {
@@ -97,6 +109,8 @@ export interface Device {
   os_version: string
   ip_address: string
   status: DeviceStatus
+  // Заполняется в GET /devices/across-tenants (и может отсутствовать в обычном списке).
+  tenant_id?: string
   lock_status: "unlocked" | "locked"
   // Что агент ФАКТИЧЕСКИ доложил про лок (lock_status — желаемое). Отдаётся только
   // карточкой устройства; сервер старой версии поля не пришлёт. Расхождение с
@@ -151,6 +165,10 @@ export interface DirectoryConfig {
   // возвращается только признак has_ca_cert — как и bind-пароль.
   start_tls: boolean
   has_ca_cert: boolean
+  // Вход в панель по паролю каталога. Отдельно от enabled: синк персон и приём пароля
+  // на вход — разные по риску вещи. Сервер требует шифрованного канала (ldaps:// либо
+  // ldap:// + start_tls) и отбивает флаг при выключенном каталоге.
+  login_enabled: boolean
 }
 
 export interface DirectorySyncResult {
@@ -277,14 +295,14 @@ export interface Task {
 // чистит только квитанцию). Агент отчитывается по ПОВТОРНОМУ снимку, а не по коду
 // возврата, и подпись обязана это сохранить.
 export const UNINSTALL_OUTCOME: Record<string, { label: string; hint: string }> = {
-  removed:         { label: "Удалено",            hint: "Снято, подтверждено повторным снимком инвентаря." },
-  already_absent:  { label: "Уже отсутствует",    hint: "На машине не нашлось ничего с таким именем." },
-  target_changed:  { label: "Цель изменилась",    hint: "Имя есть, но версия, ключ или способ удаления разошлись со снимком. Обновите инвентарь и повторите." },
-  ambiguous:       { label: "Неоднозначная цель", hint: "Селектору подошло несколько записей — уточните цель." },
-  not_removable:   { label: "Снять нечем",        hint: "Тихого деинсталлятора нет: защищено системой либо установлено в чужой профиль." },
-  self_protected:  { label: "Это сам агент",      hint: "Целью оказался агент RoutineOps. Снос агента делается выводом из эксплуатации, а не удалением ПО." },
-  failed:          { label: "Ошибка удаления",    hint: "Деинсталлятор отработал с ошибкой." },
-  still_present:   { label: "Осталось на месте",  hint: "Деинсталлятор отчитался успехом, но ПО осталось в повторном снимке. Возможно, снос отложен до перезагрузки." },
+  removed: { label: "uninstallOutcome.removed", hint: "uninstallOutcome.removedHint" },
+  already_absent: { label: "uninstallOutcome.already_absent", hint: "uninstallOutcome.already_absentHint" },
+  target_changed: { label: "uninstallOutcome.target_changed", hint: "uninstallOutcome.target_changedHint" },
+  ambiguous: { label: "uninstallOutcome.ambiguous", hint: "uninstallOutcome.ambiguousHint" },
+  not_removable: { label: "uninstallOutcome.not_removable", hint: "uninstallOutcome.not_removableHint" },
+  self_protected: { label: "uninstallOutcome.self_protected", hint: "uninstallOutcome.self_protectedHint" },
+  failed: { label: "uninstallOutcome.failed", hint: "uninstallOutcome.failedHint" },
+  still_present: { label: "uninstallOutcome.still_present", hint: "uninstallOutcome.still_presentHint" },
 }
 
 export type AlertSeverity = "critical" | "high" | "medium" | "low"
@@ -318,6 +336,46 @@ export interface AdminAccessRequest {
   granted_at: string | null
   expires_at: string | null
   revoked_at: string | null
+  baseline_captured_at: string | null
+  changes_final_at: string | null
+  changes_completeness: string
+  changes_rebooted: boolean
+  changes_truncated: boolean
+  software_health: string
+  services_health: string
+  last_window_seq: number
+}
+
+export interface AdminSessionChange {
+  window_seq: number
+  kind: string
+  subject: string
+  display_name: string
+  identity_key: string
+  old_value: string
+  new_value: string
+  vendor: string
+  scope: string
+  attribution: string
+  attribution_reason: string
+  observed_at: string
+}
+
+export interface AdminAccessEvidence {
+  baseline_captured_at: string | null
+  changes_final_at: string | null
+  changes_summary: Record<string, unknown>
+  changes_completeness: string
+  changes_rebooted: boolean
+  changes_truncated: boolean
+  software_health: string
+  services_health: string
+  last_window_seq: number
+}
+
+export interface AdminSessionChangesResponse {
+  evidence: AdminAccessEvidence
+  changes: AdminSessionChange[]
 }
 
 export interface PolicyRule {
@@ -330,7 +388,10 @@ export interface PolicyRule {
   updated_at: string
 }
 
-export type ScriptPlatform = "macOS" | "Windows" | "linux"
+// Канон совпадает с политиками ПО: macOS | Windows | Linux. Раньше здесь была строчная
+// "linux", а /policies требовал "Linux" — две соседние ручки отвечали 400 на вариант
+// соседа. Сервер теперь принимает любой регистр и нормализует (canonicalPlatform).
+export type ScriptPlatform = "macOS" | "Windows" | "Linux"
 
 export interface Script {
   id: string
@@ -350,16 +411,24 @@ export function scriptPlatformFromFilename(name: string): ScriptPlatform {
 
 // agentPlatform мапит платформу скрипта в значение platform для задачи агента
 // (агент выбирает интерпретатор по нему: bash/powershell).
-export function agentPlatform(p: ScriptPlatform): "darwin" | "windows" | "linux" {
-  if (p === "Windows") return "windows"
-  if (p === "linux") return "linux"
+// Регистр сравнивается нечувствительно НАМЕРЕННО: канон теперь "Linux", но в БД до
+// одноразовой миграции остаются скрипты со старым значением "linux". При точном сравнении
+// такой скрипт уезжал бы на устройство как darwin — то есть Linux-скрипт с чужим
+// интерпретатором. Поймано тестом при смене канона.
+export function agentPlatform(p: ScriptPlatform | string): "darwin" | "windows" | "linux" {
+  const v = String(p).toLowerCase()
+  if (v === "windows") return "windows"
+  if (v === "linux") return "linux"
   return "darwin"
 }
 
 // deviceRunsScript решает, доступен ли скрипт для устройства с данной ОС.
 // Windows-устройство запускает только Windows/.ps1; macOS и Linux — shell-семейство
 // (macOS + linux), как «macOS & Linux» во Fleet.
-export function deviceRunsScript(deviceOS: string, platform: ScriptPlatform): boolean {
+// platform принимает и строку: до миграции данных в БД лежат скрипты со старым значением
+// "linux", и они обязаны оставаться доступными Linux- и macOS-устройствам (сравнение идёт
+// с "Windows", поэтому логика от регистра не зависит — а вот тип зависел бы).
+export function deviceRunsScript(deviceOS: string, platform: ScriptPlatform | string): boolean {
   const isWindows = /win/i.test(deviceOS)
   return isWindows ? platform === "Windows" : platform !== "Windows"
 }
@@ -400,6 +469,17 @@ export interface GroupSoftwareRule {
 
 // Заэскроенный секрет FileVault (Enterprise). В свободной редакции ручек нет вовсе —
 // GET отвечает 404, и карточка просто не показывает раздел.
+// Уязвимость, найденная на устройстве (Q-50). Поля — как их отдаёт
+// GET /devices/{id}/vulnerabilities: сама CVE плюс имя ПО, из-за которого она сюда
+// попала (одна CVE может прийти от разных пакетов).
+export interface Vulnerability {
+  cve_id: string
+  software_name: string
+  detected_at: string
+  description: string
+  cvss_score?: number | null
+}
+
 export interface EscrowRecord {
   id: string
   secret_type: string   // prk | secondary_cred
@@ -417,9 +497,63 @@ export interface EscrowReveal extends EscrowRecord {
   ciphertext_b64: string
 }
 
+// Интерактивный сеанс с рабочим столом (ADR-8). Только Enterprise: в open-core ручек
+// /screen-sessions нет вовсе, и вкладка это увидит по 404, а не по флагу редакции.
+export interface ScreenSession {
+  id: string
+  device_id: string
+  operator_id?: string
+  operator_email: string
+  reason: string
+  mode: string // unattended | consent_required
+  profile: string
+  status: string // requested | active | ended
+  end_reason?: string
+  end_detail?: string
+  task_id?: string
+  width?: number
+  height?: number
+  frames: number
+  bytes: number
+  has_recording: boolean
+  created_at: string
+  started_at?: string
+  ended_at?: string
+}
+
+// Коды завершения сеанса (§7 контракта). Ключ i18n, а не готовая строка: причина едет
+// кодом ровно затем, чтобы её можно было отрисовать на языке оператора, а не подстрокой
+// из агентского сообщения.
+export const SCREEN_END_REASON: Record<string, string> = {
+  USER_TERMINATED: "screenSession.end.userTerminated",
+  CONSENT_DENIED: "screenSession.end.consentDenied",
+  CONSENT_TIMEOUT: "screenSession.end.consentTimeout",
+  SESSION_LOCKED: "screenSession.end.sessionLocked",
+  USER_SWITCHED: "screenSession.end.userSwitched",
+  SESSION_DISCONNECTED: "screenSession.end.sessionDisconnected",
+  AGENT_UPDATE: "screenSession.end.agentUpdate",
+  MAX_DURATION: "screenSession.end.maxDuration",
+  SCOPE_VIOLATION: "screenSession.end.scopeViolation",
+  WAYLAND_UNSUPPORTED: "screenSession.end.waylandUnsupported",
+  NO_CONSOLE_USER: "screenSession.end.noConsoleUser",
+  SECURE_DESKTOP: "screenSession.end.secureDesktop",
+  SCREEN_RECORDING_DENIED: "screenSession.end.screenRecordingDenied",
+  PLATFORM_UNSUPPORTED: "screenSession.end.platformUnsupported",
+  BLANK_SCREEN: "screenSession.end.blankScreen",
+  WORKER_LOST: "screenSession.end.workerLost",
+  CAPTURE_FAILED: "screenSession.end.captureFailed",
+  SESSION_BUSY: "screenSession.end.sessionBusy",
+  VIEWER_GONE: "screenSession.end.viewerGone",
+  DEVICE_CUT_OFF: "screenSession.end.deviceCutOff",
+  OPERATOR_REVOKED: "screenSession.end.operatorRevoked",
+  AGENT_GONE: "screenSession.end.agentGone",
+  PROTOCOL_ERROR: "screenSession.end.protocolError",
+  RECORDING_FAILED: "screenSession.end.recordingFailed",
+}
+
 export const ESCROW_SECRET_TYPE: Record<string, string> = {
-  prk: "Ключ восстановления тома (PRK)",
-  secondary_cred: "Пароль сервисной учётной записи",
+  prk: "escrowSecret.prk",
+  secondary_cred: "escrowSecret.secondary_cred",
 }
 
 // Отсрочки перезагрузки. «Немедленно» — это 10 секунд, а не ноль: ноль на проводе
@@ -427,11 +561,11 @@ export const ESCROW_SECRET_TYPE: Record<string, string> = {
 // нулевое значение самым деструктивным вариантом. Ноль в списке не предлагаем вовсе —
 // отсрочка и есть защита несохранённой работы сотрудника.
 export const REBOOT_DELAYS = [
-  { value: 60, label: "Через минуту" },
-  { value: 300, label: "Через 5 минут" },
-  { value: 900, label: "Через 15 минут" },
-  { value: 3600, label: "Через час" },
-  { value: 10, label: "Немедленно (10 секунд)" },
+  { value: 60, label: "rebootDelay.m1" },
+  { value: 300, label: "rebootDelay.m5" },
+  { value: 900, label: "rebootDelay.m15" },
+  { value: 3600, label: "rebootDelay.h1" },
+  { value: 10, label: "rebootDelay.now" },
 ]
 
 // REBOOT_GROUP_MAX_DEVICES — тот же потолок, что и на сервере (rebootGroupMaxDevices).
@@ -442,11 +576,88 @@ export interface DeviceGroup {
   id: string
   name: string
   color: string
+  // Канал обновлений участников группы (Q-52). Устройство в beta-группе получает
+  // канареечный релиз раньше остального парка. Отсутствует у сервера до 065 —
+  // трактуем как stable, а не как «канал неизвестен»: единственный безопасный дефолт.
+  update_channel?: UpdateChannel
   created_at: string
   device_ids: string[]
   policy_ids: string[]
   software_rules: GroupSoftwareRule[]
 }
+
+export type UpdateChannel = "stable" | "beta"
+
+export const UPDATE_CHANNEL_LABEL: Record<UpdateChannel, string> = {
+  stable: "updateChannel.stable",
+  beta: "updateChannel.beta",
+}
+
+// VersionCount — сколько машин канала сидит на этой версии агента.
+export interface VersionCount {
+  version: string
+  count: number
+}
+
+// ChannelTarget — что канал отдаст агенту этой платформы прямо сейчас.
+export interface ChannelTarget {
+  os: string
+  arch: string
+  version: string
+}
+
+export interface ChannelRollout {
+  channel: UpdateChannel
+  groups: number
+  devices: number
+  versions: VersionCount[]
+  targets: ChannelTarget[]
+}
+
+export interface AgentReleaseRow {
+  os: string
+  arch: string
+  version: string
+  channel: UpdateChannel
+  sha256: string
+  created_at: string
+}
+
+export interface UpdateRollout {
+  channels: ChannelRollout[]
+  releases: AgentReleaseRow[]
+}
+
+// Отчёт соответствия (Q-62). Считает сервер: страница только показывает.
+export interface DeviceCompliance {
+  device_id: string
+  hostname: string
+  os: string
+  os_version: string
+  agent_version: string
+  update_channel: UpdateChannel
+  status: string
+  last_seen_at: string | null
+  vulnerable_count: number
+  unverified_count: number
+  compliant: boolean
+  reasons: string[]
+}
+
+export interface ComplianceSummary {
+  devices: number
+  compliant: number
+  non_compliant: number
+  by_reason: Record<string, number>
+  generated_at: string
+  stale_after_days: number
+}
+
+export interface ComplianceReport {
+  summary: ComplianceSummary
+  devices: DeviceCompliance[]
+}
+
 
 // PolicyDeviceCompliance — разрез одного софт-правила по устройствам
 // (GET /policies/{id}/compliance): кто в области действия, у кого что совпало.

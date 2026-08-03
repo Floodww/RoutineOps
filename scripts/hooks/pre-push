@@ -1,0 +1,128 @@
+#!/bin/sh
+# Pre-push гейт репозитория. Ставится `make hooks` (git config core.hooksPath).
+#
+# Зачем он есть. Enterprise-CI мёртв по биллингу, а пушим мы прямо в main —
+# то есть между «у меня локально собралось» и «это в main» не стоит НИЧЕГО.
+# Гейты гонялись руками, а руками их гоняют не всегда и не все три.
+#
+# Разделение с pre-commit намеренное: там только быстрое (gofmt, контракт),
+# потому что хук на каждый коммит обязан быть незаметным. Здесь — дорогое, но
+# редкое: пуш случается в разы реже коммита, и минуты здесь дешевле, чем
+# красный main, о котором узнаёшь от Тинки.
+#
+# 🔴 Отсутствующий инструмент — ПАДЕНИЕ, а не предупреждение. Гейт, который при
+# нехватке golangci-lint пишет «пропущено» и выходит нулём, — это ровно тот
+# «зелёный на бумаге», ради которого всё и затевалось.
+#
+# Обойти осознанно: SKIP_GATES=1 git push (лучше, чем --no-verify: последний
+# глушит хук целиком и молча, а этот способ виден в истории команд).
+set -e
+
+if [ -n "$SKIP_GATES" ]; then
+  echo "pre-push: гейты пропущены по SKIP_GATES — вы сами себе злобный буратино." >&2
+  exit 0
+fi
+
+# Хук наследует урезанный PATH (git из GUI/IDE), а инструменты проекта живут в
+# ~/go/bin. Та же причина, что в pre-commit.
+PATH="$PATH:${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+export PATH
+
+repo=$(git rev-parse --show-toplevel)
+cd "$repo"
+
+# Что уезжает. git отдаёт на stdin строки "<local_ref> <local_sha> <remote_ref> <remote_sha>".
+# Нулевой remote_sha = ветки на ремоуте ещё нет → сравнить не с чем, гоняем всё.
+zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
+changed=""
+all=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue          # удаление ветки — проверять нечего
+  if [ "$remote_sha" = "$zero" ]; then
+    all=1
+  else
+    changed="$changed
+$(git diff --name-only "$remote_sha" "$local_sha")"
+  fi
+done
+if [ -z "$changed" ] && [ "$all" = 0 ]; then
+  exit 0
+fi
+
+go_touched=$all
+web_touched=$all
+if echo "$changed" | grep -qE '\.go$|^go\.(mod|sum)$|^proto/'; then go_touched=1; fi
+if echo "$changed" | grep -qE '^web/'; then web_touched=1; fi
+
+fail=0
+run() { # run <название> <команда...>
+  name=$1; shift
+  printf 'pre-push: %s… ' "$name"
+  start=$(date +%s)
+  if out=$("$@" 2>&1); then
+    echo "ok ($(( $(date +%s) - start ))с)"
+  else
+    echo "ПАДЕНИЕ ($(( $(date +%s) - start ))с)"
+    echo "$out" | tail -40 | sed 's/^/  /' >&2
+    fail=1
+  fi
+}
+
+need() { # need <бинарь> <как поставить>
+  command -v "$1" >/dev/null 2>&1 && return 0
+  echo "pre-push: $1 не найден — гейт НЕ проверен. Поставить: $2" >&2
+  fail=1
+  return 1
+}
+
+if [ "$go_touched" = 1 ]; then
+  # Три гейта, и третий — отдельный: enterprise-код живёт под build-тегом, и
+  # обычный `golangci-lint run` его вообще не компилирует. Так уже уезжало.
+  # -p 1: пакеты идут по одному. Параллельные пакеты дерутся за общий тестовый
+  # контейнер Postgres и дают «connection refused» на ровном месте — а мигающий
+  # гейт хуже медленного: его начинают обходить, и он перестаёт быть гейтом.
+  run "go test ./internal/server/..." go test -p 1 ./internal/server/...
+  # 🔴 ОТДЕЛЬНЫЙ прогон под build-тегом, не дубль предыдущего. Тесты enterprise
+  # живут под `//go:build enterprise` — обычный `go test` их не КОМПИЛИРУЕТ, то есть
+  # весь платный набор (эскроу, лицензия, FileVault, OIDC, каталог, SIEM, SAML,
+  # область токена — на 02.08 это 34 файла) не гонялся вообще ни разу. Гейт был
+  # зелёным ровно потому, что ничего не проверял.
+  run "go test -tags enterprise ./internal/..." go test -p 1 -tags enterprise ./internal/...
+  if need golangci-lint "https://golangci-lint.run/welcome/install/"; then
+    run "golangci-lint (open-core)" golangci-lint run ./...
+    run "golangci-lint (enterprise)" golangci-lint run --build-tags enterprise ./...
+  fi
+  # Гейт редакции для удалённого стола (§9.17 docs/remote-desktop-contract.md): фича
+  # обязана отсутствовать во free-сборке и присутствовать в enterprise. Стоит здесь, а не
+  # «запускайте руками перед публикацией», потому что ровно так разъехался scan-free: он
+  # в хук не входил, и к 03.08 был красным с 31.07, а заметил это только сторонний прогон.
+  run "make check-remote-tags" make check-remote-tags
+fi
+
+# Спецификация. Сверяется всегда, а не только при правке .go: разойтись она может и
+# от правки самой спеки. Гард read-only и стоит секунду.
+# Расхождение читает не команда, а интегратор клиента, — и узнаёт о нём у себя.
+if [ -f scripts/check-openapi.sh ]; then
+  run "check-openapi.sh" bash scripts/check-openapi.sh
+fi
+
+if [ "$web_touched" = 1 ] && [ -d web ]; then
+  if need npm "https://nodejs.org/"; then
+    if [ ! -d web/node_modules ]; then
+      echo "pre-push: web/node_modules нет — гейты веба НЕ проверены. Почините: npm --prefix web ci" >&2
+      fail=1
+    else
+      # `npm run build` (не `tsc --noEmit`): в этом проекте noEmit — NO-OP из-за
+      # конфигурации проекта, он зеленеет на сломанных типах.
+      run "npm run build" npm --prefix web run build
+      run "npm run lint" npm --prefix web run lint
+      run "vitest" npm --prefix web run test
+    fi
+  fi
+fi
+
+if [ "$fail" != 0 ]; then
+  echo "" >&2
+  echo "pre-push: пуш остановлен. Осознанный обход: SKIP_GATES=1 git push" >&2
+fi
+exit $fail

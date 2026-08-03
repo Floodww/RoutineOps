@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { useNavigate, useParams } from "react-router-dom"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import api, { PolicyRule, PolicyDeviceCompliance, DeviceGroup } from "@/lib/api"
@@ -11,6 +12,7 @@ import { formatDistanceToNow } from "@/lib/time"
 // и что именно совпало в инвентаре. Для allowed-правил вердикта нет (агент их не
 // проверяет) — колонка показывает справку «установлено/нет».
 export default function PolicyDetail() {
+  const { t } = useTranslation()
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [rule, setRule] = useState<PolicyRule | null>(null)
@@ -35,7 +37,7 @@ export default function PolicyDetail() {
     }).catch(() => {
       if (stale) return
       setLoadFailed(true)
-      toast({ title: "Не удалось загрузить политику", variant: "destructive" })
+      toast({ title: t("policyDetail.failedToLoadThe2"), variant: "destructive" })
     }).finally(() => { if (!stale) setLoading(false) })
     // Группы нужны только для имени в подзаголовке — best-effort, не валит страницу.
     api.get<DeviceGroup[]>("/device-groups")
@@ -45,7 +47,7 @@ export default function PolicyDetail() {
   }, [id])
 
   if (loading) {
-    return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+    return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("policyDetail.loading")}</div>
   }
 
   const back = (
@@ -55,7 +57,7 @@ export default function PolicyDetail() {
       className="flex items-center gap-1.5 self-start text-sm text-muted-foreground hover:text-foreground transition-colors"
     >
       <ChevronLeft className="h-4 w-4" strokeWidth={2} />
-      Назад к политикам
+      {t("policies.backToPolicies")}
     </button>
   )
 
@@ -64,7 +66,7 @@ export default function PolicyDetail() {
       <div className="flex flex-col gap-5">
         {back}
         <div className="glass px-5 py-8 text-center text-sm text-muted-foreground">
-          {loadFailed ? "Не удалось загрузить политику — попробуй обновить страницу." : "Политика не найдена — возможно, она была удалена."}
+          {loadFailed ? t("policyDetail.failedToLoadThe") : t("policyDetail.policyNotFoundIt")}
         </div>
       </div>
     )
@@ -75,10 +77,10 @@ export default function PolicyDetail() {
   const pass = rows.length - fail
 
   const scope = rule.device_id
-    ? `Устройство ${rule.device_id.slice(0, 8)}`
+    ? t("policyDetail.deviceScope", { id: rule.device_id.slice(0, 8) })
     : rule.group_id
-      ? `Группа «${groups.find((g) => g.id === rule.group_id)?.name ?? rule.group_id.slice(0, 8)}»`
-      : "Глобальное — весь парк"
+      ? t("policyDetail.groupScope", { name: groups.find((g) => g.id === rule.group_id)?.name ?? rule.group_id.slice(0, 8) })
+      : t("policyDetail.globalTheWholeFleet")
 
   return (
     <div className="flex flex-col gap-5">
@@ -88,7 +90,7 @@ export default function PolicyDetail() {
         <div className="flex items-center gap-3 mb-1 flex-wrap">
           <h1 className="text-xl font-semibold font-mono text-foreground">{rule.software_name}</h1>
           <Badge variant={forbidden ? "destructive" : "success"}>
-            {forbidden ? "Запрещено" : "Разрешено"}
+            {forbidden ? t("policyDetail.denied") : t("policyDetail.allowed")}
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
@@ -96,13 +98,13 @@ export default function PolicyDetail() {
           {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && (
             <> · {rule.platforms.join(", ")}</>
           )}
-          {" · обновлено "}{formatDistanceToNow(rule.updated_at)}
+          {" · "}{t("policyDetail.updated")}{" "}{formatDistanceToNow(rule.updated_at)}
         </p>
 
         {/* Сводка. Для allowed-правил pass/fail не считаются — агент проверяет только forbidden. */}
         {forbidden ? (
           <div className="flex items-center gap-6 mt-3 text-[13px]">
-            <span className="text-soft">В охвате: <span className="text-foreground font-medium tabular-nums">{rows.length}</span></span>
+            <span className="text-soft">{t("policyDetail.inScope")} <span className="text-foreground font-medium tabular-nums">{rows.length}</span></span>
             <span className="text-emerald-600 dark:text-emerald-400">Pass: <span className="font-medium tabular-nums">{pass}</span></span>
             <span className={fail > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-muted-foreground"}>
               Fail: <span className="tabular-nums">{fail}</span>
@@ -110,26 +112,26 @@ export default function PolicyDetail() {
           </div>
         ) : (
           <p className="text-xs text-muted-foreground mt-3">
-            Правило-разрешение: агент его не проверяет. Ниже — справка, где это ПО установлено.
+            {t("policyDetail.allowRuleHint")}
           </p>
         )}
       </div>
 
       {rows.length === 0 ? (
         <div className="glass px-5 py-8 text-center text-sm text-muted-foreground">
-          Правило не действует ни на одно устройство.
-          {rule.group_id && " Проверь, что в группе есть устройства."}
-          {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && " Возможно, в парке нет устройств выбранных платформ."}
+          {t("policyDetail.noDevices")}
+          {rule.group_id && " " + t("policyDetail.checkGroup")}
+          {rule.platforms && rule.platforms.length > 0 && rule.platforms.length < 3 && " " + t("policyDetail.checkPlatforms")}
         </div>
       ) : (
         <div className="glass overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow className="border-t-0 hover:bg-transparent">
-                <TableHead className="text-xs">Устройство</TableHead>
-                <TableHead className="text-xs">ОС</TableHead>
-                <TableHead className="text-xs">Найдено в инвентаре</TableHead>
-                <TableHead className="text-xs">{forbidden ? "Вердикт" : "Установлено"}</TableHead>
+                <TableHead className="text-xs">{t("policyDetail.device")}</TableHead>
+                <TableHead className="text-xs">{t("policyDetail.os")}</TableHead>
+                <TableHead className="text-xs">{t("policyDetail.foundInTheInventory")}</TableHead>
+                <TableHead className="text-xs">{forbidden ? t("policyDetail.verdict") : t("policyDetail.installed")}</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -150,9 +152,9 @@ export default function PolicyDetail() {
                           {r.matched_scope === "user" && (
                             <span
                               className="ml-2 font-sans text-[11px] text-amber-600 dark:text-amber-500"
-                              title="Установлено в профиль пользователя: нарушение засчитано, но удалить нельзя — служба агента в чужой профиль не ходит."
+                              title={t("policyDetail.installedIntoAUser")}
                             >
-                              в профиле пользователя
+                              {t("policyDetail.inUserProfile")}
                             </span>
                           )}
                         </>
@@ -164,7 +166,7 @@ export default function PolicyDetail() {
                         {r.installed ? "Fail" : "Pass"}
                       </Badge>
                     ) : (
-                      <span className="text-xs text-muted-foreground">{r.installed ? "Да" : "Нет"}</span>
+                      <span className="text-xs text-muted-foreground">{r.installed ? t("policyDetail.yes") : t("policyDetail.no")}</span>
                     )}
                   </TableCell>
                   <TableCell className="px-4 py-3 w-8">

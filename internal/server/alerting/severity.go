@@ -71,6 +71,8 @@ var defaults = map[string]Severity{
 	"unauthorized_install":         SeverityMedium,
 	"unauthorized_settings_change": SeverityMedium,
 	"agent_unreachable":            SeverityLow,
+	// Улики сессии админ-прав не доехали: подотчётность прав сломана.
+	"admin_session_evidence_gap": SeverityHigh,
 }
 
 // UnknownSeverity — уровень для типа, которого нет в defaults.
@@ -94,6 +96,7 @@ var typeOrder = []string{
 	"unauthorized_install",
 	"unauthorized_settings_change",
 	"agent_unreachable",
+	"admin_session_evidence_gap",
 }
 
 // DefaultFor возвращает критичность по умолчанию для типа события. Регистр и

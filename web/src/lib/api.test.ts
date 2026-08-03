@@ -19,7 +19,10 @@ describe("scriptPlatformFromFilename", () => {
 describe("agentPlatform", () => {
   it("Windows → windows", () => expect(agentPlatform("Windows")).toBe("windows"))
   it("macOS → darwin", () => expect(agentPlatform("macOS")).toBe("darwin"))
-  it("linux → linux", () => expect(agentPlatform("linux")).toBe("linux"))
+  it("Linux → linux", () => expect(agentPlatform("Linux")).toBe("linux"))
+  // Обратная совместимость: до миграции данных в БД лежат скрипты со старым значением
+  // "linux", и они обязаны продолжать уезжать на устройство как linux, а не как darwin.
+  it("старое linux → linux", () => expect(agentPlatform("linux")).toBe("linux"))
 })
 
 describe("deviceRunsScript", () => {
@@ -34,6 +37,8 @@ describe("deviceRunsScript", () => {
     expect(deviceRunsScript("macOS 14", "Windows")).toBe(false)
   })
   it("linux-устройство — shell-семейство, не .ps1", () => {
+    expect(deviceRunsScript("Ubuntu 22.04", "Linux")).toBe(true)
+    // старое значение из БД до миграции
     expect(deviceRunsScript("Ubuntu 22.04", "linux")).toBe(true)
     expect(deviceRunsScript("Ubuntu 22.04", "macOS")).toBe(true)
     expect(deviceRunsScript("Ubuntu 22.04", "Windows")).toBe(false)

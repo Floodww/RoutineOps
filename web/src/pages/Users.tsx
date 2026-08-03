@@ -1,4 +1,5 @@
 import { useState, useEffect, FormEvent } from "react"
+import { useTranslation, Trans } from "react-i18next"
 import api from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { UserPlus, Trash2 } from "lucide-react"
 import { toast } from "@/lib/toast"
 import { useMe } from "@/lib/useMe"
+import { formatDate } from "@/lib/time"
 
 interface User {
   id: string
@@ -20,11 +22,13 @@ interface User {
 }
 
 const roleLabels: Record<string, string> = {
-  it_admin: "IT-администратор",
-  viewer: "Наблюдатель",
+  // Значения — КЛЮЧИ словаря (t() на уровне модуля недоступен).
+  it_admin: "users.roleAdminFull",
+  viewer: "users.roleViewer",
 }
 
 export default function Users() {
+  const { t } = useTranslation()
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState("")
@@ -44,7 +48,7 @@ export default function Users() {
   useEffect(() => {
     api.get<User[]>("/users")
       .then((r) => setUsers(r.data))
-      .catch(() => toast({ title: "Не удалось загрузить пользователей", variant: "destructive" }))
+      .catch(() => toast({ title: t("users.loadFailed"), variant: "destructive" }))
       .finally(() => setLoading(false))
   }, [])
 
@@ -56,7 +60,7 @@ export default function Users() {
       const r = await api.post<{ email_sent?: string; invite_url?: string }>(
         "/users/invite", { email: inviteEmail, role: inviteRole })
       if (r.data.email_sent === "true") {
-        toast({ title: `Приглашение отправлено на ${inviteEmail}`, variant: "success" })
+        toast({ title: t("users.inviteSent", { email: inviteEmail }), variant: "success" })
         setInviteOpen(false)
         setInviteEmail("")
         return
@@ -65,12 +69,12 @@ export default function Users() {
       // диалог НЕ закрываем, иначе ссылка потеряется.
       if (r.data.invite_url) {
         setInviteLink(r.data.invite_url)
-        toast({ title: "Письмо не отправлено — скопируйте ссылку-приглашение вручную", variant: "destructive" })
+        toast({ title: t("users.mailNotSent"), variant: "destructive" })
       } else {
-        toast({ title: "Приглашение создано, но письмо не отправлено и ссылка недоступна", variant: "destructive" })
+        toast({ title: t("users.inviteNoLink"), variant: "destructive" })
       }
     } catch {
-      toast({ title: "Не удалось отправить приглашение", variant: "destructive" })
+      toast({ title: t("users.inviteFailed"), variant: "destructive" })
     } finally {
       setInviteLoading(false)
     }
@@ -82,7 +86,7 @@ export default function Users() {
     try {
       await api.delete(`/users/${toDelete.id}`)
       setUsers((prev) => prev.filter((u) => u.id !== toDelete.id))
-      toast({ title: `${toDelete.email} удалён`, variant: "success" })
+      toast({ title: t("users.deleted", { email: toDelete.email }), variant: "success" })
       setToDelete(null)
     } catch (e) {
       // 409 — отказ по смыслу (последний администратор, попытка удалить себя), и
@@ -91,7 +95,7 @@ export default function Users() {
       const detail = (e as { response?: { status?: number; data?: unknown } })?.response
       const text = typeof detail?.data === "string" ? detail.data.trim() : ""
       toast({
-        title: detail?.status === 409 && text ? text : "Не удалось удалить пользователя",
+        title: detail?.status === 409 && text ? text : t("users.deleteFailed"),
         variant: "destructive",
       })
     } finally {
@@ -104,21 +108,21 @@ export default function Users() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-foreground">Пользователи</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("users.title")}</h1>
         <Button onClick={() => setInviteOpen(true)}>
           <UserPlus className="h-4 w-4 mr-2" strokeWidth={2} />
-          Пригласить
+          {t("users.inviteShort")}
         </Button>
       </div>
 
       <div className="glass">
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-3">
           <div>
-            <h2 className="text-[15px] font-semibold text-foreground">Учётные записи</h2>
-            <p className="text-xs text-muted-foreground">Доступ к панели управления</p>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("users.accounts")}</h2>
+            <p className="text-xs text-muted-foreground">{t("users.panelAccess")}</p>
           </div>
           <Input
-            placeholder="Поиск по email..."
+            placeholder={t("users.searchEmail")}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="max-w-[240px]"
@@ -130,23 +134,23 @@ export default function Users() {
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Имя</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">{t("users.name")}</TableHead>
               <TableHead className="px-5 text-xs font-medium text-muted-foreground">Email</TableHead>
-              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Роль</TableHead>
-              <TableHead className="px-5 text-xs font-medium text-muted-foreground">Добавлен</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">{t("users.role")}</TableHead>
+              <TableHead className="px-5 text-xs font-medium text-muted-foreground">{t("users.added")}</TableHead>
               {isAdmin && <TableHead className="px-5 w-px" />}
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Загрузка...</TableCell></TableRow>
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">{t("common.loading")}</TableCell></TableRow>
             ) : users.length === 0 ? (
-              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Пользователей нет</TableCell></TableRow>
+              <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">{t("users.empty")}</TableCell></TableRow>
             ) : (() => {
               const q = query.trim().toLowerCase()
               const filtered = q ? users.filter((u) => u.email.toLowerCase().includes(q)) : users
               if (filtered.length === 0) {
-                return <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">Ничего не найдено</TableCell></TableRow>
+                return <TableRow className="hover:bg-transparent"><TableCell colSpan={isAdmin ? 5 : 4} className="text-center text-xs text-muted-foreground py-8">{t("users.nothingFound")}</TableCell></TableRow>
               }
               return filtered.map((u) => (
               <TableRow key={u.id} className="hover:bg-transparent">
@@ -154,11 +158,11 @@ export default function Users() {
                 <TableCell className="px-5 py-3 text-[13px] text-soft">{u.email}</TableCell>
                 <TableCell className="px-5 py-3">
                   <Badge variant={u.role === "it_admin" ? "default" : "outline"}>
-                    {roleLabels[u.role] ?? u.role}
+                    {roleLabels[u.role] ? t(roleLabels[u.role]) : u.role}
                   </Badge>
                 </TableCell>
                 <TableCell className="px-5 py-3 text-xs text-muted-foreground tabular-nums">
-                  {new Date(u.created_at).toLocaleDateString("ru-RU")}
+                  {formatDate(u.created_at)}
                 </TableCell>
                 {/* Себе кнопку не рисуем: сервер такое удаление отвергает, и показывать
                     действие, которое заведомо откажет, — обман. */}
@@ -168,8 +172,8 @@ export default function Users() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        aria-label={`Удалить ${u.email}`}
-                        title="Удалить учётную запись"
+                        aria-label={t("users.deleteAria", { email: u.email })}
+                        title={t("users.deleteAccount")}
                         onClick={() => setToDelete(u)}
                         className="text-muted-foreground hover:text-destructive"
                       >
@@ -191,24 +195,26 @@ export default function Users() {
       <Dialog open={toDelete !== null} onOpenChange={(o) => { if (!o) setToDelete(null) }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Удалить учётную запись?</DialogTitle>
+            <DialogTitle>{t("users.deleteAccountQ")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
+            {/* Trans, а не t(): email внутри фразы обязан остаться выделенным, а в
+                английском он стоит на другом месте — склеивать строку из кусков
+                значило бы зашить в код русский порядок слов. */}
             <p className="text-sm text-soft">
-              <span className="font-medium text-foreground">{toDelete?.email}</span> потеряет доступ
-              к панели немедленно: активные сессии оборвутся, выпущенные им сервисные токены
-              перестанут работать.
+              <Trans
+                i18nKey="users.deleteWarn"
+                values={{ email: toDelete?.email }}
+                components={[<span className="font-medium text-foreground" />]}
+              />
             </p>
-            <p className="text-xs text-muted-foreground">
-              Записи журнала аудита и заявки на локальные права сохранятся — они переживают
-              удаление аккаунта.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("users.deleteKeeps")}</p>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setToDelete(null)} disabled={deleting}>
-                Отмена
+                {t("common.cancel")}
               </Button>
               <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-                {deleting ? "Удаление..." : "Удалить"}
+                {deleting ? t("users.deleting") : t("common.delete")}
               </Button>
             </div>
           </div>
@@ -218,7 +224,7 @@ export default function Users() {
       <Dialog open={inviteOpen} onOpenChange={(o) => { setInviteOpen(o); if (!o) { setInviteLink(null); setInviteEmail("") } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Пригласить пользователя</DialogTitle>
+            <DialogTitle>{t("users.invite")}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleInvite} className="space-y-4 pt-2">
             <div className="space-y-1.5">
@@ -233,31 +239,31 @@ export default function Users() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-soft">Роль</Label>
+              <Label className="text-soft">{t("users.role")}</Label>
               <Select
                 value={inviteRole}
                 onChange={setInviteRole}
                 options={[
-                  { value: "it_admin", label: "IT-администратор" },
-                  { value: "viewer", label: "Наблюдатель" },
+                  { value: "it_admin", label: t("users.roleAdminFull") },
+                  { value: "viewer", label: t("users.roleViewer") },
                 ]}
               />
             </div>
             {inviteLink && (
               <div className="space-y-1.5">
-                <Label className="text-soft">Ссылка-приглашение (передайте вручную)</Label>
+                <Label className="text-soft">{t("users.inviteLink")}</Label>
                 <Input readOnly value={inviteLink} onFocus={(e) => e.currentTarget.select()} />
                 <p className="text-xs text-muted-foreground">
-                  Письмо не отправлено (SMTP выключен или недоступен). Скопируйте ссылку и передайте пользователю.
+                  {t("users.smtpOff")}
                 </p>
               </div>
             )}
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setInviteOpen(false)}>
-                {inviteLink ? "Закрыть" : "Отмена"}
+                {inviteLink ? t("common.close") : t("common.cancel")}
               </Button>
               <Button type="submit" disabled={inviteLoading}>
-                {inviteLoading ? "Отправка..." : "Отправить приглашение"}
+                {inviteLoading ? t("users.sending") : t("users.sendInvite")}
               </Button>
             </div>
           </form>

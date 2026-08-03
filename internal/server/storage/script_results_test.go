@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -12,18 +13,18 @@ func TestListScriptResultsByPolicy(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 
-	scr, err := db.CreateScript(ctx, "res-script-"+uniq(t), "linux", "echo hi")
+	scr, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "res-script-"+uniq(t), "linux", "echo hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	pol, err := db.CreateScriptPolicy(ctx, "res-pol-"+uniq(t), scr.ID, "schedule", nil, nil)
+	pol, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, "res-pol-"+uniq(t), scr.ID, "schedule", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
 	dev := mustCreateDevice(t, db, "res-host-"+uniq(t), "linux")
 
 	// без результатов → пусто (не nil-паника)
-	got, err := db.ListScriptResultsByPolicy(ctx, pol.ID, 100)
+	got, err := db.ListScriptResultsByPolicy(ctx, tenancy.DefaultTenantID, pol.ID, 100)
 	if err != nil {
 		t.Fatalf("ListScriptResultsByPolicy (empty): %v", err)
 	}
@@ -45,7 +46,7 @@ func TestListScriptResultsByPolicy(t *testing.T) {
 		t.Fatalf("SaveScriptResult: %v", err)
 	}
 
-	got, err = db.ListScriptResultsByPolicy(ctx, pol.ID, 100)
+	got, err = db.ListScriptResultsByPolicy(ctx, tenancy.DefaultTenantID, pol.ID, 100)
 	if err != nil {
 		t.Fatalf("ListScriptResultsByPolicy: %v", err)
 	}

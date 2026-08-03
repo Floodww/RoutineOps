@@ -40,6 +40,15 @@ type Reporter struct {
 	// DeviceInfo.agent_version для видимости раскатки в админке.
 	Version string
 
+	// Capabilities — что этот бинарь УМЕЕТ сверх своей версии (например
+	// "screen_session"). Версии для гейта недостаточно: free-сборка той же версии
+	// физически не содержит удалённого стола — файлы вырезаны тегом, а не выключены
+	// флагом, и сервер, проверяющий только версию, поставил бы такому агенту сеанс.
+	//
+	// Заполняется проводкой в cmd/agent: сам пакет inventory про enterprise-фичи не
+	// знает и знать не должен.
+	Capabilities []string
+
 	// lastHash — хэш последнего успешно отправленного снимка. Если снимок не
 	// изменился, ReportInventory не шлём (last_seen всё равно держит heartbeat).
 	lastHash string
@@ -58,6 +67,23 @@ type Reporter struct {
 	// sendReport отправляет снимок на сервер. Поле (а не прямой dial+RPC), чтобы
 	// тесты могли подставить фейковую отправку. По умолчанию — dialAndSend.
 	sendReport func(ctx context.Context, report *pb.InventoryReport) (received bool, err error)
+
+	// buildReport — сбор снимка. Поле, а не прямой вызов build: полный обход
+	// реестра ARP и списка служб на живой Windows занимает секунды, и тесты
+	// расписания (первый отчёт, внеочередной сигнал, отмена контекста) платили
+	// за него реальным временем. На macOS они укладывались в свои две секунды и
+	// проходили, на Windows — падали, сообщая «Run не отправил первый отчёт»
+	// вместо «сбор дольше таймаута теста». Логика расписания от скорости
+	// коллектора не зависит и проверяться должна отдельно от неё.
+	buildReport func(version string) *pb.InventoryReport
+}
+
+// collect — сбор снимка: подменённый в тестах либо настоящий.
+func (r *Reporter) collect() *pb.InventoryReport {
+	if r.buildReport != nil {
+		return r.buildReport(r.Version)
+	}
+	return build(r.Version, r.Capabilities)
 }
 
 // Run шлёт отчёт через initialDelay, затем каждые Interval, пока ctx жив.
@@ -90,7 +116,7 @@ func (r *Reporter) Run(ctx context.Context) {
 }
 
 func (r *Reporter) reportOnce(ctx context.Context) {
-	report := build(r.Version)
+	report := r.collect()
 	h, err := hashReport(report)
 	if err != nil {
 		// Fail-open: без хэша шлём всегда — лишняя отправка честнее снимка,
@@ -213,7 +239,7 @@ func uninstallMethod(m collector.UninstallMethod) pb.UninstallMethod {
 // console_user и console_user_sid приходят из пакета admin (ConsoleIdentity)
 // одной атомарной парой, а не из collector: collector собирает факты о
 // железе/ОС, «кто за консолью» — знание admin-слоя.
-func build(agentVersion string) *pb.InventoryReport {
+func build(agentVersion string, capabilities []string) *pb.InventoryReport {
 	d := collector.Collect()
 	sw := collector.InstalledSoftware()
 	consoleUser, consoleUserSID := admin.ConsoleIdentity()
@@ -254,6 +280,7 @@ func build(agentVersion string) *pb.InventoryReport {
 			DomainJoined:   d.DomainJoined,
 			Tpm:            d.TPM,
 			SecureBoot:     d.SecureBoot,
+			Capabilities:   capabilities,
 		},
 		Software: items,
 	}

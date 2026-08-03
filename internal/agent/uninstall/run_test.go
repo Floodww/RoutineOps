@@ -11,6 +11,14 @@ import (
 
 // shell возвращает команду-обёртку той ОС, на которой идёт тест: сам runCommand
 // платформенно-нейтрален, и проверять его надо там же, где он будет работать.
+//
+// Скрипты пишутся ТОЛЬКО в пересечении диалектов: в cmd `;` командой не
+// разделяет (строка целиком уезжает в echo, код возврата остаётся нулевым, и
+// тест на ненулевой код молча проверял пустоту), разделитель — `&`. Ожидаемые
+// строки — ТОЛЬКО ASCII: `cmd /c echo` печатает в OEM-кодировке консоли, и
+// поиск кириллицы в UTF-8 не нашёл бы её никогда — красный тест на здоровом
+// продукте. Кириллицу из вывода деинсталлятора добивает SanitizeUTF8 уже на
+// уровне Result (uninstall.go), здесь проверяется захват как таковой.
 func shell(script string) (string, []string) {
 	if runtime.GOOS == "windows" {
 		return "cmd.exe", []string{"/c", script}
@@ -19,12 +27,12 @@ func shell(script string) (string, []string) {
 }
 
 func TestRunCommand_CapturesOutput(t *testing.T) {
-	name, args := shell("echo снято")
+	name, args := shell("echo removed-marker")
 	out, err := runCommand(context.Background(), name, args, nil)
 	if err != nil {
 		t.Fatalf("runCommand: %v (вывод %q)", err, out)
 	}
-	if !strings.Contains(out, "снято") {
+	if !strings.Contains(out, "removed-marker") {
 		t.Fatalf("вывод не захвачен: %q", out)
 	}
 }
@@ -33,7 +41,7 @@ func TestRunCommand_CapturesOutput(t *testing.T) {
 // причина отказа деинсталлятора неразбираема (1603 и 1605 требуют разных
 // действий), а без вывода непонятно, на чём он споткнулся.
 func TestRunCommand_ExitCodeAndOutputBothReported(t *testing.T) {
-	name, args := shell("echo подробности; exit 3")
+	name, args := shell("echo detail-marker & exit 3")
 	out, err := runCommand(context.Background(), name, args, nil)
 	if err == nil {
 		t.Fatal("ожидали ошибку на ненулевом коде возврата")
@@ -41,7 +49,7 @@ func TestRunCommand_ExitCodeAndOutputBothReported(t *testing.T) {
 	if !strings.Contains(err.Error(), "3") {
 		t.Errorf("в ошибке нет кода возврата: %v", err)
 	}
-	if !strings.Contains(out, "подробности") {
+	if !strings.Contains(out, "detail-marker") {
 		t.Errorf("вывод потерян при ошибке: %q", out)
 	}
 }

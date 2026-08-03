@@ -32,14 +32,17 @@ func fkBadRequest(w http.ResponseWriter, err error) bool {
 
 // listScriptResults — история результатов запусков script-политики (read-only, все роли).
 func (h *Handler) listScriptResults(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil {
-			limit = n
-		}
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
 	}
-	results, err := h.db.ListScriptResultsByPolicy(r.Context(), id, limit)
+	id := chi.URLParam(r, "id")
+	limitStr := r.URL.Query().Get("limit")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit == 0 {
+		limit = 100
+	}
+	results, err := h.db.ListScriptResultsByPolicy(r.Context(), tenantID, id, limit)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -51,7 +54,11 @@ func (h *Handler) listScriptResults(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listScriptPolicies(w http.ResponseWriter, r *http.Request) {
-	policies, err := h.db.ListScriptPolicies(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	policies, err := h.db.ListScriptPolicies(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -113,7 +120,11 @@ func (h *Handler) createScriptPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	policy, err := h.db.CreateScriptPolicy(r.Context(), req.Name, req.ScriptID, req.TriggerType,
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	policy, err := h.db.CreateScriptPolicy(r.Context(), tenantID, req.Name, req.ScriptID, req.TriggerType,
 		[]byte(req.ScheduleConfig), []byte(req.EventTriggerConfig))
 	if err != nil {
 		if errors.Is(err, storage.ErrDuplicateName) {
@@ -155,7 +166,11 @@ func (h *Handler) updateScriptPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	policy, err := h.db.UpdateScriptPolicy(r.Context(), id, req.Name, req.ScriptID, req.TriggerType,
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	policy, err := h.db.UpdateScriptPolicy(r.Context(), tenantID, id, req.Name, req.ScriptID, req.TriggerType,
 		[]byte(req.ScheduleConfig), []byte(req.EventTriggerConfig))
 	if err != nil {
 		if errors.Is(err, storage.ErrDuplicateName) {
@@ -180,7 +195,11 @@ func (h *Handler) updateScriptPolicy(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deleteScriptPolicy(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.db.DeleteScriptPolicy(r.Context(), id); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.DeleteScriptPolicy(r.Context(), tenantID, id); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -200,7 +219,11 @@ func (h *Handler) toggleScriptPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if err := h.db.ToggleScriptPolicy(r.Context(), id, req.Active); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.ToggleScriptPolicy(r.Context(), tenantID, id, req.Active); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -216,7 +239,11 @@ func (h *Handler) toggleScriptPolicy(w http.ResponseWriter, r *http.Request) {
 // ====== Device Groups ======
 
 func (h *Handler) listDeviceGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := h.db.ListDeviceGroups(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	groups, err := h.db.ListDeviceGroups(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -230,6 +257,22 @@ func (h *Handler) listDeviceGroups(w http.ResponseWriter, r *http.Request) {
 type createDeviceGroupRequest struct {
 	Name  string `json:"name"`
 	Color string `json:"color"` // '#rrggbb'; пусто = дефолт из схемы
+	// UpdateChannel — канал обновлений участников (065); пусто = stable из схемы.
+	UpdateChannel string `json:"update_channel"`
+}
+
+// normalizeUpdateChannel проверяет канал ЗДЕСЬ, а не только CHECK'ом в БД: опечатка
+// в канале должна быть понятным 400, а не 500 из глубины. Пустая строка проходит и
+// означает «не задан» (create → stable из схемы, update → не менять).
+func normalizeUpdateChannel(c string) (string, bool) {
+	c = strings.TrimSpace(c)
+	if c == "" {
+		return "", true
+	}
+	if !storage.ValidChannel(c) {
+		return "", false
+	}
+	return c, true
 }
 
 // hexColor — единственный допустимый формат цвета группы. Строгая проверка ЗДЕСЬ, а не
@@ -271,7 +314,16 @@ func (h *Handler) createDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "color must be #rrggbb", http.StatusBadRequest)
 		return
 	}
-	group, err := h.db.CreateDeviceGroup(r.Context(), req.Name, color)
+	channel, ok := normalizeUpdateChannel(req.UpdateChannel)
+	if !ok {
+		http.Error(w, "update_channel must be stable or beta", http.StatusBadRequest)
+		return
+	}
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	group, err := h.db.CreateDeviceGroup(r.Context(), tenantID, req.Name, color, channel)
 	if errors.Is(err, storage.ErrDuplicateGroupName) {
 		http.Error(w, "group with this name already exists", http.StatusConflict)
 		return
@@ -282,13 +334,14 @@ func (h *Handler) createDeviceGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
 	h.audit(r.Context(), claims.UserID, claims.Email, "create_device_group", "device_group", group.ID,
-		map[string]string{"name": req.Name, "color": group.Color})
+		map[string]string{"name": req.Name, "color": group.Color, "update_channel": group.UpdateChannel})
 	writeJSON(w, http.StatusCreated, group)
 }
 
 type updateDeviceGroupRequest struct {
-	Name  string `json:"name"`  // пусто = не менять
-	Color string `json:"color"` // пусто = не менять
+	Name          string `json:"name"`           // пусто = не менять
+	Color         string `json:"color"`          // пусто = не менять
+	UpdateChannel string `json:"update_channel"` // пусто = не менять
 }
 
 func (h *Handler) updateDeviceGroup(w http.ResponseWriter, r *http.Request) {
@@ -308,11 +361,20 @@ func (h *Handler) updateDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "color must be #rrggbb", http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" && color == "" {
+	channel, ok := normalizeUpdateChannel(req.UpdateChannel)
+	if !ok {
+		http.Error(w, "update_channel must be stable or beta", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" && color == "" && channel == "" {
 		http.Error(w, "nothing to update", http.StatusBadRequest)
 		return
 	}
-	group, err := h.db.UpdateDeviceGroup(r.Context(), id, req.Name, color)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	group, err := h.db.UpdateDeviceGroup(r.Context(), tenantID, id, req.Name, color, channel)
 	if errors.Is(err, storage.ErrDuplicateGroupName) {
 		http.Error(w, "group with this name already exists", http.StatusConflict)
 		return
@@ -326,14 +388,21 @@ func (h *Handler) updateDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
+	// Смена канала — событие выкатки: по журналу должно быть видно, КОГДА группа
+	// стала канареечной, иначе «почему эти пять машин уехали на другую версию»
+	// восстанавливать нечем.
 	h.audit(r.Context(), claims.UserID, claims.Email, "update_device_group", "device_group", group.ID,
-		map[string]string{"name": group.Name, "color": group.Color})
+		map[string]string{"name": group.Name, "color": group.Color, "update_channel": group.UpdateChannel})
 	writeJSON(w, http.StatusOK, group)
 }
 
 func (h *Handler) deleteDeviceGroup(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.db.DeleteDeviceGroup(r.Context(), id); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.DeleteDeviceGroup(r.Context(), tenantID, id); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -357,7 +426,11 @@ func (h *Handler) addGroupMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device_id is required", http.StatusBadRequest)
 		return
 	}
-	if err := h.db.AddDeviceToGroup(r.Context(), req.DeviceID, groupID); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.AddDeviceToGroup(r.Context(), tenantID, req.DeviceID, groupID); err != nil {
 		if fkBadRequest(w, err) {
 			return
 		}
@@ -373,7 +446,11 @@ func (h *Handler) addGroupMember(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeGroupMember(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "id")
 	deviceID := chi.URLParam(r, "deviceId")
-	if err := h.db.RemoveDeviceFromGroup(r.Context(), deviceID, groupID); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.RemoveDeviceFromGroup(r.Context(), tenantID, deviceID, groupID); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -398,7 +475,11 @@ func (h *Handler) assignPolicyToGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policy_id is required", http.StatusBadRequest)
 		return
 	}
-	if err := h.db.AssignPolicyToGroup(r.Context(), req.PolicyID, groupID); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.AssignPolicyToGroup(r.Context(), tenantID, req.PolicyID, groupID); err != nil {
 		if fkBadRequest(w, err) {
 			return
 		}
@@ -414,7 +495,11 @@ func (h *Handler) assignPolicyToGroup(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) unassignPolicyFromGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "id")
 	policyID := chi.URLParam(r, "policyId")
-	if err := h.db.UnassignPolicyFromGroup(r.Context(), policyID, groupID); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.UnassignPolicyFromGroup(r.Context(), tenantID, policyID, groupID); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -448,7 +533,11 @@ func (h *Handler) assignSoftwarePolicyToGroup(w http.ResponseWriter, r *http.Req
 		http.Error(w, "rule_type must be 'allowed' or 'forbidden'", http.StatusBadRequest)
 		return
 	}
-	rule, err := h.db.AssignSoftwarePolicyToGroup(r.Context(), groupID, req.SoftwareName, req.RuleType)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rule, err := h.db.AssignSoftwarePolicyToGroup(r.Context(), tenantID, groupID, req.SoftwareName, req.RuleType)
 	if err != nil {
 		if fkBadRequest(w, err) {
 			return
@@ -465,7 +554,11 @@ func (h *Handler) assignSoftwarePolicyToGroup(w http.ResponseWriter, r *http.Req
 func (h *Handler) unassignSoftwarePolicyFromGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "id")
 	ruleID := chi.URLParam(r, "ruleId")
-	if err := h.db.UnassignSoftwarePolicyFromGroup(r.Context(), groupID, ruleID); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.UnassignSoftwarePolicyFromGroup(r.Context(), tenantID, groupID, ruleID); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

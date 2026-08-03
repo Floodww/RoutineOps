@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -31,7 +32,11 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := parsePage(r)
-	entries, total, err := h.db.ListAuditLog(r.Context(), storage.AuditFilter{
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	entries, total, err := h.db.ListAuditLog(r.Context(), tenantID, storage.AuditFilter{
 		Action: q.Get("action"),
 		Who:    q.Get("who"),
 		From:   from,
@@ -61,8 +66,13 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 // без единого административного действия — и сверка головы с внешней копией
 // перестала бы что-либо значить.
 func (h *Handler) verifyAuditChain(w http.ResponseWriter, r *http.Request) {
-	st, err := h.db.VerifyAuditChain(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	st, err := h.db.VerifyAuditChain(r.Context(), tenantID)
 	if err != nil {
+		slog.Error("audit: verify chain", "tenant_id", tenantID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

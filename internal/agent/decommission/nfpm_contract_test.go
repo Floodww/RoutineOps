@@ -13,7 +13,8 @@ import (
 // по-прежнему возвращал бы машину в парк. Тест без build-тега: сверка на любом
 // `go test`, не только на Linux.
 func TestNfpmContract(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "build", "nfpm", "nfpm.yaml")
+	root := skipOutsideRepo(t)
+	path := filepath.Join(root, "build", "nfpm", "nfpm.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("не прочитать nfpm.yaml %s: %v", path, err)

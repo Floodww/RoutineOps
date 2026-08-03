@@ -18,12 +18,14 @@ import (
 // maxBinarySize — потолок на скачиваемый бинарь (защита от раздувания памяти).
 const maxBinarySize = 200 << 20 // 200 МБ
 
-// newHTTPClient строит HTTP-клиент, доверяющий CA из caFile (manifest/бинарь
+// NewHTTPClient строит HTTP-клиент, доверяющий CA из caFile (manifest и бинарь
 // раздаёт тот же сервер, что и mTLS — с приватной CA). Подлинность бинаря всё
 // равно гарантирует ed25519-подпись; CA нужен лишь чтобы TLS-верификация
 // эндпоинта прошла. Пустой caFile → системные корни (для публичного хоста).
+// Экспортирован, потому что тем же клиентом ходит обвязка эскроу: подписанного
+// получателя отдаёт тот же сервер и та же приватная CA.
 // Возвращает (клиент, ok): ok=false если CA задан, но не загрузился.
-func newHTTPClient(caFile string) (*http.Client, bool) {
+func NewHTTPClient(caFile string) (*http.Client, bool) {
 	if caFile == "" {
 		return http.DefaultClient, true
 	}

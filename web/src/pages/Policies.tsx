@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { useNavigate } from "react-router-dom"
 import { Trash2, ChevronLeft } from "lucide-react"
 import api, { PolicyRule, SoftwarePolicyCompliance } from "@/lib/api"
@@ -16,21 +17,22 @@ const PLATFORMS = ["macOS", "Windows", "Linux"] as const
 // PassFail — счётчики соответствия правилу. Пока агрегация не приехала, показываем «…»,
 // а не нули: ноль нарушителей и «ещё не посчитали» — разные вещи.
 function PassFail({ c }: { c?: SoftwarePolicyCompliance }) {
+  const { t } = useTranslation()
   if (!c) return <span className="text-muted-foreground text-xs">…</span>
   if (!c.checked) {
     return (
-      <span className="text-muted-foreground text-xs" title="Правило-разрешение: агент его не проверяет">
+      <span className="text-muted-foreground text-xs" title={t("policies.anAllowRuleThe")}>
         —
       </span>
     )
   }
   return (
     <span className="flex items-center gap-2 text-sm tabular-nums">
-      <span className="text-emerald-600 dark:text-emerald-400" title="Устройств соответствует правилу">
+      <span className="text-emerald-600 dark:text-emerald-400" title={t("policies.devicesMatchingTheRule")}>
         {c.pass}
       </span>
       <span className="text-muted-foreground/40">/</span>
-      <span className={c.fail > 0 ? "text-red-600 dark:text-red-400 font-semibold" : "text-muted-foreground"} title="Устройств нарушает правило">
+      <span className={c.fail > 0 ? "text-red-600 dark:text-red-400 font-semibold" : "text-muted-foreground"} title={t("policies.devicesViolatingTheRule")}>
         {c.fail}
       </span>
     </span>
@@ -38,6 +40,7 @@ function PassFail({ c }: { c?: SoftwarePolicyCompliance }) {
 }
 
 export default function Policies() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [rules, setRules] = useState<PolicyRule[]>([])
   const [compliance, setCompliance] = useState<Record<string, SoftwarePolicyCompliance>>({})
@@ -54,7 +57,7 @@ export default function Policies() {
       const r = await api.get<PolicyRule[]>("/policies")
       setRules(r.data ?? [])
     } catch {
-      toast({ title: "Не удалось загрузить политики", variant: "destructive" })
+      toast({ title: t("policies.failedToLoadPolicies"), variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -91,9 +94,9 @@ export default function Policies() {
       await api.delete(`/policies/${id}`)
       setRules((prev) => prev.filter((r) => r.id !== id))
       setConfirmDelete(null)
-      toast({ title: "Политика удалена", variant: "success" })
+      toast({ title: t("policies.policyDeleted"), variant: "success" })
     } catch {
-      toast({ title: "Не удалось удалить политику", variant: "destructive" })
+      toast({ title: t("policies.failedToDeleteThe"), variant: "destructive" })
     }
   }
 
@@ -110,21 +113,21 @@ export default function Policies() {
           className="flex items-center gap-1.5 self-start text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ChevronLeft className="h-4 w-4" strokeWidth={2} />
-          Назад к политикам
+          {t("policies.backToPolicies")}
         </button>
 
-        <h1 className="text-xl font-semibold text-foreground">Новая политика</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("policies.newPolicy")}</h1>
 
         <div className="glass flex flex-col gap-6 px-5 py-[18px]">
           {/* Condition editor – Fleet-style */}
           <div>
-            <Label className="text-sm font-medium text-soft mb-2 block">Условие</Label>
+            <Label className="text-sm font-medium text-soft mb-2 block">{t("policies.condition")}</Label>
             <div className="rounded-md border border-input bg-transparent overflow-hidden font-mono text-sm focus-within:ring-1 focus-within:ring-ring">
               <div className="flex items-start gap-3 px-4 py-3">
                 <span className="text-xs text-muted-foreground select-none mt-px">1</span>
                 <input
                   id="policy-condition"
-                  aria-label="Имя программы"
+                  aria-label={t("policies.programName")}
                   className="flex-1 bg-transparent outline-none text-foreground placeholder:text-muted-foreground"
                   placeholder="chrome"
                   value={form.software_name}
@@ -135,29 +138,31 @@ export default function Policies() {
             {/* Раньше placeholder показывал синтаксис `software_name = "chrome"` — его
                 вводили буквально, правило молча не матчилось ни с чем. */}
             <p className="text-xs text-muted-foreground mt-1.5">
-              Подстрока имени программы без учёта регистра: «chrome» поймает и Google Chrome, и Chromium.
+              {t("policies.nameHint")}
             </p>
           </div>
 
           {/* Rule type toggle */}
           <div>
-            <Label className="text-sm font-medium text-soft mb-2 block">Тип правила</Label>
+            <Label className="text-sm font-medium text-soft mb-2 block">{t("policies.ruleType")}</Label>
             <div className="flex gap-2">
-              {(["allowed", "forbidden"] as const).map((t) => (
+              {/* Переменная называется rule, а не t: t() из useTranslation
+                  закрылась бы параметром цикла. */}
+              {(["allowed", "forbidden"] as const).map((rule) => (
                 <button
                   type="button"
-                  key={t}
-                  onClick={() => setForm({ ...form, rule_type: t })}
+                  key={rule}
+                  onClick={() => setForm({ ...form, rule_type: rule })}
                   className={
                     "px-3 py-1.5 rounded-md text-sm border transition-colors " +
-                    (form.rule_type === t
-                      ? t === "allowed"
+                    (form.rule_type === rule
+                      ? rule === "allowed"
                         ? "bg-emerald-600/20 border-emerald-600/50 text-emerald-600 dark:text-emerald-400"
                         : "bg-red-600/20 border-red-600/50 text-red-500 dark:text-red-400"
                       : "border-border text-muted-foreground hover:text-foreground")
                   }
                 >
-                  {t === "allowed" ? "Разрешено" : "Запрещено"}
+                  {rule === "allowed" ? t("policies.allowed") : t("policies.denied")}
                 </button>
               ))}
             </div>
@@ -165,7 +170,7 @@ export default function Policies() {
 
           {/* Compatible with */}
           <div>
-            <Label className="text-sm font-medium text-soft mb-2.5 block">Совместимо с</Label>
+            <Label className="text-sm font-medium text-soft mb-2.5 block">{t("policies.compatibleWith")}</Label>
             <div className="flex items-center gap-5">
               {PLATFORMS.map((p) => {
                 const on = platforms[p]
@@ -188,9 +193,9 @@ export default function Policies() {
 
           {/* Optional device scope */}
           <div>
-            <Label className="text-sm font-medium text-soft mb-2 block">Устройство <span className="text-muted-foreground font-normal">(необязательно)</span></Label>
+            <Label className="text-sm font-medium text-soft mb-2 block">{t("policies.device")} <span className="text-muted-foreground font-normal">{t("policies.optional")}</span></Label>
             <Input
-              placeholder="UUID устройства — пусто = глобальное"
+              placeholder={t("policies.deviceUuidEmptyGlobal")}
               value={form.device_id}
               onChange={(e) => setForm({ ...form, device_id: e.target.value })}
               className="max-w-sm"
@@ -203,14 +208,14 @@ export default function Policies() {
               onClick={addRule}
               disabled={submitting || !form.software_name || !Object.values(platforms).some(Boolean)}
             >
-              {submitting ? "Сохранение..." : "Сохранить"}
+              {submitting ? t("policies.saving") : t("policies.save")}
             </Button>
             <button
               type="button"
               onClick={() => setCreating(false)}
               className="text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
-              Отмена
+              {t("common.cancel")}
             </button>
           </div>
         </div>
@@ -221,15 +226,15 @@ export default function Policies() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-foreground">Политики</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("policies.policies")}</h1>
         <Button size="sm" onClick={() => setCreating(true)}>
-          + Новая политика
+          {t("policies.newPolicyPlus")}
         </Button>
       </div>
 
       <div className="glass flex flex-wrap items-center gap-3 px-5 py-4">
         <Input
-          placeholder="Поиск по программе..."
+          placeholder={t("policies.searchByProgram")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="max-w-sm"
@@ -237,18 +242,18 @@ export default function Policies() {
       </div>
 
       {loading ? (
-        <p className="text-muted-foreground text-sm">Загрузка...</p>
+        <p className="text-muted-foreground text-sm">{t("policies.loading")}</p>
       ) : (
         <div className="glass overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow className="border-t-0 hover:bg-transparent">
-                <TableHead className="text-xs">Программа</TableHead>
-                <TableHead className="text-xs">Тип</TableHead>
-                <TableHead className="text-xs" title="Устройств соответствует / нарушает">Pass / Fail</TableHead>
-                <TableHead className="text-xs" title="Устройств в области действия правила">Охват</TableHead>
-                <TableHead className="text-xs">Устройство</TableHead>
-                <TableHead className="text-xs">Обновлено</TableHead>
+                <TableHead className="text-xs">{t("policies.program")}</TableHead>
+                <TableHead className="text-xs">{t("policies.type")}</TableHead>
+                <TableHead className="text-xs" title={t("policies.devicesMatchingViolating")}>Pass / Fail</TableHead>
+                <TableHead className="text-xs" title={t("policies.devicesInTheRule")}>{t("policies.scope")}</TableHead>
+                <TableHead className="text-xs">{t("policies.device")}</TableHead>
+                <TableHead className="text-xs">{t("policies.updated")}</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -260,7 +265,7 @@ export default function Policies() {
                   return (
                     <TableRow className="hover:bg-transparent">
                       <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
-                        {rules.length === 0 ? "Нет политик" : "Ничего не найдено"}
+                        {rules.length === 0 ? t("policies.noPolicies") : t("policies.nothingFound")}
                       </TableCell>
                     </TableRow>
                   )
@@ -279,7 +284,7 @@ export default function Policies() {
                   </TableCell>
                   <TableCell className="px-4 py-3">
                     <Badge variant={r.rule_type === "allowed" ? "success" : "destructive"}>
-                      {r.rule_type === "allowed" ? "Разрешено" : "Запрещено"}
+                      {r.rule_type === "allowed" ? t("policies.allowed") : t("policies.denied")}
                     </Badge>
                   </TableCell>
                   <TableCell className="px-4 py-3">
@@ -290,7 +295,7 @@ export default function Policies() {
                   </TableCell>
                   <TableCell className="px-4 py-3 text-muted-foreground text-xs font-mono">
                     {/* group_id раньше игнорировался — групповое правило выглядело как глобальное */}
-                    {r.device_id ? r.device_id.slice(0, 8) : r.group_id ? "Группа" : "Глобальное"}
+                    {r.device_id ? r.device_id.slice(0, 8) : r.group_id ? t("policies.group") : t("policies.global")}
                   </TableCell>
                   <TableCell className="px-4 py-3 text-xs text-muted-foreground">
                     {formatDistanceToNow(r.updated_at)}
@@ -315,9 +320,9 @@ export default function Policies() {
       <ConfirmDialog
         open={!!confirmDelete}
         onOpenChange={(o) => !o && setConfirmDelete(null)}
-        title="Удалить политику?"
-        description={confirmDelete ? `Правило для «${confirmDelete.software_name}» будет удалено.` : ""}
-        confirmLabel="Удалить"
+        title={t("policies.deleteThePolicy")}
+        description={confirmDelete ? t("policies.deleteWarn", { name: confirmDelete.software_name }) : ""}
+        confirmLabel={t("policies.delete")}
         destructive
         onConfirm={() => { if (confirmDelete) deleteRule(confirmDelete.id) }}
       />

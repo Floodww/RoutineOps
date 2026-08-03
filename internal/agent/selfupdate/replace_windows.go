@@ -53,9 +53,14 @@ func replaceExecutable(data []byte) error {
 
 	// Убиваем другие экземпляры (например, tray в юзер-сессии), чтобы они
 	// отпустили блокировку файла .old от прошлого обновления.
+	//
+	// Кроме тех, чьё завершение обязано быть штатным: захватчик экрана запускается ТЕМ
+	// ЖЕ exe и под /IM попадает гарантированно, а /F — это TerminateProcess без
+	// финализации записи сеанса и без события (§9.1 контракта удалённого стола).
 	baseExe := filepath.Base(exe)
-	_ = exec.Command("taskkill", "/F", "/IM", baseExe, "/FI", fmt.Sprintf("PID ne %d", os.Getpid())).Run()
-	_ = exec.Command("taskkill", "/F", "/IM", baseExe+".old", "/FI", fmt.Sprintf("PID ne %d", os.Getpid())).Run()
+	keep := protectedPIDs()
+	_ = exec.Command("taskkill", taskkillArgs(baseExe, os.Getpid(), keep)...).Run()
+	_ = exec.Command("taskkill", taskkillArgs(baseExe+".old", os.Getpid(), keep)...).Run()
 
 	_ = os.Remove(old) // подчистить .old от прошлого обновления (если уже не занят)
 

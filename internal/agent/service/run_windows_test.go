@@ -51,9 +51,19 @@ func TestExecuteWorkExitCodeCrashes(t *testing.T) {
 		os.Exit(0)
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestExecuteWorkExitCodeCrashes")
+	// Путь берём из os.Executable, а не из os.Args[0]: там лежит строка запуска, и
+	// при запуске из текущего каталога («t.exe») Go отказывается её исполнять —
+	// «cannot run executable found relative to current directory». `go test` в
+	// репозитории даёт абсолютный путь и это прячет, а тест-бинарь, перенесённый
+	// на живую Windows, падал бы с диагнозом «Execute вернулся штатно», хотя
+	// дочерний процесс просто не запустился.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cmd := exec.Command(self, "-test.run=TestExecuteWorkExitCodeCrashes")
 	cmd.Env = append(os.Environ(), childWorkErrEnv+"=1")
-	err := cmd.Run()
+	err = cmd.Run()
 
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {

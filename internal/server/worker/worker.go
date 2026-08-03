@@ -3,9 +3,9 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +39,22 @@ func NewClient(redisAddr string) *asynq.Client {
 	return asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})
 }
 
+// Enqueue ставит доставку задачи в очередь.
+//
+// 🔴 Идентификатор job'а УНИКАЛЕН на попытку, а не равен taskID. Раньше стоял
+// asynq.TaskID(taskID) «для дедупа», а ErrTaskIDConflict глушился в nil — и это
+// давало вечных зомби: исчерпав MaxRetry, asynq АРХИВИРУЕТ job, продолжая держать
+// его TaskID. Реконсайлер pending-задач после этого каждую минуту звал Enqueue,
+// получал конфликт, считал его успехом и молчал; архивный job не исполнялся, строка
+// задачи навсегда оставалась pending, а FailStaleAckedTasks её не подбирает (он про
+// 'acked'). Дедуп, задуманный оптимизацией, глушил единственную страховку доставки.
+// Поймано полевым e2e 30.07: перезагрузка не доехала, потому что устройство ушло в
+// ребут ПОСРЕДИ доставки, ретраи исчерпались, и дальше задача висела мёртвой.
+//
+// Дедуп не нужен для корректности, он был только экономией: повторную доставку
+// глушат два уже существующих рубежа — ProcessTask выходит no-op'ом, если задача уже
+// не pending, и агент держит персистентный seen-set по task_id. Цена уникального id —
+// лишние дешёвые job'ы по пока-не-доставленным задачам (тик реконсайлера — минута).
 func Enqueue(client *asynq.Client, taskID string) error {
 	if client == nil {
 		return nil
@@ -50,11 +66,8 @@ func Enqueue(client *asynq.Client, taskID string) error {
 	_, err = client.Enqueue(asynq.NewTask(TypeDeliverTask, payload),
 		asynq.MaxRetry(10),
 		asynq.Queue("default"),
-		asynq.TaskID(taskID), // дедуп: повторный enqueue того же таска — no-op
+		asynq.TaskID(taskID+":"+strconv.FormatInt(time.Now().UnixNano(), 36)),
 	)
-	if errors.Is(err, asynq.ErrTaskIDConflict) {
-		return nil
-	}
 	return err
 }
 
@@ -73,6 +86,16 @@ func (h *Handler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	if err := json.Unmarshal(t.Payload(), &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
+
+	// Скоуп тенанта по самой задаче (054): фоновой доставке его больше взять негде, а
+	// без него КАЖДЫЙ запрос ниже уходит в пул, где на соединении мог остаться пустой
+	// routineops.tenant_id, и падает 22P02. Именно это и держало командный канал
+	// мёртвым на проде 30.07 при живых heartbeat и инвентаре.
+	ctx, finish, err := h.db.BindTenantForTask(ctx, p.TaskID)
+	if err != nil {
+		return fmt.Errorf("bind tenant for task %s: %w", p.TaskID, err)
+	}
+	defer finish(true)
 
 	task, err := h.db.GetTask(ctx, p.TaskID)
 	if err != nil {
@@ -168,6 +191,18 @@ func (h *Handler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 			UninstallMethod: uninstallMethodFromString(task.Uninstall.Method),
 			Scope:           task.Uninstall.Scope,
 			Reason:          task.Uninstall.Reason,
+		}
+	}
+	if task.TaskType == "filevault_provision" {
+		// Повод для диалога сотруднику лежит в reboot_reason: колонка появилась под
+		// ребут, но это ровно то же «текст, который увидит человек», и заводить
+		// третью колонку под ту же строку смысла нет (см. CreateFileVaultProvisionTask).
+		//
+		// request_id = task.ID: задача одна на устройство, передоставка того же id
+		// не должна открывать сотруднику второй диалог.
+		pbTask.FilevaultProvision = &pb.FileVaultProvisionCommand{
+			RequestId: task.ID,
+			Reason:    task.RebootReason,
 		}
 	}
 	sent := h.registry.Send(cn, pbTask)

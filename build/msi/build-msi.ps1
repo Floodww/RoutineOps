@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Собирает (и при наличии серта подписывает) MSI-установщик MDM-агента из WiX-исходника.
 
@@ -62,12 +62,31 @@ if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
 wix extension add -g WixToolset.Util.wixext/4.0.5 2>$null | Out-Null
 
 Write-Host "Сборка MSI ($Version)..."
+# Отметка времени ДО сборки: по ней отличается свежесобранный MSI от лежавшего
+# здесь с прошлого раза. Без неё провалившаяся сборка «подтверждается» старым
+# файлом — а он ещё и уедет в релиз как новый.
+$before = (Get-Item $Out -ErrorAction SilentlyContinue).LastWriteTimeUtc
+
 wix build "$PSScriptRoot/mdm-agent.wxs" `
   -d Version=$Version `
   -ext WixToolset.Util.wixext `
   -arch x64 `
   -o $Out
-Write-Host "MSI собран: $Out"
+
+# Провал wix обязан валить скрипт. Раньше его код возврата не проверялся вовсе:
+# при ошибке WIX0103 (относительные пути в .wxs не разрешились — так бывает,
+# когда скрипт запущен не из своего каталога) на экран уходило «MSI собран», код
+# возврата был нулевой, и упаковать в релиз можно было прошлый MSI, приняв его за
+# свежий. Проверяем и код, и что файл действительно перезаписан этим запуском.
+if ($LASTEXITCODE -ne 0) { throw "wix build завершился с кодом $LASTEXITCODE — MSI не собран." }
+$built = Get-Item $Out -ErrorAction SilentlyContinue
+if (-not $built) { throw "wix build отчитался успехом, но файла $Out нет." }
+if ($before -and $built.LastWriteTimeUtc -le $before) {
+  throw "Файл $Out не обновлён этой сборкой (остался от $($built.LastWriteTime)) — упаковали бы старый MSI."
+}
+Write-Host ("MSI собран: " + $Out)
+Write-Host ("  версия:  " + $Version)
+Write-Host ("  sha256:  " + (Get-FileHash $Out -Algorithm SHA256).Hash)
 
 # Подпись (опционально). Подход согласован с gen-win-codesign.ps1.
 if ($PfxPath) {

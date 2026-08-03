@@ -9,9 +9,11 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/notifier"
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
-	"github.com/Floodww/RoutineOps/internal/server/worker"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"github.com/hibiken/asynq"
+
+	"github.com/Floodww/RoutineOps/internal/server/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -44,9 +46,17 @@ type Gateway struct {
 	// escrowSvc — enterprise-шов FileVault recovery-escrow (internal/server/escrow).
 	// nil в open-core → EscrowRecoveryKey отвечает Unimplemented. См. escrow_seam.go.
 	escrowSvc EscrowService
+	// inventoryHook — enterprise-обработка свежего инвентаря (пересчёт CVE).
+	// nil в open-core: см. inventory_seam.go.
+	inventoryHook InventoryHook
+	// screenSvc — enterprise-шов удалённого рабочего стола (ADR-8).
+	screenSvc ScreenService
 	// lockVault — enterprise-шов вооружения FileVault-лока (ADR-F24).
 	// nil в open-core → FetchLockSecrets отвечает Unimplemented. См. lockvault_seam.go.
 	lockVault LockSecretVault
+	// publicWebURL — база для ссылки на бинарь в манифесте обновления (Q-52).
+	// Ставится SetPublicWebURL из composition-root. См. update_manifest.go.
+	publicWebURL string
 }
 
 func New(db *storage.DB, reg *registry.Registry, asynqClient *asynq.Client, logger *slog.Logger, bot Notifier) *Gateway {
@@ -240,9 +250,13 @@ func (g *Gateway) reportOutboxHealth(ctx context.Context, fingerprint, deviceID 
 	}
 	if created && g.bot != nil {
 		hostname, _ := g.db.GetDeviceHostname(ctx, dbID)
-		text := notifier.HTMLf("🕳 <b>Агент ослеп: очередь отчётов недоступна</b>\nУстройство: <code>%s</code>\nОтчёты, статусы лока и security-события с него НЕ доходят — тишина больше не значит «всё спокойно».\nПричина: %s",
-			hostname, detail)
-		go g.bot.NotifyITAdmins(context.Background(), text)
+		// NotifyAlert, не NotifyITAdmins: иначе порог users.notify_min_severity
+		// (миграция 041) обходится — алерт high уходил бы даже тем, кто просил
+		// только critical. Тот же путь, что у lock_tamper / filevault_*.
+		sev := alerting.DefaultFor("outbox_unavailable")
+		text := notifier.HTMLf("%s <b>Агент ослеп: очередь отчётов недоступна</b>\nКритичность: %s\nУстройство: <code>%s</code>\nОтчёты, статусы лока и security-события с него НЕ доходят — тишина больше не значит «всё спокойно».\nПричина: %s",
+			alerting.Emoji(sev), alerting.Label(sev), hostname, detail)
+		go g.bot.NotifyAlert(context.Background(), sev, text)
 	}
 }
 
@@ -254,6 +268,12 @@ func (g *Gateway) AckTaskReceived(ctx context.Context, req *pb.TaskReceivedAck) 
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
+
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		g.logger.Error("ack task: device lookup", "err", err)
@@ -276,6 +296,12 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+
+	tenantID, err := g.tenantForFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
+	}
+	ctx = storage.WithTenantID(ctx, tenantID)
 
 	if req.DeviceInfo == nil {
 		return &pb.InventoryAck{Received: false}, nil
@@ -323,6 +349,22 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 		return nil, status.Errorf(codes.Internal, "store inventory: %v", err)
 	}
 
+	// Пересчёт уязвимостей — на СВЕЖЕМ инвентаре, иначе матчер CVE не запускается
+	// никогда: другого события «список ПО изменился» в системе нет. Отдельной
+	// задачей, а не здесь же: справочник CVE большой, а инвентарь приходит раз в
+	// пять минут с каждой машины парка.
+	//
+	// Ошибка постановки не роняет приём инвентаря — он уже сохранён, — но и не
+	// глотается молча: без неё оператор видел бы пустой список уязвимостей и считал
+	// это отсутствием уязвимостей.
+	if g.inventoryHook != nil {
+		if dbID, derr := g.db.GetDeviceIDByFingerprint(ctx, fingerprint); derr == nil && dbID != "" {
+			g.inventoryHook(ctx, tenantID, dbID)
+		} else if derr != nil {
+			g.logger.Error("inventory hook: lookup device", "fingerprint", fingerprint, "err", derr)
+		}
+	}
+
 	g.logger.Info("inventory received", "device_id", deviceID, "software_count", len(req.Software))
 	return &pb.InventoryAck{Received: true}, nil
 }
@@ -334,6 +376,12 @@ func (g *Gateway) ReportTaskResult(ctx context.Context, req *pb.TaskResult) (*pb
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
+
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		g.logger.Error("complete task: device lookup", "err", err)
@@ -435,6 +483,11 @@ func (g *Gateway) FetchPolicy(ctx context.Context, req *pb.FetchPolicyRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
 
 	// Неодобренное устройство (pending_approval) не получает политик: очередь одобрения
 	// гейтит АВТОМАТИЧЕСКИЕ каналы исполнения (политики/скрипты), оставляя Connect/
@@ -490,6 +543,12 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
+
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		// Временная ошибка БД: отдаём gRPC-ошибку, чтобы агент ретраил из outbox
@@ -552,6 +611,36 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 	return &pb.SecurityEventAck{Received: true}, nil
 }
 
+// scopeByFingerprint открывает скоуп тенанта устройства по отпечатку его сертификата.
+//
+// Агентские ручки — единственная точка, где тенант выводится из клиентского серта, и
+// раньше почти все они ходили в БД без скоупа вообще. Под app-ролью из 049 это ломало
+// их непредсказуемо: соединение из пула с пустым routineops.tenant_id даёт 22P02, ещё
+// чистое — тихий ноль строк. Полевой e2e 30.07 ловил ровно это: FetchLockStatus,
+// FetchScriptPolicies, FetchPolicy и приём результатов скрипта падали на живом парке,
+// пока heartbeat и инвентарь работали и создавали видимость здоровья.
+//
+// Стрим Connect сюда НЕ заворачивается намеренно: он живёт часами, и транзакция
+// удерживала бы соединение из пула всё это время.
+func (g *Gateway) scopeByFingerprint(ctx context.Context, fingerprint string) (context.Context, func(bool), error) {
+	tenantID, err := g.tenantForFingerprint(ctx, fingerprint)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return g.db.BindTenant(ctx, tenantID)
+}
+
+func (g *Gateway) tenantForFingerprint(ctx context.Context, fingerprint string) (string, error) {
+	_, tenantID, _, err := g.db.GetDeviceTenantByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return "", err
+	}
+	if tenantID == "" {
+		return tenancy.DefaultTenantID, nil
+	}
+	return tenantID, nil
+}
+
 func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAccessRequest) (*pb.RequestAdminAccessResponse, error) {
 	_, fingerprint, err := extractCertInfo(ctx)
 	if err != nil {
@@ -564,12 +653,16 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 	if deviceID == "" {
 		return nil, status.Errorf(codes.NotFound, "device not found")
 	}
+	tenantID, err := g.tenantForFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
+	}
 	// requested_by пустой ВСЕГДА: с миграции 038 владелец устройства — карточка человека
 	// (directory_persons), а не аккаунт панели, и ссылаться этому полю (FK→users) стало
 	// не на что. Заявка от этого не ломается — она и раньше оформлялась без владельца:
 	// пользователи панели это ИТ-операторы, а не сотрудники.
 
-	timeoutStr, _ := g.db.GetSystemSetting(ctx, "admin_request_timeout_minutes")
+	timeoutStr, _ := g.db.GetSystemSetting(ctx, tenantID, "admin_request_timeout_minutes")
 	timeoutMin, _ := strconv.Atoi(timeoutStr)
 	if timeoutMin <= 0 {
 		timeoutMin = 15
@@ -611,18 +704,29 @@ func (g *Gateway) FetchAdminStatus(ctx context.Context, _ *pb.FetchAdminStatusRe
 	if deviceID == "" {
 		return nil, status.Errorf(codes.NotFound, "device not found")
 	}
+	tenantID, err := g.tenantForFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
+	}
+
+	collect, intervalSec := g.adminCollectFlags(ctx, tenantID)
 
 	row, err := g.db.FetchActiveAdminRequest(ctx, deviceID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch: %v", err)
 	}
 	if row == nil {
-		return &pb.FetchAdminStatusResponse{}, nil
+		return &pb.FetchAdminStatusResponse{
+			CollectSessionChanges: collect,
+			SnapshotIntervalSec:   intervalSec,
+		}, nil
 	}
 
 	resp := &pb.FetchAdminStatusResponse{
-		RequestId: row.ID,
-		Status:    adminStatusToProto(row.Status),
+		RequestId:             row.ID,
+		Status:                adminStatusToProto(row.Status),
+		CollectSessionChanges: collect,
+		SnapshotIntervalSec:   intervalSec,
 	}
 	if row.GrantedAt != nil {
 		resp.GrantedAt = row.GrantedAt.Unix()
@@ -640,6 +744,12 @@ func (g *Gateway) ReportAdminAccess(ctx context.Context, req *pb.ReportAdminAcce
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
+
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		g.logger.Error("report admin access: device lookup", "err", err)
@@ -670,6 +780,13 @@ func (g *Gateway) ReportAdminAccess(ctx context.Context, req *pb.ReportAdminAcce
 		g.logger.Error("report admin access", "request_id", req.RequestId, "err", err)
 		return nil, status.Errorf(codes.Unavailable, "report admin access: %v", err)
 	}
+	// Защёлка сбора улик: только при первом APPROVED с baseline_captured.
+	if reportStatus == "approved" && req.GetBaselineCaptured() {
+		if err := g.db.MarkAdminBaselineCaptured(ctx, req.RequestId, deviceID, occurredAt); err != nil {
+			g.logger.Error("mark baseline captured", "request_id", req.RequestId, "err", err)
+			return nil, status.Errorf(codes.Unavailable, "baseline: %v", err)
+		}
+	}
 	g.logger.Info("admin access reported", "request_id", req.RequestId, "status", reportStatus, "details", req.Details)
 	return &pb.ReportAdminAccessResponse{Received: true}, nil
 }
@@ -679,6 +796,11 @@ func (g *Gateway) FetchScriptPolicies(ctx context.Context, req *pb.FetchScriptPo
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
 
 	// Неодобренное устройство не тянет и не исполняет скрипты (скрипт-канал = RCE от
 	// SYSTEM/root) — держим закрытым до одобрения. См. FetchPolicy.
@@ -720,6 +842,11 @@ func (g *Gateway) ReportScriptResult(ctx context.Context, req *pb.ScriptResult) 
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
 
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
@@ -763,6 +890,10 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 	_, fingerprint, err := extractCertInfo(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
+	}
+	tenantID, err := g.tenantForFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, err
 	}
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
@@ -1026,7 +1157,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 		// hash/reason, режим сбрасываем в overlay (fail-safe), иначе реконсиляция
 		// пере-заблокировала бы устройство, которое сотрудник легитимно разблокировал
 		// (полевой re-lock-баг).
-		if err := g.db.SetDeviceLockState(ctx, deviceID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
+		if err := g.db.SetDeviceLockState(ctx, tenantID, deviceID, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
 			g.logger.Error("update lock status", "device_id", deviceID, "err", err)
 			return nil, status.Errorf(codes.Unavailable, "update lock status: %v", err)
 		}
@@ -1056,6 +1187,12 @@ func (g *Gateway) FetchLockStatus(ctx context.Context, _ *pb.FetchLockStatusRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "cert: %v", err)
 	}
+	ctx, scopeDone, err := g.scopeByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "scope tenant: %v", err)
+	}
+	defer scopeDone(true)
+
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup device: %v", err)
@@ -1197,6 +1334,10 @@ func NewBlockedInterceptors(db deviceStatusLookup, logger *slog.Logger) (grpc.Un
 // граница критична — будущий RequestedAt иначе растягивает pendingExpiresAt (окно
 // админ-доступа); нижняя отсекает мусорные нулевые/древние даты. Клампинг логируем,
 // иначе при сбитых часах агента восстановить хронологию инцидента по логам нельзя.
+//
+// Для окон улик admin-session НЕ использовать: stale_final датирует финал концом
+// сессии на машине, пролежавшей выключенной дольше суток — нижняя граница 24ч
+// стирала бы ровно этот случай (см. clampAgentEvidenceTime).
 func (g *Gateway) clampAgentTime(field string, unix int64) time.Time {
 	now := time.Now()
 	if unix == 0 {
@@ -1205,6 +1346,23 @@ func (g *Gateway) clampAgentTime(field string, unix int64) time.Time {
 	t := time.Unix(unix, 0)
 	if t.Before(now.Add(-24*time.Hour)) || t.After(now.Add(5*time.Minute)) {
 		g.logger.Warn("clamped out-of-range agent timestamp", "field", field, "value", unix)
+		return now
+	}
+	return t
+}
+
+// clampAgentEvidenceTime — для ReportAdminSessionChanges. Будущее и epoch 0 → now;
+// прошлое сохраняем (в т.ч. старше 24ч): иначе stale_final теряет даты сессии.
+// Абсурдное прошлое до 2020-01-01 всё же режем как мусор/атаку.
+func (g *Gateway) clampAgentEvidenceTime(field string, unix int64) time.Time {
+	now := time.Now()
+	if unix == 0 {
+		return now
+	}
+	t := time.Unix(unix, 0)
+	floor := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if t.Before(floor) || t.After(now.Add(5*time.Minute)) {
+		g.logger.Warn("clamped out-of-range evidence timestamp", "field", field, "value", unix)
 		return now
 	}
 	return t

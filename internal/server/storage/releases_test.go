@@ -3,6 +3,8 @@ package storage_test
 import (
 	"context"
 	"testing"
+
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 )
 
 // Повторная публикация той же (os,arch,version) должна быть идемпотентной (UPSERT),
@@ -16,11 +18,11 @@ func TestRegisterAgentRelease_Idempotent(t *testing.T) {
 	arch := "amd64"
 	ver := "v1.0.0"
 
-	if err := db.RegisterAgentRelease(ctx, osName, arch, ver, "agent_old", "sha_old", "sig_old", "msig_old"); err != nil {
+	if err := db.RegisterAgentRelease(ctx, osName, arch, ver, "agent_old", "sha_old", "sig_old", "msig_old", storage.ChannelStable); err != nil {
 		t.Fatalf("первый register: %v", err)
 	}
 	// та же версия, новый артефакт — НЕ ошибка
-	if err := db.RegisterAgentRelease(ctx, osName, arch, ver, "agent_new", "sha_new", "sig_new", "msig_new"); err != nil {
+	if err := db.RegisterAgentRelease(ctx, osName, arch, ver, "agent_new", "sha_new", "sig_new", "msig_new", storage.ChannelStable); err != nil {
 		t.Fatalf("повторный register той же версии обязан быть идемпотентным, получили: %v", err)
 	}
 

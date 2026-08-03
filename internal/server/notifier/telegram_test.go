@@ -3,6 +3,7 @@ package notifier
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"log/slog"
 	"net/http"
@@ -97,7 +98,7 @@ func TestHandleStart_ValidToken_LinksAccount(t *testing.T) {
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
-	user, err := db.CreateUser(ctx, "Admin", uniqEmail("link"), "hash", "it_admin")
+	user, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Admin", uniqEmail("link"), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestNotifyITAdmins_SendsToLinkedAdmins(t *testing.T) {
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
-	user, err := db.CreateUser(ctx, "Admin", uniqEmail("notify"), "hash", "it_admin")
+	user, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Admin", uniqEmail("notify"), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -205,11 +206,11 @@ func TestNotifyAlert_RespectsPerRecipientThreshold(t *testing.T) {
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
-	quiet, err := db.CreateUser(ctx, "Quiet Admin", uniqEmail("quiet"), "hash", "it_admin")
+	quiet, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Quiet Admin", uniqEmail("quiet"), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser quiet: %v", err)
 	}
-	loud, err := db.CreateUser(ctx, "Loud Admin", uniqEmail("loud"), "hash", "it_admin")
+	loud, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Loud Admin", uniqEmail("loud"), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser loud: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestStartPolling_DispatchesStartCommand(t *testing.T) {
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
-	user, err := db.CreateUser(ctx, "Admin", uniqEmail("poll"), "hash", "it_admin")
+	user, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Admin", uniqEmail("poll"), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

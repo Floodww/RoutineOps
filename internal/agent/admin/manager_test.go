@@ -33,7 +33,7 @@ func newHarness() *harness {
 	h.m = &Manager{
 		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		priv:        h.priv,
-		consoleUser: func() string { return h.user },
+		consoleUser: func() (string, bool) { return h.user, true },
 		fetch:       func(context.Context) (*pb.FetchAdminStatusResponse, error) { return h.resp, nil },
 		report: func(_ context.Context, r *pb.ReportAdminAccessRequest) error {
 			h.reports = append(h.reports, r)

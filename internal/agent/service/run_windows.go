@@ -32,7 +32,11 @@ type handler struct {
 }
 
 func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
-	const accepted = svc.AcceptStop | svc.AcceptShutdown
+	// AcceptSessionChange запрашивается ЯВНО. Без него WTS_SESSION_LOCK/UNLOCK/LOGOFF/
+	// DISCONNECT не приходят вовсе, а при Win+L сессия остаётся WTSActive и токен
+	// по-прежнему выдаётся — то есть отличить заблокированный экран от рабочего изнутри
+	// службы нечем (§9.11 контракта удалённого стола).
+	const accepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptSessionChange
 	s <- svc.Status{State: svc.StartPending, WaitHint: 60_000} // 60с: AV (Kaspersky и т.д.) может задержать старт
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -47,6 +51,14 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.S
 			switch c.Cmd {
 			case svc.Interrogate:
 				s <- c.CurrentStatus
+			case svc.SessionChange:
+				// EventData — это WTSSESSION_NOTIFICATION.dwSessionId. Подписчики
+				// разбирают код события сами; здесь только разослать и вернуться:
+				// пока обработчик не вернулся, служба не отвечает SCM.
+				publishSessionChange(SessionEvent{
+					Event:     c.EventType,
+					SessionID: uint32(c.EventData),
+				})
 			case svc.Stop, svc.Shutdown:
 				cancel()
 				s <- svc.Status{State: svc.StopPending}

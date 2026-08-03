@@ -70,7 +70,11 @@ func (h *Handler) createPerson(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, err := h.db.CreateManualPerson(r.Context(), req.DisplayName, req.Email)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	p, err := h.db.CreateManualPerson(r.Context(), tenantID, req.DisplayName, req.Email)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -87,7 +91,11 @@ func (h *Handler) updatePerson(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	found, err := h.db.UpdateManualPerson(r.Context(), id, req.DisplayName, req.Email)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	found, err := h.db.UpdateManualPerson(r.Context(), tenantID, id, req.DisplayName, req.Email)
 	if errors.Is(err, storage.ErrPersonNotManual) {
 		// 409, а не 403: право у оператора есть, но источник истины для этой карточки —
 		// каталог, и правка здесь пережила бы ровно до следующего синка.
@@ -111,7 +119,11 @@ func (h *Handler) updatePerson(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deletePerson(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	found, err := h.db.DeleteManualPerson(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	found, err := h.db.DeleteManualPerson(r.Context(), tenantID, id)
 	if errors.Is(err, storage.ErrPersonNotManual) {
 		http.Error(w, "person comes from the directory, remove it in AD", http.StatusConflict)
 		return

@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func activeDevice(t *testing.T, db *storage.DB, name, os string, software ...str
 // в выдаче всегда лежат ещё и правила соседних тестов — фильтруем по своему rule_id.
 func softwareCompliance(t *testing.T, db *storage.DB, ruleID string) storage.SoftwarePolicyCompliance {
 	t.Helper()
-	rows, err := db.ListSoftwarePolicyCompliance(context.Background())
+	rows, err := db.ListSoftwarePolicyCompliance(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListSoftwarePolicyCompliance: %v", err)
 	}
@@ -79,7 +80,7 @@ func softwareCompliance(t *testing.T, db *storage.DB, ruleID string) storage.Sof
 
 func scriptCompliance(t *testing.T, db *storage.DB, policyID string) storage.ScriptPolicyCompliance {
 	t.Helper()
-	rows, err := db.ListScriptPolicyCompliance(context.Background())
+	rows, err := db.ListScriptPolicyCompliance(context.Background(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListScriptPolicyCompliance: %v", err)
 	}
@@ -116,11 +117,11 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		activeDevice(t, db, "gclean-"+suffix, "Windows 11")
 		activeDevice(t, db, "gdirty-"+suffix, "Windows 11", app)
 
-		rule, err := db.CreatePolicyRule(ctx, app, "forbidden", nil, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", nil, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
-		all, _, err := db.ListEnrolledDevices(ctx, "", "", 0, 0)
+		all, _, err := db.ListEnrolledDevices(ctx, tenancy.DefaultTenantID, "", "", 0, 0)
 		if err != nil {
 			t.Fatalf("ListEnrolledDevices: %v", err)
 		}
@@ -136,7 +137,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 	t.Run("подстрока без учёта регистра", func(t *testing.T) {
 		suffix := uniq(t)
 		dev := activeDevice(t, db, "sub-"+suffix, "Windows 11", "Google Chrome 120")
-		rule, err := db.CreatePolicyRule(ctx, "chrome", "forbidden", &dev, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "chrome", "forbidden", &dev, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
@@ -150,7 +151,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		suffix := uniq(t)
 		app := "allowedapp-" + suffix
 		dev := activeDevice(t, db, "allow-"+suffix, "Windows 11", app)
-		rule, err := db.CreatePolicyRule(ctx, app, "allowed", &dev, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "allowed", &dev, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
@@ -165,7 +166,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		activeDevice(t, db, "dother1-"+suffix, "Windows 11", app)
 		activeDevice(t, db, "dother2-"+suffix, "Windows 11", app)
 
-		rule, err := db.CreatePolicyRule(ctx, app, "forbidden", &target, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", &target, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
@@ -177,17 +178,17 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 	t.Run("group-scoped правило видит только членов группы", func(t *testing.T) {
 		suffix := uniq(t)
 		app := "grpapp-" + suffix
-		group, err := db.CreateDeviceGroup(ctx, "grp-comp-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-comp-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
 		member := activeDevice(t, db, "gmember-"+suffix, "Windows 11", app)
 		activeDevice(t, db, "goutsider-"+suffix, "Windows 11", app)
-		if err := db.AddDeviceToGroup(ctx, member, group.ID); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, member, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup: %v", err)
 		}
 
-		rule, err := db.AssignSoftwarePolicyToGroup(ctx, group.ID, app, "forbidden")
+		rule, err := db.AssignSoftwarePolicyToGroup(ctx, tenancy.DefaultTenantID, group.ID, app, "forbidden")
 		if err != nil {
 			t.Fatalf("AssignSoftwarePolicyToGroup: %v", err)
 		}
@@ -214,7 +215,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 				inner := uniq(t)
 				app := "platapp-" + inner
 				dev := activeDevice(t, db, "plat-"+inner, tc.os, app)
-				rule, err := db.CreatePolicyRule(ctx, app, "forbidden", &dev, []string{"Windows"})
+				rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", &dev, []string{"Windows"})
 				if err != nil {
 					t.Fatalf("CreatePolicyRule: %v", err)
 				}
@@ -237,13 +238,13 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		suffix := uniq(t)
 		app := "pendapp-" + suffix
 		dev := activeDevice(t, db, "pend-"+suffix, "Windows 11", app)
-		rule, err := db.CreatePolicyRule(ctx, app, "forbidden", &dev, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", &dev, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
 		checkCompliance(t, softwareCompliance(t, db, rule.ID), 1, 0, 1, true)
 
-		if err := db.UpdateDeviceStatus(ctx, dev, "pending"); err != nil {
+		if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, dev, "pending"); err != nil {
 			t.Fatalf("UpdateDeviceStatus: %v", err)
 		}
 		checkCompliance(t, softwareCompliance(t, db, rule.ID), 0, 0, 0, true)
@@ -256,14 +257,14 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 	t.Run("правило с device_id и group_id: объединение областей", func(t *testing.T) {
 		suffix := uniq(t)
 		app := "bothapp-" + suffix
-		group, err := db.CreateDeviceGroup(ctx, "grp-both-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-both-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
 		override := activeDevice(t, db, "bover-"+suffix, "Windows 11", app)
 		member := activeDevice(t, db, "bmember-"+suffix, "Windows 11")
 		activeDevice(t, db, "boutsider-"+suffix, "Windows 11", app)
-		if err := db.AddDeviceToGroup(ctx, member, group.ID); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, member, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup: %v", err)
 		}
 
@@ -278,7 +279,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 	t.Run("устройство в обеих ветках не двоится", func(t *testing.T) {
 		suffix := uniq(t)
 		app := "dupapp-" + suffix
-		group, err := db.CreateDeviceGroup(ctx, "grp-dup-scope-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-dup-scope-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
@@ -286,7 +287,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 		member := activeDevice(t, db, "dmember-"+suffix, "Windows 11")
 		// override состоит в той же группе — совпадают обе ветки предиката.
 		for _, d := range []string{override, member} {
-			if err := db.AddDeviceToGroup(ctx, d, group.ID); err != nil {
+			if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, d, group.ID); err != nil {
 				t.Fatalf("AddDeviceToGroup %s: %v", d, err)
 			}
 		}
@@ -301,7 +302,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 	t.Run("правило с пустым software_name никого не валит", func(t *testing.T) {
 		suffix := uniq(t)
 		dev := activeDevice(t, db, "empty-"+suffix, "Windows 11", "SomeApp-"+suffix)
-		rule, err := db.CreatePolicyRule(ctx, "", "forbidden", &dev, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "", "forbidden", &dev, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule с пустым именем: %v", err)
 		}
@@ -320,21 +321,21 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 		suffix := uniq(t)
 		dirty := activeDevice(t, db, "ddirty-"+suffix, "Windows 11", "Google Chrome 120")
 		clean := activeDevice(t, db, "aclean-"+suffix, "Windows 11") // 'a…' — по алфавиту раньше dirty
-		group, err := db.CreateDeviceGroup(ctx, "grp-detail-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-detail-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
 		for _, d := range []string{dirty, clean} {
-			if err := db.AddDeviceToGroup(ctx, d, group.ID); err != nil {
+			if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, d, group.ID); err != nil {
 				t.Fatalf("AddDeviceToGroup: %v", err)
 			}
 		}
-		rule, err := db.AssignSoftwarePolicyToGroup(ctx, group.ID, "chrome", "forbidden")
+		rule, err := db.AssignSoftwarePolicyToGroup(ctx, tenancy.DefaultTenantID, group.ID, "chrome", "forbidden")
 		if err != nil {
 			t.Fatalf("AssignSoftwarePolicyToGroup: %v", err)
 		}
 
-		rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, rule.ID)
+		rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, rule.ID)
 		if err != nil {
 			t.Fatalf("ListSoftwarePolicyDeviceCompliance: %v", err)
 		}
@@ -361,11 +362,11 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 		target := activeDevice(t, db, "dtgt-"+suffix, "macOS 14", app)
 		activeDevice(t, db, "dout-"+suffix, "macOS 14", app) // вне скоупа
 
-		rule, err := db.CreatePolicyRule(ctx, app, "forbidden", &target, []string{"macOS"})
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", &target, []string{"macOS"})
 		if err != nil {
 			t.Fatalf("CreatePolicyRule: %v", err)
 		}
-		rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, rule.ID)
+		rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, rule.ID)
 		if err != nil {
 			t.Fatalf("ListSoftwarePolicyDeviceCompliance: %v", err)
 		}
@@ -374,11 +375,11 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 		}
 
 		// Правило только для Windows — mac-устройство выпадает из области действия.
-		winRule, err := db.CreatePolicyRule(ctx, app, "forbidden", &target, []string{"Windows"})
+		winRule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, app, "forbidden", &target, []string{"Windows"})
 		if err != nil {
 			t.Fatalf("CreatePolicyRule (Windows): %v", err)
 		}
-		rows, err = db.ListSoftwarePolicyDeviceCompliance(ctx, winRule.ID)
+		rows, err = db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, winRule.ID)
 		if err != nil {
 			t.Fatalf("ListSoftwarePolicyDeviceCompliance (Windows): %v", err)
 		}
@@ -392,7 +393,7 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 	// (/policies/garbage/compliance), сравнение идёт через id::text.
 	t.Run("несуществующее правило и мусорный id — пусто", func(t *testing.T) {
 		for _, id := range []string{"00000000-0000-0000-0000-000000000000", "garbage"} {
-			rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, id)
+			rows, err := db.ListSoftwarePolicyDeviceCompliance(ctx, tenancy.DefaultTenantID, id)
 			if err != nil {
 				t.Fatalf("ListSoftwarePolicyDeviceCompliance(%q): %v", id, err)
 			}
@@ -407,11 +408,11 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 func mustScriptPolicy(t *testing.T, db *storage.DB, suffix string) string {
 	t.Helper()
 	ctx := context.Background()
-	scr, err := db.CreateScript(ctx, "sc-comp-"+suffix, "linux", "echo hi")
+	scr, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "sc-comp-"+suffix, "linux", "echo hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
 	}
-	pol, err := db.CreateScriptPolicy(ctx, "pol-comp-"+suffix, scr.ID, "schedule", nil, nil)
+	pol, err := db.CreateScriptPolicy(ctx, tenancy.DefaultTenantID, "pol-comp-"+suffix, scr.ID, "schedule", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateScriptPolicy: %v", err)
 	}
@@ -444,18 +445,18 @@ func TestListScriptPolicyCompliance(t *testing.T) {
 	t.Run("pass/fail/unknown по назначенной группе", func(t *testing.T) {
 		suffix := uniq(t)
 		policyID := mustScriptPolicy(t, db, suffix)
-		group, err := db.CreateDeviceGroup(ctx, "grp-sc-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-sc-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
-		if err := db.AssignPolicyToGroup(ctx, policyID, group.ID); err != nil {
+		if err := db.AssignPolicyToGroup(ctx, tenancy.DefaultTenantID, policyID, group.ID); err != nil {
 			t.Fatalf("AssignPolicyToGroup: %v", err)
 		}
 		ok := activeDevice(t, db, "scok-"+suffix, "Ubuntu 24.04")
 		bad := activeDevice(t, db, "scbad-"+suffix, "Ubuntu 24.04")
 		silent := activeDevice(t, db, "scsilent-"+suffix, "Ubuntu 24.04")
 		for _, d := range []string{ok, bad, silent} {
-			if err := db.AddDeviceToGroup(ctx, d, group.ID); err != nil {
+			if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, d, group.ID); err != nil {
 				t.Fatalf("AddDeviceToGroup %s: %v", d, err)
 			}
 		}
@@ -475,22 +476,22 @@ func TestListScriptPolicyCompliance(t *testing.T) {
 	t.Run("последний прогон перекрывает предыдущий", func(t *testing.T) {
 		suffix := uniq(t)
 		policyID := mustScriptPolicy(t, db, suffix)
-		group, err := db.CreateDeviceGroup(ctx, "grp-sc-latest-"+suffix, "")
+		group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-sc-latest-"+suffix, "", "")
 		if err != nil {
 			t.Fatalf("CreateDeviceGroup: %v", err)
 		}
-		if err := db.AssignPolicyToGroup(ctx, policyID, group.ID); err != nil {
+		if err := db.AssignPolicyToGroup(ctx, tenancy.DefaultTenantID, policyID, group.ID); err != nil {
 			t.Fatalf("AssignPolicyToGroup: %v", err)
 		}
 		dev := activeDevice(t, db, "sclatest-"+suffix, "Ubuntu 24.04")
-		if err := db.AddDeviceToGroup(ctx, dev, group.ID); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, dev, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup: %v", err)
 		}
 
 		mustSaveResult(t, db, policyID, dev, 1) // старый: упал
 		mustSaveResult(t, db, policyID, dev, 0) // новый: починили
 
-		results, err := db.ListScriptResultsByPolicy(ctx, policyID, 10)
+		results, err := db.ListScriptResultsByPolicy(ctx, tenancy.DefaultTenantID, policyID, 10)
 		if err != nil {
 			t.Fatalf("ListScriptResultsByPolicy: %v", err)
 		}

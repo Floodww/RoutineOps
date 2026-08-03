@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
 
@@ -111,7 +112,7 @@ func TestRevokeAdminAccessRequest(t *testing.T) {
 	expires := time.Now().Add(1 * time.Hour)
 	_ = db.RespondToAdminRequest(context.Background(), req.ID, "approved", u.ID, &expires)
 
-	if err := db.RevokeAdminAccessRequest(context.Background(), req.ID); err != nil {
+	if err := db.RevokeAdminAccessRequest(context.Background(), tenancy.DefaultTenantID, req.ID); err != nil {
 		t.Fatalf("RevokeAdminAccessRequest: %v", err)
 	}
 
@@ -150,7 +151,7 @@ func TestListAdminAccessRequests_StatusFilter(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("listaar-%s@test.com", uniq(t)))
 	mustCreateAdminRequest(t, db, d.ID, u.ID)
 
-	rows, err := db.ListAdminAccessRequests(context.Background(), "pending")
+	rows, err := db.ListAdminAccessRequests(context.Background(), tenancy.DefaultTenantID, "pending")
 	if err != nil {
 		t.Fatalf("ListAdminAccessRequests: %v", err)
 	}

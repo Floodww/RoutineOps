@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 )
 
@@ -56,6 +57,40 @@ func NewDialer(serverAddr, serverName string, certs CertProvider) (*Dialer, erro
 func (d *Dialer) Dial() (*grpc.ClientConn, error) {
 	return grpc.NewClient(d.serverAddr, grpc.WithTransportCredentials(d.creds))
 }
+
+// DialStream открывает ОТДЕЛЬНОЕ соединение под медиастрим интерактивного сеанса
+// (docs/remote-desktop-contract.md §3.2, ADR-8 п.1).
+//
+// Почему не Dial: разница не в кредах, а в двух параметрах, каждый из которых на обычном
+// соединении не нужен, а здесь обязателен.
+//
+//   - Keepalive 20 с. Сервер enforce'ит MinTime: 10 * time.Second
+//     (cmd/server/main.go), и клиент, пингующий чаще, получает GOAWAY too_many_pings и
+//     уходит в вечный цикл переподключений — снаружи это выглядит как «сеанс не
+//     запускается». Двадцать секунд — с запасом к порогу, а не впритык к нему.
+//     PermitWithoutStream не ставим: пинговать соединение без стрима незачем, оно живёт
+//     ровно один сеанс.
+//   - Потолок исходящего сообщения. Кадр режется на части по 256 KiB, и умолчание gRPC
+//     (4 МиБ на приём, без потолка на отправку) здесь не защищает ни от чего: явный
+//     потолок превращает ошибку кодирования в отказ отправки, а не в OOM на сервере.
+func (d *Dialer) DialStream() (*grpc.ClientConn, error) {
+	return grpc.NewClient(d.serverAddr,
+		grpc.WithTransportCredentials(d.creds),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    20 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallSendMsgSize(streamMaxMessage),
+			grpc.MaxCallRecvMsgSize(streamMaxMessage),
+		),
+	)
+}
+
+// streamMaxMessage — потолок одного сообщения медиастрима: часть кадра (256 KiB) плюс
+// накладные расходы protobuf. Держится заведомо ниже серверного MaxRecvMsgSize(4 МиБ),
+// который трогать нельзя — он общий на весь grpc.Server и защищает все мелкие RPC.
+const streamMaxMessage = 512 << 10
 
 // Addr — адрес сервера (для логов).
 func (d *Dialer) Addr() string { return d.serverAddr }

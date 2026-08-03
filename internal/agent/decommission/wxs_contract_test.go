@@ -14,7 +14,8 @@ import (
 // узнавать наш путь — симптом неотличим от исходного бага и ничем не сигналит.
 // Тест без build-тега: сверка идёт на любом `go test`, не только на Windows.
 func TestWxsContract(t *testing.T) {
-	wxsPath := filepath.Join("..", "..", "..", "build", "msi", "mdm-agent.wxs")
+	root := skipOutsideRepo(t)
+	wxsPath := filepath.Join(root, "build", "msi", "mdm-agent.wxs")
 	raw, err := os.ReadFile(wxsPath)
 	if err != nil {
 		t.Fatalf("не прочитать wxs %s: %v", wxsPath, err)

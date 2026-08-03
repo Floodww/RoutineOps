@@ -2,10 +2,12 @@ package gateway_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	pb "github.com/Floodww/RoutineOps/proto"
 )
@@ -15,7 +17,7 @@ import (
 // появится ещё один источник алертов.
 func outboxAlerts(t *testing.T, db *storage.DB, deviceID string) []storage.Alert {
 	t.Helper()
-	all, err := db.ListAlerts(context.Background(), deviceID, 100)
+	all, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, deviceID, 100)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -34,7 +36,7 @@ func deviceByFP(t *testing.T, db *storage.DB, fp string) *storage.Device {
 	if err != nil || id == "" {
 		t.Fatalf("device by fingerprint: id=%q err=%v", id, err)
 	}
-	d, _, err := db.GetDevice(context.Background(), id)
+	d, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, id)
 	if err != nil || d == nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -187,5 +189,9 @@ func TestConnect_OutboxDown_NotifiesITOnce(t *testing.T) {
 	}
 	if !strings.Contains(bot.Messages[0], "отказано в доступе") {
 		t.Errorf("в уведомлении нет причины: %q", bot.Messages[0])
+	}
+	// Порог доставки: через NotifyAlert с severity high, не мимо NotifyITAdmins.
+	if len(bot.Severities) != 1 || bot.Severities[0] != alerting.SeverityHigh {
+		t.Fatalf("severity = %v, want [high] — иначе порог users.notify_min_severity обойдён", bot.Severities)
 	}
 }

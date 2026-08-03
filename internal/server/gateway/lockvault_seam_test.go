@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,7 +37,7 @@ func armDevice(t *testing.T, db *storage.DB, cn, fingerprint, mode, requestID st
 	if err != nil || devID == "" {
 		t.Fatalf("GetDeviceIDByFingerprint: %v (id=%q)", err, devID)
 	}
-	if err := db.SetDeviceLockState(context.Background(), devID, "locked", "bcrypt-hash", "увольнение",
+	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "bcrypt-hash", "увольнение",
 		mode, requestID); err != nil {
 		t.Fatalf("SetDeviceLockState: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestFetchLockSecrets_LockCancelled_DoesNotTouchVault(t *testing.T) {
 	devID := armDevice(t, db, "fv-cancelled", fp, storage.LockModeFileVault, "req-1")
 
 	// Оператор снял лок: desired сбрасывается, режим возвращается в overlay.
-	if err := db.SetDeviceLockState(context.Background(), devID, "unlocked", "", "", "", ""); err != nil {
+	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "unlocked", "", "", "", ""); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
 

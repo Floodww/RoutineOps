@@ -27,6 +27,8 @@ no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent ver
 - **Audit log** — all admin actions, configurable retention.
 - **RBAC** — `it_admin` and read-only `viewer` roles; email invites for people who need console access (administrators, support) — not for device owners.
 - **Agent self-update** — ed25519-signed releases, sha256 + manifest signature verification, anti-rollback.
+- **Update channels and canary rollout** — a device group carries a channel (`stable` / `beta`), and so does a release. Soak the new build on a canary group, then move the release to `stable` and the whole fleet picks it up. A "Rollout" screen shows which versions run where.
+- **English and Russian UI** — switch in the profile, choice is remembered; server messages and audit action labels are translated too. A build gate guards dictionary completeness: a missing key fails the build instead of surfacing to a user.
 - **Decommission** — one button in the device page: the agent fully removes itself (files, keys, autostart, installer record). Deleting a device from inventory revokes its certificate, so it cannot "resurrect" as an empty record.
 - **Config as code** — scripts, policies and groups in YAML: `routineops export` / `apply`, fleet configuration in git.
 - **API tokens** — issue and revoke from the UI (role, lifetime) for REST API automation.
@@ -79,14 +81,21 @@ Enterprise adds on top of the features above:
 |---|---|
 | FileVault recovery-key escrow (macOS) | ✅ |
 | Enforced FileVault device lock | ✅ |
+| FileVault setup from the console (tray dialog for the employee, no desk visit) | ✅ |
 | User directory (LDAP / Active Directory): sync and automatic device-owner assignment | ✅ |
 | Panel login with directory password (LDAP/AD) | ✅ |
 | Alert severity levels and routing | ✅ |
 | Tamper-evident audit (hash chain) | ✅ |
 | Software removal from the UI | ✅ |
 | Multi-tenancy | ✅ |
-| SSO/OIDC, MFA, SCIM, SIEM export | in development |
-| Remote desktop | planned |
+| SSO: OIDC and SAML, both configurable from the panel | ✅ |
+| MFA / TOTP with recovery codes, per-tenant "require MFA" policy | ✅ |
+| SCIM user provisioning from an IdP | ✅ |
+| Audit export to SIEM (syslog/CEF, webhook) + log archive before retention cleanup | ✅ |
+| Compliance dashboard and report export | ✅ |
+| Vulnerability (CVE) scanning of installed software | ✅ |
+| Remote desktop (screen viewing, session recording) | 🔄 implemented, field acceptance pending |
+| HA / multi-node | 📐 designed |
 
 This build ships without enterprise code (e.g. `lock_mode=filevault` returns 409).
 Full list — [`docs/ROADMAP.md`](./docs/ROADMAP.md).

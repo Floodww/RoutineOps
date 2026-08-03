@@ -139,14 +139,21 @@ func (p *keychainProvider) ClientCertificate() (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("keychain: идентичность с меткой %q не найдена (OSStatus %d)", p.label, int(st))
 	}
 	defer C.CFRelease(C.CFTypeRef(certRef))
+	// keyRef под defer НЕ ставим: при успехе он уезжает в secKeySigner и обязан
+	// пережить эту функцию (см. ниже). Поэтому на КАЖДОМ выходе с ошибкой ниже
+	// его надо отпустить руками — иначе SecKeyRef течёт. Пути редкие, но у агента
+	// нет верхней границы времени жизни: он служба, работающая месяцами.
+	releaseKey := func() { C.CFRelease(C.CFTypeRef(keyRef)) }
 
 	certData := C.SecCertificateCopyData(certRef)
 	if certData == 0 {
+		releaseKey()
 		return tls.Certificate{}, fmt.Errorf("keychain: пустые данные сертификата")
 	}
 	defer C.CFRelease(C.CFTypeRef(certData))
 	leaf, err := x509.ParseCertificate(cfDataBytes(certData))
 	if err != nil {
+		releaseKey()
 		return tls.Certificate{}, fmt.Errorf("keychain: разбор сертификата: %w", err)
 	}
 

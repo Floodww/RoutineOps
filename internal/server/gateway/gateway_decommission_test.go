@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
 	pb "github.com/Floodww/RoutineOps/proto"
@@ -32,7 +33,7 @@ func TestReportTaskResult_DecommissionFlipsStatus(t *testing.T) {
 		t.Fatalf("ReportTaskResult: %v", err)
 	}
 
-	if st, _ := db.GetDeviceStatusByID(context.Background(), devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Errorf("device status = %q, want decommissioned", st)
 	}
 }
@@ -56,7 +57,7 @@ func TestReportTaskResult_DecommissionFailedKeepsDevice(t *testing.T) {
 		t.Fatalf("ReportTaskResult: %v", err)
 	}
 
-	if st, _ := db.GetDeviceStatusByID(context.Background(), devID); st == "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st == "decommissioned" {
 		t.Errorf("устройство списано по FAILED decommission — не должно (status=%q)", st)
 	}
 }
@@ -91,7 +92,7 @@ func TestConnect_RevokedFingerprintRejectedNoResurrection(t *testing.T) {
 	ctx, fp := makeCertCtx(t, "device-deleted-revoked")
 	registerDevice(t, db, "device-deleted-revoked", fp)
 	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
-	if _, err := db.DeleteDevice(context.Background(), devID); err != nil {
+	if _, err := db.DeleteDevice(context.Background(), tenancy.DefaultTenantID, devID); err != nil {
 		t.Fatalf("DeleteDevice: %v", err)
 	}
 

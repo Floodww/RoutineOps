@@ -96,6 +96,14 @@ message DeviceInfo {
   string tpm             = 19; // TPM присутствует: "true"/"false"/"" — Windows
   string secure_boot     = 20; // Secure Boot включён: "true"/"false"/"" — Windows
                                // (legacy BIOS = "false": UEFI-защиты заведомо нет)
+  // capabilities — что этот бинарь УМЕЕТ, а не какой он версии.
+  //
+  // Версии недостаточно (§9.17 контракта): free-сборка агента той же версии физически не
+  // содержит удалённого стола — файлы вырезаны тегом, а не выключены флагом. Сервер,
+  // проверяющий только agent_version, поставил бы такому агенту сеанс, и оператор смотрел
+  // бы на «ждём агента» до самого таймаута. Пример значения: "screen_session".
+  repeated string capabilities = 22;
+
   string console_user_sid = 21; // стабильный SID интерактивного пользователя (Windows) —
                                // ключ матча с каталогом (objectSid), rename-proof в отличие
                                // от console_user-логина. "" = неизвестно / не Windows /
@@ -177,6 +185,8 @@ message Task {
   DecommissionCommand decommission = 7; // если задано — полное самоудаление агента, а не скрипт/лок
   RebootCommand reboot = 8; // если задано — перезагрузка устройства, а не скрипт/лок/снос
   UninstallCommand uninstall = 9; // если задано — удаление ПО, а не скрипт/лок/снос/ребут
+  FileVaultProvisionCommand filevault_provision = 10; // если задано — дозавершение provisioning FileVault
+  ScreenSessionCommand screen_session = 11; // если задано — приглашение на интерактивный сеанс (ADR-8)
 }
 
 // UninstallCommand — удаление установленного ПО из карточки устройства. Едет в
@@ -275,6 +285,33 @@ message RebootCommand {
   int32 delay_seconds = 3;
 }
 
+// FileVaultProvisionCommand — дозавершение FileVault-provisioning на уже
+// энролленном маке по команде оператора из админки. Едет в Task поверх
+// Connect-стрима, переиспользуя доставку/ack/идемпотентность задач.
+//
+// Зачем вообще команда, если есть подкоманда `agent filevault-provision`.
+// Headless-постустановка идёт под installd без TTY, поэтому пароль держателя
+// Secure Token там взять неоткуда и provisioning пропускается. Единственной
+// альтернативой был визит к каждой машине с терминалом — на парке это не
+// раскатка. Задача переносит ровно тот же интерактив в графическую сессию
+// сотрудника, а не наделяет службу правом взять пароль самостоятельно.
+//
+// Пароль НЕ едет с сервера и не едет НА сервер: агент спрашивает его у
+// сотрудника локально. Сервер отдаёт только повод для диалога.
+//
+// Задача одна на устройство (сервер: ON CONFLICT DO NOTHING, см.
+// storage.CreateFileVaultProvisionTask): иначе нетерпеливый оператор
+// насоздавал бы очередь диалогов, которые вылезут сотруднику один за другим.
+//
+// Отказ обязан быть ГРОМКИМ и с причиной («нет консольного пользователя»,
+// «FileVault выключен», «сотрудник отменил диалог», «таймаут ожидания»), а не
+// Skip в никуда: молчаливый успех по этой задаче — тот же класс тихого вранья,
+// что и незнакомый тип задачи, отчитанный как completed.
+message FileVaultProvisionCommand {
+  string request_id = 1; // id заявки (идемпотентность/аудит; сервер приравнивает к task_id)
+  string reason     = 2; // текст, который увидит сотрудник в диалоге
+}
+
 // LockCommand — блокировка/разблокировка машины сотрудника (нарушение ИБ/увольнение:
 // запереть ноут, пока не сдаст). Едет в Task поверх Connect-стрима: при заданном
 // Task.lock агент обрабатывает блокировку вместо запуска скрипта (переиспользуя
@@ -312,6 +349,14 @@ message TaskResult {
   // чтобы уже написанная серверная обработка задач работала без изменений, —
   // outcome лишь уточняет ПОЧЕМУ, для карточки устройства и аудита.
   UninstallOutcome uninstall_outcome = 6;
+  // screen_refusal — код отказа стартовать интерактивный сеанс (WAYLAND_UNSUPPORTED,
+  // NO_CONSOLE_USER, SCREEN_RECORDING_DENIED, ...). Заполняется ТОЛЬКО для
+  // Task.screen_session при status=ERROR.
+  //
+  // Отдельное поле, а не текст в error_log: §1 контракта требует, чтобы отказ доезжал
+  // до оператора КОДОМ, иначе первая же переформулировка сообщения ломает отрисовку, и
+  // «удалёнка не работает» приходит багрепортом вместо строки «на этой машине Wayland».
+  string screen_refusal = 7;
 }
 
 message TaskResultAck {
@@ -361,6 +406,13 @@ enum AlertType {
   // каждый тик выдавило бы из очереди loss-sensitive отчёты — см.
   // lock.Manager.SetTamperReporter.
   ALERT_TYPE_LOCK_TAMPER = 4;
+  // Улики сессии админ-прав не пришли: базовая линия снята, а финального отчёта нет.
+  // Поднимается СЕРВЕРНЫМ свипером, не агентом — в том и смысл, что событие про
+  // молчание подотчётной стороны не может зависеть от её же отчёта. Покрывает и
+  // досрочный отзыв из панели (status='revoked'), а не только истёкшие заявки:
+  // досрочный отзыв — самый подозрительный сценарий, ИТ что-то заметил, и молчание
+  // именно там не должно быть невидимым.
+  ALERT_TYPE_ADMIN_SESSION_EVIDENCE_GAP = 5;
 }
 
 // Агент → Сервер.
@@ -455,6 +507,24 @@ message FetchAdminStatusResponse {
   AdminAccessStatus status = 2; // UNSPECIFIED если активной заявки нет
   int64 granted_at = 3;         // когда права выданы (если APPROVED)
   int64 expires_at = 4;         // до когда действуют
+
+  // Собирать ли улики сессии (аудит выданных админ-прав). Нулевое значение = НЕ
+  // собирать, и это не осторожность, а требование раскатки: агент самообновляется,
+  // поэтому «агент впереди сервера» — поведение по умолчанию, а codes.Unimplemented
+  // НЕ входит в терминальный список reportErr (cmd/agent/main.go). Новый агент против
+  // старого сервера копил бы записи вечно, и FIFO-очередь заблокировала бы ИБ-алерты,
+  // статусы лока и сам ReportAdminAccess. Аудит-фича не имеет права уронить отчётный
+  // канал, поэтому молчание сервера читается как «не собирать».
+  //
+  // Источник — глобальная настройка system_settings.collect_admin_session_changes
+  // (рядом с admin_request_timeout_minutes). Ответ идёт по устройству (mTLS-серт),
+  // поэтому политика на группу, если однажды понадобится, меняет только сервер и это
+  // поле не двигает.
+  bool collect_session_changes = 5;
+  // Период промежуточных окон, сек. 0 = дефолт агента (1800). Значения <300 сервер
+  // клампит сам: кламп держит тот, кто выдаёт число, иначе он жил бы в двух
+  // реализациях сразу и разъехался бы при первой правке.
+  int32 snapshot_interval_sec = 6;
 }
 
 // Агент → Сервер: агент сообщает фактическое применение/снятие прав
@@ -464,8 +534,120 @@ message ReportAdminAccessRequest {
   AdminAccessStatus status = 2; // APPROVED (применено) / REVOKED (снято)
   int64  occurred_at = 3;
   string details = 4; // напр. "revoked on user logout"
+
+  // Снята ли базовая линия улик к моменту выдачи прав. Это ЗАЩЁЛКА решения: агент
+  // фиксирует флаг сервера на t0 и до конца сессии его не переспрашивает, иначе
+  // выключение настройки посреди сессии оставило бы снятую базовую линию без
+  // финального окна — то есть выключатель сам производил бы «дыру в уликах».
+  //
+  // Сервер по этому полю и отличает «улик не ждём» от «улики пропали»: свипер
+  // поднимает алерт только там, где базовая линия снята, а финального отчёта нет.
+  // Текущее значение настройки для этого не годится — по нему включение задним
+  // числом обвиняло бы старые сессии, а выключение стирало бы настоящие дыры.
+  bool baseline_captured = 5;
 }
 message ReportAdminAccessResponse {
+  bool received = 1;
+}
+
+// ====== Улики сессии админ-прав (аудит выданных прав) ======
+// Контракт улик сессии админ-прав (дельта определений ПО и служб).
+//
+// Фиксируется ИЗМЕНЕНИЕ ОПРЕДЕЛЕНИЙ (запись инвентаря ПО, определение службы), а не
+// runtime-состояние. running/stopped не входит вовсе — не как фильтр, а как
+// конструкция: иначе один ребут внутри сессии давал бы полную «дельту» по всем службам
+// парка. Список процессов не собирается: перечисление процессов сотрудника — наблюдение
+// за человеком, а не подотчётность выданных прав, и живой процесс без персистентного
+// следа в разбор инцидента всё равно не попадёт.
+
+enum AdminChangeKind {
+  ADMIN_CHANGE_KIND_UNSPECIFIED                = 0;
+  ADMIN_CHANGE_KIND_SOFTWARE_INSTALLED         = 1;
+  ADMIN_CHANGE_KIND_SOFTWARE_REMOVED           = 2;
+  ADMIN_CHANGE_KIND_SOFTWARE_UPDATED           = 3;
+  ADMIN_CHANGE_KIND_SERVICE_INSTALLED          = 4;
+  ADMIN_CHANGE_KIND_SERVICE_REMOVED            = 5;
+  ADMIN_CHANGE_KIND_SERVICE_START_TYPE_CHANGED = 6;
+  ADMIN_CHANGE_KIND_SERVICE_ACCOUNT_CHANGED    = 7;
+  ADMIN_CHANGE_KIND_SERVICE_DEFINITION_CHANGED = 8;
+}
+
+// Атрибуция — КЛЮЧ СОРТИРОВКИ, а не обвинение: она отвечает «на что смотреть первым»,
+// и UI обязан формулировать её как «за время сессии на устройстве появилось X», а не
+// «пользователь установил X».
+//
+// UNSPECIFIED никогда не значит «человек»: неизвестность выражается явным UNKNOWN,
+// чтобы ни старый сервер, ни битая запись не читались как обвинение.
+enum ChangeAttribution {
+  CHANGE_ATTRIBUTION_UNSPECIFIED       = 0;
+  CHANGE_ATTRIBUTION_HUMAN_LIKELY      = 1;
+  CHANGE_ATTRIBUTION_BACKGROUND_LIKELY = 2;
+  CHANGE_ATTRIBUTION_UNKNOWN           = 3;
+}
+
+enum CollectionHealth {
+  COLLECTION_HEALTH_UNSPECIFIED = 0;
+  COLLECTION_HEALTH_OK          = 1;
+  COLLECTION_HEALTH_PARTIAL     = 2;
+  COLLECTION_HEALTH_FAILED      = 3;
+  COLLECTION_HEALTH_UNSUPPORTED = 4;
+}
+
+// Полнота улик. Нужна ровно затем, чтобы «улик нет» не читалось как «ничего не было»:
+// пустая дельта при COMPLETE означает «изменений не было», при любом другом значении —
+// «мы не знаем». Отсутствие улик обязано быть событием, а не тишиной.
+enum EvidenceCompleteness {
+  EVIDENCE_COMPLETENESS_UNSPECIFIED = 0;
+  EVIDENCE_COMPLETENESS_COMPLETE    = 1;
+  EVIDENCE_COMPLETENESS_NO_BASELINE = 2;
+  EVIDENCE_COMPLETENESS_PARTIAL     = 3;
+  EVIDENCE_COMPLETENESS_TRUNCATED   = 4;
+  EVIDENCE_COMPLETENESS_STALE_FINAL = 5;
+}
+
+message AdminSessionChange {
+  AdminChangeKind   kind               = 1;
+  string            subject            = 2;  // имя записи ПО / службы
+  string            display_name       = 3;
+  // identity_key — устойчивый ключ записи (для ПО «имя+вендор», для службы её имя).
+  // По нему считается атрибуция: новый ключ = новый продукт, тот же ключ с другой
+  // версией = обновление фоном.
+  string            identity_key       = 4;
+  string            old_value          = 5;
+  string            new_value          = 6;
+  string            vendor             = 7;
+  string            scope              = 8;  // каталог/область определения службы
+  ChangeAttribution attribution        = 9;
+  string            attribution_reason = 10; // напр. version_bump_same_key
+  int64             observed_at        = 11;
+}
+
+message ReportAdminSessionChangesRequest {
+  string                      request_id      = 1;
+  int32                       window_seq      = 2;
+  int64                       window_start    = 3;
+  int64                       window_end      = 4;
+  // КУМУЛЯТИВНО от базовой линии t0, а не от предыдущего окна, и базовая линия за
+  // сессию не перебазируется. Следствие: потеря промежуточного окна самоизлечивается
+  // следующим, а финальное окно всегда несёт полную дельту сессии. Инкрементальные
+  // окна давали бы обратное — одна потерянная запись превращается в невидимую дыру,
+  // поверх которой панель уверенно рисует полный список.
+  repeated AdminSessionChange changes         = 5;
+  bool                        final           = 6;
+  bool                        truncated       = 7;
+  // Полный объём до урезания. Урезание идёт по значимости (human_likely → unknown →
+  // background_likely), поэтому панель обязана показывать «N из total_changes», а не
+  // выдавать урезанный список за полный.
+  int32                       total_changes   = 8;
+  bool                        rebooted        = 9;
+  bool                        baseline_lost   = 10;
+  CollectionHealth            software_health = 11;
+  CollectionHealth            services_health = 12;
+  EvidenceCompleteness        completeness    = 13;
+  int64                       snapshot_at     = 14; // ≠ window_end при stale_final
+}
+
+message ReportAdminSessionChangesResponse {
   bool received = 1;
 }
 
@@ -580,6 +762,166 @@ message EscrowRecoveryKeyResponse {
   string escrow_id = 2;
 }
 
+// ====== Удалённый рабочий стол (ADR-8, docs/remote-desktop-contract.md) ======
+//
+// Ф1 — только просмотр (watch-only): ни клавиатуры, ни мыши, ни передачи файлов.
+// Поток идёт агент → сервер → браузер (ретрансляция), потому что запись сеанса обязана
+// делать сторона, у которой нет интереса её подделать (§2 контракта).
+//
+// ADR-8 дословно: интерактивный сеанс — ОТДЕЛЬНЫЙ стрим на ОТДЕЛЬНОМ соединении, и ни
+// одного кадра без зарегистрированного сеанса. Кадры никогда не смешиваются с heartbeat
+// (продолжение ADR-5), session_id не авторизует НИКОГДА (личность — только CN mTLS,
+// ADR-1), а область сеанса enforce'ит агент по приглашению, а не сервер по флагам в
+// управляющих сообщениях.
+
+// Сервер → Агент: приглашение на сеанс. Едет полем Task.screen_session поверх
+// Connect-стрима — переиспользуются доставка, ack и идемпотентность по task_id.
+//
+// Приглашение НЕ является каналом кадров: в gRPC стрим всегда открывает клиент,
+// поэтому приглашение и стрим — два разных механизма (§3.2).
+message ScreenSessionCommand {
+  // session_id — идентификатор сеанса на сервере. Агент возвращает его в hello, но
+  // ПРАВ он не даёт: сервер сверяет screen_sessions.device_id с device_id из
+  // сертификата стрима (§9.18). Знание чужого session_id не даёт ничего.
+  string session_id = 1;
+
+  // profile — имя профиля потолков ("low" в Ф1). Неизвестное имя не роняет сеанс:
+  // агент берёт low и сообщает об этом событием, иначе рассинхрон версий выглядел бы
+  // как «почему-то мыльно» без единой строки в журнале.
+  string profile = 2;
+
+  // displays — какие экраны разрешено показывать. ПУСТОЙ список означает «только
+  // основной», а не «все»: умолчание в пользу большего доступа — ровно та ошибка,
+  // против которой написан §9.10.
+  repeated int32 displays = 3;
+
+  // allow_input — в Ф1 всегда false. Управление приезжает отдельным контрактом Ф3 со
+  // своей моделью согласия и журналом ввода; поле заведено сейчас, чтобы область
+  // сеанса с самого начала была ЯВНОЙ, а не подразумеваемой.
+  bool allow_input = 4;
+
+  // consent_required — режим тенанта. false (unattended) — решение владельца от
+  // 03.08.2026: согласие не является условием первого кадра. Резидентная плашка
+  // «за вашим экраном наблюдают» показывается в ОБОИХ режимах и флага отключения не
+  // имеет (§4).
+  bool consent_required = 5;
+
+  string operator_name = 6; // кто смотрит — для плашки и диалога согласия
+  string reason         = 7; // повод оператора; обязателен, показывается сотруднику
+
+  int32 max_duration_sec    = 8; // 0 = потолок агента (час)
+  int32 consent_timeout_sec = 9; // молчание сотрудника = отказ (режим consent_required)
+}
+
+// ====== Поток сеанса ======
+//
+// Причины завершения ездят СТРОКАМИ, а не proto-enum, и это осознанно. Enum превращает
+// причину, которой не знает вторая сторона, в UNSPECIFIED — то есть теряет ровно ту
+// информацию, ради которой §1 контракта требует «каждый отказ виден оператором отдельным
+// кодом, а не пустым экраном». Канонический список — internal/agent/screen (EndReason),
+// серверные причины: VIEWER_GONE, DEVICE_CUT_OFF, OPERATOR_REVOKED, AGENT_GONE.
+
+// Агент → Сервер.
+message SessionUp {
+  oneof msg {
+    SessionHello hello = 1;
+    SessionFrame frame = 2;
+    SessionEnd   end   = 3;
+    SessionStats stats = 4;
+  }
+}
+
+// Первое сообщение стрима. Сервер до его прихода не знает, к какому сеансу привязать
+// стрим, и не принимает ни одного кадра.
+message SessionHello {
+  string session_id    = 1;
+  int32  width         = 2; // геометрия ПОСЛЕ даунскейла профиля
+  int32  height        = 3;
+  string profile       = 4; // фактически применённый профиль
+  int32  display_id    = 5;
+  string agent_version = 6;
+  // profile_fallback — запрошенный профиль не опознан, взят low.
+  bool   profile_fallback = 7;
+}
+
+// Кадр или его часть.
+//
+// Единица передачи — НЕ кадр: серверный MaxRecvMsgSize(4 MiB) общий на весь grpc.Server,
+// и трогать его нельзя (это анти-OOM защита всех мелких RPC). Поэтому кадр при
+// необходимости режется на части по 256 KiB, и склеивает их сервер по last_part.
+message SessionFrame {
+  uint32 seq            = 1; // номер КАДРА, строго возрастает; пропуски — норма
+  bool   keyframe       = 2; // полное обновление всех тайлов
+  bool   last_part      = 3; // последняя часть этого кадра
+  bytes  payload        = 4; // канонический бинарный кадр (screen.FramePayload)
+  int64  captured_at_ms = 5;
+}
+
+// Терминальное событие: агент закрывает сеанс сам.
+message SessionEnd {
+  string reason = 1; // EndReason агента
+  string detail = 2; // для разбора, не для авторизации решений
+}
+
+// Телеметрия сеанса. Отдельно от кадров, потому что классы вытеснения в outbox у них
+// разные: терминальные события protected, телеметрия evictable (§9.20).
+message SessionStats {
+  uint32 frames  = 1;
+  uint64 bytes   = 2;
+  uint32 stalls  = 3; // сколько раз бюджет полосы упёрся в потолок паузы
+  uint32 dropped = 4; // кадров выброшено по «latest frame wins»
+}
+
+// Сервер → Агент.
+message SessionDown {
+  oneof msg {
+    SessionAccepted accepted = 1;
+    SessionControl  control  = 2;
+  }
+}
+
+// Сеанс принят: строка сеанса и строка аудита закоммичены (§9.3). До этого сообщения
+// агент не имеет права отдать ни одного кадра.
+message SessionAccepted {
+  int64 server_time_ms = 1;
+}
+
+// Управляющее сообщение. НИКОГДА не расширяет права: narrow может только сузить
+// область, и агент сверяет это сам (§9.10).
+message SessionControl {
+  bool   request_keyframe = 1; // подключился новый зритель / зритель отстал
+  bool   stop             = 2;
+  string stop_reason      = 3; // VIEWER_GONE / OPERATOR_REVOKED / DEVICE_CUT_OFF / ...
+  ScreenScope narrow      = 4;
+}
+
+message ScreenScope {
+  repeated int32 displays    = 1;
+  bool           allow_input = 2;
+}
+
+// Агент → Сервер: durable-событие сеанса.
+//
+// Зачем отдельный unary-RPC, когда есть SessionEnd в стриме: стрим и умирает первым.
+// Агент, у которого оборвалась сеть или который перезагрузился, обязан всё равно
+// доставить, ЧЕМ кончился сеанс, — иначе в журнале останется «AGENT_GONE» на каждом
+// сетевом моргании, и отличить обрыв от отказа сотрудника будет нечем. Поэтому
+// терминальные события едут через durable-очередь агента (outbox.KindScreenSession,
+// protected), а телеметрия — через ту же ручку, но вытесняемым видом
+// (KindScreenTelemetry): её потеря стоит дырки в графике, а не потери улики (§9.20).
+message ScreenEvent {
+  string session_id = 1;
+  string kind       = 2; // "end" | "consent" | "telemetry"
+  string reason     = 3; // EndReason для kind="end"
+  string detail     = 4;
+  int64  at_ms      = 5;
+  SessionStats stats = 6; // только для kind="telemetry"
+}
+
+message ScreenEventAck {
+  bool received = 1;
+}
+
 service AgentService {
   // Постоянный стрим: heartbeat → сервер, задачи ← сервер. (ADR-5)
   rpc Connect(stream HeartbeatRequest) returns (stream Task);
@@ -599,6 +941,12 @@ service AgentService {
   rpc RequestAdminAccess(RequestAdminAccessRequest) returns (RequestAdminAccessResponse);
   rpc FetchAdminStatus(FetchAdminStatusRequest) returns (FetchAdminStatusResponse);
   rpc ReportAdminAccess(ReportAdminAccessRequest) returns (ReportAdminAccessResponse);
+
+  // Улики сессии админ-прав: окна дельты ПО и служб за время выданных прав.
+  // Приём append-only и скоупится по устройству из mTLS-серта (ADR-1): request_id из
+  // тела сверяется на принадлежность ЭТОМУ устройству, иначе, зная чужой id, любое
+  // устройство дописывало бы улики в чужую заявку.
+  rpc ReportAdminSessionChanges(ReportAdminSessionChangesRequest) returns (ReportAdminSessionChangesResponse);
 
   // Скрипт-политики (Этап 5). Pull эффективного набора + отчёт о выполнении
   // (как FetchPolicy + ReportTaskResult).
@@ -633,6 +981,57 @@ service AgentService {
   // сознательно проходит через сервер и живёт у него в RAM. Границы дыры — только RAM,
   // только TTL, только человеком.
   rpc FetchLockSecrets(FetchLockSecretsRequest) returns (FetchLockSecretsResponse);
+
+  // Манифест обновления для КАНАЛА этого устройства (Q-52, миграция 065).
+  //
+  // Почему отдельный RPC, а не параметр к публичной REST-ручке /api/v1/agent/version.
+  // Ответ теперь зависит от того, КТО спрашивает: канал — свойство групп устройства.
+  // У REST-ручки аутентификации нет вовсе, то есть личность спрашивающего там взять
+  // неоткуда, а device_id из query-строки — ровно то, что запрещает ADR-1. Здесь
+  // устройство выводится из CN mTLS-серта, как во всех остальных pull-RPC.
+  //
+  // REST-ручка остаётся и отдаёт канал stable. Это и есть нужное поведение
+  // совместимости: агенты до этой версии умеют ходить только туда и потому не могут
+  // случайно попасть под канареечную выкатку.
+  rpc FetchUpdateManifest(FetchUpdateManifestRequest) returns (FetchUpdateManifestResponse);
+
+  // Интерактивный сеанс: кадры → сервер, управление ← сервер (ADR-8, enterprise).
+  //
+  // Почему отдельный стрим, а не поле в Connect: HTTP/2 мультиплексирует стримы одного
+  // соединения, и крупные DATA-фреймы кадров дают head-of-line blocking — heartbeat начал
+  // бы опаздывать ровно тогда, когда сеанс идёт. Поэтому агент открывает этот стрим на
+  // ОТДЕЛЬНОМ grpc.ClientConn (§3.2 контракта), а ADR-5 остаётся выполненным: кадры в
+  // HeartbeatRequest не кладутся.
+  //
+  // Инициатор — агент, потому что в gRPC стрим всегда открывает клиент. Приглашение едет
+  // навстречу, полем Task.screen_session.
+  rpc ScreenSession(stream SessionUp) returns (stream SessionDown);
+
+  // Durable-события сеанса: чем кончился, было ли согласие, телеметрия.
+  // Едет через outbox и переживает обрыв стрима и перезагрузку агента.
+  rpc ReportScreenEvent(ScreenEvent) returns (ScreenEventAck);
+}
+
+// Агент → Сервер: какой бинарь ставить этому устройству.
+//
+// os/arch приходят ОТ АГЕНТА и не выводятся из инвентаря сознательно: это GOOS/GOARCH
+// самого работающего бинаря, а он может не совпадать с железом (amd64-сборка под
+// Rosetta на arm64-маке). Привилегий эти поля не несут — сузить их подделкой нельзя,
+// канал берётся не отсюда.
+message FetchUpdateManifestRequest {
+  string os   = 1; // GOOS работающего бинаря
+  string arch = 2; // GOARCH работающего бинаря
+}
+message FetchUpdateManifestResponse {
+  string version            = 1;
+  string url                = 2; // откуда качать; тот же сервер, та же приватная CA
+  string sha256             = 3; // hex
+  string signature          = 4; // ed25519 над sha256(бинарь) — легаси, агент её не проверяет
+  string manifest_signature = 5; // ed25519 над каноном version\nos\narch\nsha256 (SEC-3)
+  // channel — из какого канала выдан манифест. Диагностика, а НЕ управление: агент
+  // не выбирает канал и не должен его помнить, иначе появился бы второй источник
+  // правды о том, где машина находится. Годен только для лога и разбора.
+  string channel = 6;
 }
 
 // Агент → Сервер: подтверждение применения/снятия блокировки (для аудита и UI).

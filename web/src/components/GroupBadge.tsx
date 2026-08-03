@@ -1,3 +1,4 @@
+import i18n from "@/i18n/config"
 import { DeviceGroupRef } from "@/lib/api"
 
 // groupAccent — цвет, которым красится рамка устройства. Устройство может состоять в
@@ -18,7 +19,7 @@ export function GroupBadge({ group }: { group: DeviceGroupRef }) {
         backgroundColor: `${group.color}1a`,
         color: group.color,
       }}
-      title={`Группа: ${group.name}`}
+      title={i18n.t("groups.badgeTitle", { name: group.name })}
     >
       <span className="h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: group.color }} />
       {group.name}

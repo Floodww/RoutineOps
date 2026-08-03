@@ -23,6 +23,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/notifier"
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"github.com/Floodww/RoutineOps/internal/server/worker"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"github.com/hibiken/asynq"
@@ -114,6 +115,9 @@ func main() {
 	asynqSrv := worker.NewServer(cfg.RedisAddr)
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(worker.TypeDeliverTask, worker.NewHandler(db, reg, logger).ProcessTask)
+	// Обработчики enterprise-очередей (выгрузка в SIEM, пересчёт CVE). В открытой
+	// сборке — no-op: типов задач нет, ставить их тоже некому.
+	registerEnterpriseWorkers(mux, db, cfg.JWTSecret, logger)
 	go func() {
 		if err := asynqSrv.Run(mux); err != nil {
 			logger.Error("asynq worker failed", "err", err)
@@ -152,10 +156,12 @@ func main() {
 		}),
 	)
 	g := gateway.New(db, reg, asynqClient, logger, tgBot)
+	// Манифест обновления (Q-52) отдаёт ссылку на бинарь — база та же, что у REST.
+	g.SetPublicWebURL(cfg.PublicWebURL)
 	// Enterprise-оверлей (//go:build enterprise) регистрирует escrow-сервис на g и
 	// возвращает RouterOptions (WithLockModePolicy + /escrow/status). Open-core: nil →
 	// escrow Unimplemented, lock mode=filevault → 409. См. enterprise{,_stub}.go.
-	routerOpts := enterpriseSetup(g, db, asynqClient, logger)
+	routerOpts := enterpriseSetup(g, db, asynqClient, reg, cfg.ScreenDir, cfg.RedisAddr, cfg.JWTSecret, logger)
 	routerOpts = append(routerOpts, api.WithReleasePubKey(cfg.ReleasePubKey))
 	// Fail-closed: опечатка в TRUSTED_PROXIES означает, что оператор настраивал
 	// нестандартную топологию. Молча откатиться на дефолт — оставить его с per-IP
@@ -219,11 +225,41 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				n, err := db.ExpireStaleAdminRequests(context.Background())
+				var n int64
+				err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+					k, err := db.ExpireStaleAdminRequests(tctx)
+					n += k
+					return err
+				})
 				if err != nil {
 					logger.Error("expire admin requests", "err", err)
 				} else if n > 0 {
 					logger.Info("expired stale admin requests", "count", n)
+				}
+			}
+		}
+	}()
+
+	// Свипер отсутствующих улик сессии админ-прав (контракт §4/§6): базовая линия
+	// снята, финала нет, заявка закрыта (revoked/expired). Покрывает досрочный отзыв.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var n int
+				err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+					k, err := g.SweepAdminSessionEvidenceGaps(tctx)
+					n += k
+					return err
+				})
+				if err != nil {
+					logger.Error("sweep admin session evidence gaps", "err", err)
+				} else if n > 0 {
+					logger.Warn("admin_session_evidence_gap alerts created", "count", n)
 				}
 			}
 		}
@@ -237,7 +273,12 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				n, err := db.CleanupOldData(context.Background(), cfg.DataRetentionDays, cfg.AuditRetentionDays)
+				var n int64
+				err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+					k, err := db.CleanupOldData(tctx, cfg.DataRetentionDays, cfg.AuditRetentionDays, cfg.AuditArchiveDir)
+					n += k
+					return err
+				})
 				if err != nil {
 					logger.Error("cleanup old data", "err", err)
 				} else if n > 0 {
@@ -276,7 +317,12 @@ func main() {
 				// Вторая половина реконсиляции — задачи, застрявшие в 'acked': агент
 				// подтвердил получение и пропал, не прислав результат. Своего тикера не
 				// заводим, окно 15 мин к минутному тику нечувствительно.
-				if n, err := db.FailStaleAckedTasks(context.Background(), storage.StaleAckedTimeoutMinutes); err != nil {
+				var n int64
+				if err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+					k, err := db.FailStaleAckedTasks(tctx, storage.StaleAckedTimeoutMinutes)
+					n += k
+					return err
+				}); err != nil {
 					logger.Error("reconcile: fail stale acked tasks", "err", err)
 				} else if n > 0 {
 					logger.Warn("задачи закрыты по таймауту: агент не прислал результат", "count", n)
@@ -322,11 +368,17 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					due, err := db.TakeEscalations(context.Background(),
-						cfg.EscalateMinSeverity, cfg.EscalateAfterMinutes, cfg.EscalateRepeatMinutes)
-					if err != nil {
+					// Ошибка одного тенанта НЕ отменяет рассылку по остальным: TakeEscalations
+					// уже проставил им escalated_at, и выход по continue означал бы алерт,
+					// помеченный отправленным и не отправленный никогда.
+					var due []storage.Alert
+					if err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+						d, err := db.TakeEscalations(tctx,
+							cfg.EscalateMinSeverity, cfg.EscalateAfterMinutes, cfg.EscalateRepeatMinutes)
+						due = append(due, d...)
+						return err
+					}); err != nil {
 						logger.Error("take alert escalations", "err", err)
-						continue
 					}
 					for _, a := range due {
 						waited := int(time.Since(a.CreatedAt).Minutes())
@@ -365,16 +417,24 @@ func main() {
 	// переписке оператора, в тикете. Поэтому строчка лога здесь не диагностика, а
 	// сам механизм: её нельзя убрать как «шумную».
 	go func() {
+		// Якорь на КАЖДЫЙ тенант: цепочка аудита тенантская (карта tenancy), поэтому
+		// одна голова на инсталляцию оставляла бы всех, кроме дефолтного тенанта, без
+		// tamper-evidence — молча, при работающем /audit-log/verify.
 		anchor := func() {
-			seq, hash, err := db.WriteAuditAnchor(context.Background())
-			if err != nil {
+			if err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
+				seq, hash, err := db.WriteAuditAnchor(tctx)
+				if err != nil {
+					return err
+				}
+				if seq == 0 {
+					return nil // журнал тенанта пуст, фиксировать нечего
+				}
+				tenantID, _ := storage.TenantIDFrom(tctx)
+				logger.Info("audit chain anchor", "tenant_id", tenantID, "seq", seq, "head_hash", hash)
+				return nil
+			}); err != nil {
 				logger.Error("audit chain anchor", "err", err)
-				return
 			}
-			if seq == 0 {
-				return // журнал пуст, фиксировать нечего
-			}
-			logger.Info("audit chain anchor", "seq", seq, "head_hash", hash)
 		}
 		// Первый якорь сразу на старте: перезапуск сервера — естественная точка,
 		// в которой голову стоит зафиксировать, и он же гарантирует, что якорь
@@ -432,7 +492,9 @@ func main() {
 }
 
 func seedAdmin(ctx context.Context, db *storage.DB, email, password string, logger *slog.Logger) error {
-	existing, err := db.GetUserByEmail(ctx, email)
+	// ADR-7: наличие проверяем по личности — она глобальна, а членство искали бы
+	// в конкретном тенанте и на втором запуске завели бы человеку вторую учётку.
+	existing, err := db.GetIdentityByEmail(ctx, email)
 	if err != nil {
 		return err
 	}
@@ -448,11 +510,19 @@ func seedAdmin(ctx context.Context, db *storage.DB, email, password string, logg
 	if err != nil {
 		return err
 	}
-	_, err = db.CreateUser(ctx, "Admin", email, string(hash), "it_admin")
+	_, err = db.CreateUser(ctx, tenancy.DefaultTenantID, "Admin", email, string(hash), "it_admin")
 	if err != nil {
 		return err
 	}
-	logger.Info("admin user created", "email", email)
+	// Бутстрап-личность получает надзор над инсталляцией: после ADR-7 это признак
+	// личности, и без него на чистой установке некому создать второй тенант —
+	// создание уже под requireProviderAdmin. Выдаётся только когда личность в
+	// инсталляции единственная, см. PromoteBootstrapProviderAdmin.
+	granted, err := db.PromoteBootstrapProviderAdmin(ctx, email)
+	if err != nil {
+		return err
+	}
+	logger.Info("admin user created", "email", email, "provider_admin", granted)
 	return nil
 }
 

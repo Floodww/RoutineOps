@@ -1,4 +1,4 @@
-//go:build !windows && (!darwin || !cgo)
+//go:build !windows && !linux && (!darwin || !cgo)
 
 // Package lockui — полноэкранный замок блокировки устройства (юзер-сессия).
 package lockui

@@ -1,3 +1,5 @@
+import i18n from "@/i18n/config"
+import { useTranslation } from "react-i18next"
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Copy, Check } from "lucide-react"
@@ -11,8 +13,9 @@ import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import ConfirmDialog from "@/components/ConfirmDialog"
-import { formatDistanceToNow } from "@/lib/time"
+import { formatDistanceToNow, formatDateTime } from "@/lib/time"
 import { toast } from "@/lib/toast"
+import { getIntuneMigrationScript, getJamfMigrationScript } from "@/lib/migrationScripts"
 
 type DialogStep = "form" | "token"
 
@@ -92,6 +95,7 @@ export function pendingNotConnected(devices: Device[]): Device[] {
 }
 
 export default function EnrollmentQueue() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<DeviceGroup[]>([])
@@ -107,6 +111,7 @@ export default function EnrollmentQueue() {
   const [issuing, setIssuing] = useState(false)
   const [result, setResult] = useState<BulkEnrollmentTokenResponse | null>(null)
   const [cmdOS, setCmdOS] = useState("windows")
+  const [scriptType, setScriptType] = useState<"cmd" | "intune" | "jamf">("cmd")
   const [copied, setCopied] = useState(false)
 
   const [confirmReject, setConfirmReject] = useState<Device | null>(null)
@@ -120,6 +125,13 @@ export default function EnrollmentQueue() {
 
   // Отдельной ручки под очередь на сервере нет: GET /devices отдаёт весь парк
   // (фильтруется только литеральный 'pending'), поэтому режем на клиенте.
+  //
+  // Комментарий выше ВЕРЕН, и это стоит держать в голове: 'pending' и
+  // 'pending_approval' — разные состояния. Первое = энроллмент не завершён (серта нет),
+  // такую строку в парке показывать нечего; второе = очередь одобрения, она приходит
+  // в GET /devices штатно. Пустая очередь при непустой таблице devices почти всегда
+  // значит, что строки заведены со статусом 'pending' в обход энроллмента, а не что
+  // сломан список. Держится тестами internal/server/storage/enrollment_queue_visibility_test.go.
   async function load() {
     try {
       const r = await api.get<Device[]>("/devices")
@@ -129,7 +141,7 @@ export default function EnrollmentQueue() {
       // 🔴 Не глотаем: на экране безопасности пустая таблица читается как «всё чисто».
       // Отказ загрузки обязан выглядеть отказом, а не пустой очередью.
       setLoadFailed(true)
-      toast({ title: "Не удалось загрузить устройства", variant: "destructive" })
+      toast({ title: t("enrollment.failedToLoadDevices"), variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -172,7 +184,7 @@ export default function EnrollmentQueue() {
       await api.post(`/devices/${device.id}/${action}`)
       await load()
       toast({
-        title: action === "approve" ? `${device.hostname} одобрено` : `${device.hostname} отклонено`,
+        title: action === "approve" ? t("enrollment.deviceApproved", { name: device.hostname }) : t("enrollment.deviceRejected", { name: device.hostname }),
         variant: action === "approve" ? "success" : "default",
       })
     } catch {
@@ -192,7 +204,7 @@ export default function EnrollmentQueue() {
       const n = action === "approve" ? r.data.approved : r.data.rejected
       await load()
       toast({
-        title: action === "approve" ? `Одобрено устройств: ${n ?? 0}` : `Отклонено устройств: ${n ?? 0}`,
+        title: action === "approve" ? t("enrollment.approvedCount", { count: n ?? 0 }) : t("enrollment.rejectedCount", { count: n ?? 0 }),
         variant: action === "approve" ? "success" : "default",
       })
     } catch {
@@ -210,6 +222,7 @@ export default function EnrollmentQueue() {
     setTTLHours(String(DEFAULT_TTL_HOURS))
     setRequireApproval(true)
     setCmdOS("windows")
+    setScriptType("cmd")
     setCopied(false)
   }
 
@@ -232,7 +245,7 @@ export default function EnrollmentQueue() {
     setSubmitting(true)
     try {
       await api.delete(`/devices/${d.id}`)
-      toast({ title: `${d.hostname} удалено` })
+      toast({ title: t("enrollment.deviceDeleted", { name: d.hostname }) })
     } catch {
       // авто-тост интерсептора
     } finally {
@@ -241,10 +254,11 @@ export default function EnrollmentQueue() {
     }
   }
 
-  async function revokeToken(t: BulkEnrollmentToken) {
+  // Параметр называется tok, а не t: t() из useTranslation закрылась бы им.
+  async function revokeToken(tok: BulkEnrollmentToken) {
     try {
-      await api.delete(`/enrollment-tokens/${t.id}`)
-      toast({ title: "Токен отозван", variant: "success" })
+      await api.delete(`/enrollment-tokens/${tok.id}`)
+      toast({ title: t("enrollment.tokenRevoked"), variant: "success" })
     } catch {
       // авто-тост интерсептора. 409 = токен уже мёртв, перечитываем список.
     } finally {
@@ -252,9 +266,20 @@ export default function EnrollmentQueue() {
     }
   }
 
+  function getTextToCopy() {
+    if (!result) return ""
+    if (scriptType === "intune") {
+      return getIntuneMigrationScript(apiBase(), `${window.location.hostname}:50051`, result.enrollment_token, result.ca_sha256)
+    }
+    if (scriptType === "jamf") {
+      return getJamfMigrationScript(apiBase(), `${window.location.hostname}:50051`, result.enrollment_token, result.ca_sha256)
+    }
+    return enrollCommand(cmdOS, result.enrollment_token, result.ca_sha256)
+  }
+
   async function copyCommand() {
-    if (!result) return
-    const text = enrollCommand(cmdOS, result.enrollment_token, result.ca_sha256)
+    const text = getTextToCopy()
+    if (!text) return
     try {
       await navigator.clipboard.writeText(text)
     } catch {
@@ -270,12 +295,12 @@ export default function EnrollmentQueue() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">Загрузка...</div>
+  if (loading) return <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">{t("enrollment.loading")}</div>
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-foreground">Энроллмент</h1>
+        <h1 className="text-xl font-semibold text-foreground">{t("enrollment.enrollment")}</h1>
         {/* Сбрасываем ТОЛЬКО когда закрыли форму: на шаге «токен» Esc или клик мимо
             стёрли бы единственную копию токена — на сервере он лежит хэшем, перечитать
             нечем. Случайное закрытие теперь просто прячет диалог, «Выпустить токен»
@@ -283,46 +308,44 @@ export default function EnrollmentQueue() {
             образом токен теперь хотя бы гасится: он виден в списке ниже. */}
         <Dialog open={dialogOpen} onOpenChange={(o) => { setDialogOpen(o); if (!o && step === "form") resetDialog() }}>
           <DialogTrigger asChild>
-            <Button size="sm">Выпустить токен</Button>
+            <Button size="sm">{t("enrollment.issueAToken")}</Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{step === "form" ? "Массовый токен энроллмента" : "Токен выпущен"}</DialogTitle>
+              <DialogTitle>{step === "form" ? t("enrollment.bulkEnrollmentToken") : t("enrollment.tokenIssued")}</DialogTitle>
             </DialogHeader>
 
             {step === "form" && (
               <div className="space-y-4 pt-2">
                 <p className="text-sm text-muted-foreground">
-                  Один токен на партию машин. Устройство создаётся само при первом подключении —
-                  заводить его заранее не нужно.
+                  {t("enrollment.bulkHint")}
                 </p>
                 <div className="space-y-1.5">
-                  <Label>Группа</Label>
+                  <Label>{t("enrollment.group")}</Label>
                   <Select
                     value={groupID}
                     onChange={setGroupID}
                     options={[
-                      { value: NO_GROUP, label: "Без группы" },
+                      { value: NO_GROUP, label: t("enrollment.noGroup") },
                       ...groups.map((g) => ({ value: g.id, label: g.name })),
                     ]}
                   />
                   <p className="text-xs text-muted-foreground">
-                    Всё, что подключится по этому токену, попадёт в группу — назначать её
-                    каждой машине руками не нужно.
+                    {t("enrollment.groupHint")}
                   </p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Лимит использований</Label>
+                  <Label>{t("enrollment.usageLimit")}</Label>
                   <Input
                     type="number"
                     min={1}
-                    placeholder="без лимита"
+                    placeholder={t("enrollment.noLimit")}
                     value={maxUses}
                     onChange={(e) => setMaxUses(e.target.value)}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Срок жизни, часов</Label>
+                  <Label>{t("enrollment.lifetimeHours")}</Label>
                   <Input
                     type="number"
                     min={1}
@@ -338,16 +361,14 @@ export default function EnrollmentQueue() {
                     onChange={(e) => setRequireApproval(e.target.checked)}
                   />
                   <span>
-                    Требовать одобрения
+                    {t("enrollment.requireApproval")}
                     <span className="block text-xs text-muted-foreground">
-                      Устройства встанут в очередь: подключатся и отдадут инвентарь, но скрипты
-                      выполнять не будут, пока их не одобрят. Снимать галочку стоит, только если
-                      токен уезжает в закрытый контур.
+                      {t("enrollment.approvalHint")}
                     </span>
                   </span>
                 </label>
                 <Button className="w-full" onClick={issueToken} disabled={issuing}>
-                  {issuing ? "Выпуск..." : "Выпустить"}
+                  {issuing ? t("enrollment.issuing") : t("enrollment.issue")}
                 </Button>
               </div>
             )}
@@ -356,30 +377,47 @@ export default function EnrollmentQueue() {
               <div className="space-y-4 pt-2">
                 <p className="text-sm text-muted-foreground">
                   {result.require_approval
-                    ? "Машины по этому токену встанут в очередь одобрения."
-                    : "Машины по этому токену подключатся сразу, без одобрения."}
-                  {" "}Действует до {new Date(result.expires_at).toLocaleString("ru-RU")}.
+                    ? t("enrollment.machinesUsingThisToken2")
+                    : t("enrollment.machinesUsingThisToken")}
+                  {" "}{t("enrollment.validUntilDate", { date: formatDateTime(result.expires_at) })}
                 </p>
-                <div className="space-y-1.5">
-                  <Label>ОС</Label>
-                  <Select
-                    value={cmdOS}
-                    onChange={setCmdOS}
-                    options={[
-                      { value: "windows", label: "Windows" },
-                      { value: "darwin",  label: "macOS"   },
-                      { value: "linux",   label: "Linux"   },
-                    ]}
-                  />
+                <div className="flex gap-2 mb-2">
+                  <Button size="sm" variant={scriptType === "cmd" ? "default" : "outline"} onClick={() => setScriptType("cmd")}>{t("enrollment.installationCommand")}</Button>
+                  <Button size="sm" variant={scriptType === "intune" ? "default" : "outline"} onClick={() => setScriptType("intune")}>Intune (Windows)</Button>
+                  <Button size="sm" variant={scriptType === "jamf" ? "default" : "outline"} onClick={() => setScriptType("jamf")}>Jamf / WSO (macOS)</Button>
                 </div>
+                {scriptType === "cmd" && (
+                  <div className="space-y-1.5">
+                    <Label>{t("enrollment.os")}</Label>
+                    <Select
+                      value={cmdOS}
+                      onChange={setCmdOS}
+                      options={[
+                        { value: "windows", label: "Windows" },
+                        { value: "darwin",  label: "macOS"   },
+                        { value: "linux",   label: "Linux"   },
+                      ]}
+                    />
+                  </div>
+                )}
+                {scriptType === "intune" && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("enrollment.intuneHint")}
+                  </p>
+                )}
+                {scriptType === "jamf" && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("enrollment.jamfHint")}
+                  </p>
+                )}
                 <div className="relative">
                   <pre className="rounded-md border border-border bg-muted px-3 py-3 text-xs font-mono text-soft break-all whitespace-pre-wrap pr-10">
-                    {enrollCommand(cmdOS, result.enrollment_token, result.ca_sha256)}
+                    {getTextToCopy()}
                   </pre>
                   <button
                     type="button"
                     onClick={copyCommand}
-                    aria-label={copied ? "Команда скопирована" : "Скопировать команду"}
+                    aria-label={copied ? t("enrollment.commandCopied") : t("enrollment.copyTheCommand")}
                     className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:text-foreground transition-colors"
                   >
                     {copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-500" /> : <Copy className="h-4 w-4" />}
@@ -389,14 +427,14 @@ export default function EnrollmentQueue() {
                   <p>Token: <span className="font-mono">{result.enrollment_token}</span></p>
                   {result.ca_sha256
                     ? <p>CA SHA-256: <span className="font-mono break-all">{result.ca_sha256}</span></p>
-                    : <p className="text-amber-600 dark:text-amber-500">Сервер поднят без CA — пин сертификата недоступен.</p>}
+                    : <p className="text-amber-600 dark:text-amber-500">{t("enrollment.theServerRunsWithout")}</p>}
                 </div>
                 {/* Токен показывается ОДИН раз: на сервере он лежит хэшем, переоткрыть нечем. */}
                 <p className="text-xs text-muted-foreground">
-                  Сохраните команду сейчас — повторно токен посмотреть будет нельзя.
+                  {t("enrollment.saveNow")}
                 </p>
                 <Button className="w-full" variant="outline" onClick={() => { setDialogOpen(false); resetDialog() }}>
-                  Готово
+                  {t("common.done")}
                 </Button>
               </div>
             )}
@@ -408,9 +446,9 @@ export default function EnrollmentQueue() {
         <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3">
           <div>
             <h2 className="text-[15px] font-semibold text-foreground">
-              Очередь одобрения{queue.length > 0 && <span className="text-muted-foreground"> — {queue.length}</span>}
+              {t("enrollment.approvalQueue")}{queue.length > 0 && <span className="text-muted-foreground"> — {queue.length}</span>}
             </h2>
-            <p className="text-xs text-muted-foreground">Ждут решения администратора</p>
+            <p className="text-xs text-muted-foreground">{t("enrollment.awaitingAnAdministratorS")}</p>
           </div>
           {queue.length > 0 && (
             <div className="flex flex-shrink-0 gap-2">
@@ -419,10 +457,10 @@ export default function EnrollmentQueue() {
                   могли приехать ещё машины. Подтверждение обязательно — раньше его имела
                   только менее опасная кнопка «Отклонить все». */}
               <Button size="sm" variant="outline" disabled={submitting} onClick={() => setConfirmApproveAll(true)}>
-                Одобрить все
+                {t("enrollment.approveAll")}
               </Button>
               <Button size="sm" variant="destructive" disabled={submitting} onClick={() => setConfirmRejectAll(true)}>
-                Отклонить все
+                {t("enrollment.rejectAll")}
               </Button>
             </div>
           )}
@@ -430,15 +468,15 @@ export default function EnrollmentQueue() {
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="text-xs">Имя</TableHead>
-              <TableHead className="text-xs">ОС</TableHead>
+              <TableHead className="text-xs">{t("enrollment.name")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.os")}</TableHead>
               {/* Серийник — единственное в этой таблице, что админ может сверить с
                   реальной машиной: hostname и ОС агент сообщает о себе сам, и назваться
                   «BUH-WS-01» может кто угодно. */}
-              <TableHead className="text-xs">Серийный номер</TableHead>
+              <TableHead className="text-xs">{t("enrollment.serialNumber")}</TableHead>
               <TableHead className="text-xs">IP</TableHead>
-              <TableHead className="text-xs">Группы</TableHead>
-              <TableHead className="text-xs">Подключилось</TableHead>
+              <TableHead className="text-xs">{t("enrollment.groups")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.connected")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -448,13 +486,12 @@ export default function EnrollmentQueue() {
                 <TableCell colSpan={7} className="text-center py-8 text-sm">
                   {loadFailed ? (
                     <span className="text-destructive">
-                      Не удалось загрузить список — очередь может быть НЕ пуста.{" "}
-                      <button type="button" className="underline" onClick={() => load()}>Повторить</button>
+                      {t("enrollment.listFailed")}{" "}
+                      <button type="button" className="underline" onClick={() => load()}>{t("enrollment.retry")}</button>
                     </span>
                   ) : (
                     <span className="text-muted-foreground">
-                      Очередь пуста — новые устройства появятся здесь, как только подключатся
-                      по массовому токену. Список обновляется сам.
+                      {t("enrollment.queueEmpty")}
                     </span>
                   )}
                 </TableCell>
@@ -488,10 +525,10 @@ export default function EnrollmentQueue() {
                     className="text-emerald-600 border-emerald-500/40 hover:bg-emerald-500/10 dark:text-emerald-400 mr-2"
                     onClick={() => decide(d, "approve")}
                   >
-                    Одобрить
+                    {t("enrollment.approve")}
                   </Button>
                   <Button size="sm" variant="destructive" disabled={submitting} onClick={() => setConfirmReject(d)}>
-                    Отклонить
+                    {t("enrollment.reject")}
                   </Button>
                 </TableCell>
               </TableRow>
@@ -505,16 +542,16 @@ export default function EnrollmentQueue() {
       {rejected.length > 0 && (
         <div className="glass overflow-hidden">
           <div className="px-5 pt-4 pb-3">
-            <h2 className="text-[15px] font-semibold text-foreground">Отклонённые — {rejected.length}</h2>
-            <p className="text-xs text-muted-foreground">Статус терминальный</p>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("enrollment.rejectedHeading", { count: rejected.length })}</h2>
+            <p className="text-xs text-muted-foreground">{t("enrollment.theStatusIsTerminal")}</p>
           </div>
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="text-xs">Имя</TableHead>
-                <TableHead className="text-xs">ОС</TableHead>
+                <TableHead className="text-xs">{t("enrollment.name")}</TableHead>
+                <TableHead className="text-xs">{t("enrollment.os")}</TableHead>
                 <TableHead className="text-xs">IP</TableHead>
-                <TableHead className="text-xs text-right">Статус</TableHead>
+                <TableHead className="text-xs text-right">{t("enrollment.status")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -532,7 +569,7 @@ export default function EnrollmentQueue() {
                   <TableCell className="px-4 py-3 text-xs text-muted-foreground">{d.os} {d.os_version}</TableCell>
                   <TableCell className="px-4 py-3 text-muted-foreground font-mono text-xs">{d.ip_address}</TableCell>
                   <TableCell className="px-4 py-3 text-right">
-                    <Badge variant={DEVICE_STATUS.rejected.variant}>{DEVICE_STATUS.rejected.label}</Badge>
+                    <Badge variant={DEVICE_STATUS.rejected.variant}>{i18n.t(DEVICE_STATUS.rejected.label)}</Badge>
                   </TableCell>
                 </TableRow>
               ))}
@@ -546,18 +583,17 @@ export default function EnrollmentQueue() {
       {notConnected.length > 0 && (
         <div className="glass overflow-hidden">
           <div className="px-5 pt-4 pb-3">
-            <h2 className="text-[15px] font-semibold text-foreground">Не подключились — {notConnected.length}</h2>
+            <h2 className="text-[15px] font-semibold text-foreground">{t("enrollment.notConnectedHeading", { count: notConnected.length })}</h2>
             <p className="text-xs text-muted-foreground">
-              Устройство заведено, но агент ни разу не вышел на связь. Старше суток —
-              скорее всего осадок от прерванной установки: токен уже мёртв, машина не приедет.
+              {t("enrollment.notConnectedHint")}
             </p>
           </div>
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="text-xs">Имя</TableHead>
-                <TableHead className="text-xs">ОС</TableHead>
-                <TableHead className="text-xs">Заведено</TableHead>
+                <TableHead className="text-xs">{t("enrollment.name")}</TableHead>
+                <TableHead className="text-xs">{t("enrollment.os")}</TableHead>
+                <TableHead className="text-xs">{t("enrollment.created")}</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -583,7 +619,7 @@ export default function EnrollmentQueue() {
                     </TableCell>
                     <TableCell className="px-4 py-3 text-right">
                       <Button size="sm" variant="outline" disabled={submitting} onClick={() => setConfirmDelete(d)}>
-                        Удалить
+                        {t("enrollment.delete")}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -597,11 +633,11 @@ export default function EnrollmentQueue() {
       <ConfirmDialog
         open={!!confirmDelete}
         onOpenChange={(o) => !o && setConfirmDelete(null)}
-        title="Удалить запись?"
+        title={t("enrollment.deleteTheRecord")}
         description={confirmDelete
-          ? `«${confirmDelete.hostname}» ни разу не выходило на связь, поэтому удаление затрагивает только запись в панели — на самой машине ничего не произойдёт. Если агент туда всё-таки поставят, он заведёт устройство заново.`
+          ? t("enrollment.deleteWarn", { name: confirmDelete.hostname })
           : ""}
-        confirmLabel="Удалить"
+        confirmLabel={t("enrollment.delete")}
         destructive
         onConfirm={() => { if (confirmDelete) deletePending(confirmDelete) }}
       />
@@ -612,20 +648,20 @@ export default function EnrollmentQueue() {
       <div className="glass overflow-hidden">
         <div className="px-5 pt-4 pb-3">
           <h2 className="text-[15px] font-semibold text-foreground">
-            Массовые токены{liveTokens.length > 0 && <span className="text-muted-foreground"> — {liveTokens.length} действующих</span>}
+            {t("enrollment.bulkTokens")}{liveTokens.length > 0 && <span className="text-muted-foreground"> — {t("enrollment.liveTokens", { count: liveTokens.length })}</span>}
           </h2>
           <p className="text-xs text-muted-foreground">
-            Сам токен не хранится — только отпечаток. Утёк или больше не нужен — отзывайте.
+            {t("enrollment.tokenStorageHint")}
           </p>
         </div>
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="text-xs">Группа</TableHead>
-              <TableHead className="text-xs">Использований</TableHead>
-              <TableHead className="text-xs">Очередь одобрения</TableHead>
-              <TableHead className="text-xs">Выпущен</TableHead>
-              <TableHead className="text-xs">Действует до</TableHead>
+              <TableHead className="text-xs">{t("enrollment.group")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.uses")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.approvalQueue")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.issued")}</TableHead>
+              <TableHead className="text-xs">{t("enrollment.validUntil")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -633,35 +669,36 @@ export default function EnrollmentQueue() {
             {tokens.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={6} className="text-center py-8 text-sm text-muted-foreground">
-                  Массовых токенов нет — «Выпустить токен» заводит партию машин одной командой.
+                  {t("enrollment.noTokens")}
                 </TableCell>
               </TableRow>
             )}
-            {tokens.map((t) => {
-              const dead = isDead(t)
+            {/* Переменная называется tok: t() из useTranslation закрылась бы ей. */}
+            {tokens.map((tok) => {
+              const dead = isDead(tok)
               return (
-                <TableRow key={t.id} className={dead ? "opacity-55 hover:bg-transparent" : "glass-hover"}>
-                  <TableCell className="px-4 py-3 text-sm">{t.group_name || <span className="text-muted-foreground">без группы</span>}</TableCell>
+                <TableRow key={tok.id} className={dead ? "opacity-55 hover:bg-transparent" : "glass-hover"}>
+                  <TableCell className="px-4 py-3 text-sm">{tok.group_name || <span className="text-muted-foreground">{t("enrollment.noGroup2")}</span>}</TableCell>
                   <TableCell className="px-4 py-3 text-sm font-mono">
-                    {t.uses}{t.max_uses ? ` / ${t.max_uses}` : <span className="text-muted-foreground"> / ∞</span>}
+                    {tok.uses}{tok.max_uses ? ` / ${tok.max_uses}` : <span className="text-muted-foreground"> / ∞</span>}
                   </TableCell>
                   <TableCell className="px-4 py-3">
                     {/* Токен без очереди одобрения заводит машины сразу в строй — это
                         более опасная конфигурация, и она обязана быть видна в списке. */}
-                    {t.require_approval
-                      ? <span className="text-xs text-muted-foreground">включена</span>
-                      : <Badge variant="destructive">выключена</Badge>}
+                    {tok.require_approval
+                      ? <span className="text-xs text-muted-foreground">{t("enrollment.on")}</span>
+                      : <Badge variant="destructive">{t("enrollment.off")}</Badge>}
                   </TableCell>
-                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">{formatDistanceToNow(t.created_at)}</TableCell>
+                  <TableCell className="px-4 py-3 text-xs text-muted-foreground">{formatDistanceToNow(tok.created_at)}</TableCell>
                   <TableCell className="px-4 py-3 text-xs">
                     {dead
-                      ? <span className="text-muted-foreground">не действует</span>
-                      : <span className="text-foreground">{formatDistanceToNow(t.expires_at)}</span>}
+                      ? <span className="text-muted-foreground">{t("enrollment.notInEffect")}</span>
+                      : <span className="text-foreground">{formatDistanceToNow(tok.expires_at)}</span>}
                   </TableCell>
                   <TableCell className="px-4 py-3 text-right">
                     {!dead && (
-                      <Button size="sm" variant="destructive" onClick={() => setConfirmRevoke(t)}>
-                        Отозвать
+                      <Button size="sm" variant="destructive" onClick={() => setConfirmRevoke(tok)}>
+                        {t("enrollment.revoke")}
                       </Button>
                     )}
                   </TableCell>
@@ -675,11 +712,12 @@ export default function EnrollmentQueue() {
       <ConfirmDialog
         open={!!confirmRevoke}
         onOpenChange={(o) => !o && setConfirmRevoke(null)}
-        title="Отозвать токен?"
+        title={t("enrollment.revokeTheToken")}
         description={confirmRevoke
-          ? `Машины, которые ещё не подключились по нему, энролиться не смогут — команду установки придётся выдать заново с новым токеном. Уже заведённые устройства останутся в парке: отзыв не снимает их с обслуживания.${confirmRevoke.uses > 0 ? ` Этим токеном уже воспользовались: ${confirmRevoke.uses}.` : ""}`
+          ? t("enrollment.revokeWarn") +
+            (confirmRevoke.uses > 0 ? " " + t("enrollment.revokeUses", { count: confirmRevoke.uses }) : "")
           : ""}
-        confirmLabel="Отозвать"
+        confirmLabel={t("enrollment.revoke")}
         destructive
         onConfirm={() => { if (confirmRevoke) revokeToken(confirmRevoke) }}
       />
@@ -687,11 +725,11 @@ export default function EnrollmentQueue() {
       <ConfirmDialog
         open={!!confirmReject}
         onOpenChange={(o) => !o && setConfirmReject(null)}
-        title="Отклонить устройство?"
+        title={t("enrollment.rejectTheDevice")}
         description={confirmReject
-          ? `«${confirmReject.hostname}» потеряет доступ: статус терминальный, обратно через одобрение не вернуть — машину придётся энролить заново.`
+          ? t("enrollment.rejectWarn", { name: confirmReject.hostname })
           : ""}
-        confirmLabel="Отклонить"
+        confirmLabel={t("enrollment.reject")}
         destructive
         onConfirm={() => { if (confirmReject) decide(confirmReject, "reject") }}
       />
@@ -699,18 +737,18 @@ export default function EnrollmentQueue() {
       <ConfirmDialog
         open={confirmApproveAll}
         onOpenChange={setConfirmApproveAll}
-        title="Одобрить все устройства в очереди?"
-        description={`Сейчас в очереди: ${queue.length}. Одобрение снимает ограничение и даёт машинам полный доступ, включая выполнение скриптов. Действие применится ко всем, кто стоит в очереди на момент подтверждения, — включая тех, кто мог подключиться, пока вы читали список.`}
-        confirmLabel="Одобрить все"
+        title={t("enrollment.approveEveryDeviceIn")}
+        description={t("enrollment.approveAllWarn", { count: queue.length })}
+        confirmLabel={t("enrollment.approveAll")}
         onConfirm={() => decideAll("approve")}
       />
 
       <ConfirmDialog
         open={confirmRejectAll}
         onOpenChange={setConfirmRejectAll}
-        title="Отклонить все устройства в очереди?"
-        description={`Будет отклонено устройств: ${queue.length}. Статус терминальный — вернуть их можно только повторным энроллментом.`}
-        confirmLabel="Отклонить все"
+        title={t("enrollment.rejectEveryDeviceIn")}
+        description={t("enrollment.rejectAllWarn", { count: queue.length })}
+        confirmLabel={t("enrollment.rejectAll")}
         destructive
         onConfirm={() => decideAll("reject")}
       />

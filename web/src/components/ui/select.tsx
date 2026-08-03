@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { ChevronDown, Check } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -16,7 +17,8 @@ interface SelectProps {
   className?: string
 }
 
-export function Select({ value, onChange, options, placeholder = "Выберите...", className }: SelectProps) {
+export function Select({ value, onChange, options, placeholder, className }: SelectProps) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -39,7 +41,7 @@ export function Select({ value, onChange, options, placeholder = "Выберит
         className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <span className={selected ? "text-foreground" : "text-muted-foreground"}>
-          {selected ? selected.label : placeholder}
+          {selected ? selected.label : (placeholder ?? t("common.select"))}
         </span>
         <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform duration-150", open && "rotate-180")} />
       </button>

@@ -103,12 +103,24 @@ type Handler struct {
 	mailer        *mailer.Mailer
 	cookieSecure  bool
 	loginLimiter  *loginLimiter
+	// Точки монтирования enterprise-оверлея. Заполняются опциями (WithPublicRoutes и
+	// прочими) ДО объявления роутов, применяются каждая в своём месте NewRouter.
+	// siemExport — включена ли выгрузка журнала (enterprise). Без неё задачу
+	// `siem:export` ставить нельзя: обработчика в открытой сборке нет.
+	siemExport       bool
+	publicMounts     []func(*Handler, chi.Router)
+	authedMounts     []func(*Handler, chi.Router)
+	adminMounts      []func(*Handler, chi.Router)
+	humanAdminMounts []func(*Handler, chi.Router)
 	// lockPolicy валидирует режим лока. Дефолт (open-core) — overlay-only; enterprise
 	// подменяет через WithLockModePolicy. См. lockmode.go.
 	lockPolicy LockModePolicy
 	// directorySvc — enterprise-каталог (LDAP). nil в open-core → /directory/* → 501.
 	// Регистрируется enterprise-оверлеем через WithDirectoryService. См. directory_seam.go.
 	directorySvc DirectoryService
+	// oidcSvc — enterprise SSO/OIDC. nil в open-core → /oidc/* и /auth/oidc/* → 501.
+	// Регистрируется enterprise-оверлеем через WithOIDCService. См. oidc_seam.go.
+	oidcSvc OIDCService
 	// telegramBotUsername — @username бота этого деплоя (getMe). nil = бот не настроен.
 	telegramBotUsername func(context.Context) string
 	// trustedProxies — с каких адресов верить заголовку с адресом клиента. См. realip.go.
@@ -129,6 +141,13 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		// D: 5 неудачных попыток на аккаунт за 15 мин → блок аккаунта на 15 мин.
 		loginLimiter:   newLoginLimiter(5, 15*time.Minute, 15*time.Minute),
 		trustedProxies: defaultTrustedProxies,
+	}
+
+	// Опции применяются ПЕРВЫМ делом: часть из них только настраивает хендлер
+	// (политика лока, доверенные прокси), часть — копит функции монтирования,
+	// которые ниже развесятся по своим группам.
+	for _, opt := range opts {
+		opt(h)
 	}
 
 	r := chi.NewRouter()
@@ -152,6 +171,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 
 	r.Get("/healthz", h.healthz)
 	r.With(httprate.LimitByIP(10, time.Minute)).Post("/api/v1/auth/login", h.login)
+	r.With(httprate.LimitByIP(10, time.Minute)).Post("/api/v1/auth/mfa/login", h.mfaLogin)
 	r.Post("/api/v1/auth/logout", h.logout)
 	// Неаутентифицированные side-effect роуты: SECURITY.md заявляет «rate limits» как
 	// общий контроль, но раньше он стоял только на /login. forgot-password шлёт письмо
@@ -161,8 +181,22 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 	r.With(httprate.LimitByIP(10, time.Minute)).Post("/api/v1/auth/reset-password", h.resetPassword)
 	r.With(httprate.LimitByIP(10, time.Minute)).Post("/api/v1/auth/accept-invite", h.acceptInvite)
 	r.Get("/api/v1/auth/invite", h.getInvite)
+	// OIDC SSO: begin (redirect to IdP) и callback — публичные, без JWT.
+	// Open-core (oidcSvc==nil) → 501 внутри хендлера.
+	r.With(httprate.LimitByIP(20, time.Minute)).Get("/api/v1/auth/oidc/{id}/begin", h.oidcBegin)
+	r.With(httprate.LimitByIP(20, time.Minute)).Get("/api/v1/auth/oidc/{id}/callback", h.oidcCallback)
+
+	// SAML SSO (enterprise) монтируется оверлеем сюда же: во free-сборке этих
+	// роутов нет вовсе.
+	for _, mount := range h.publicMounts {
+		mount(h, r)
+	}
 	r.Post("/api/v1/enroll", h.enroll)
 	r.Get("/api/v1/agent/version", h.agentVersion)
+	// Получатель эскроу. Без аутентификации, как и манифест обновления: артефакт
+	// подписан релизным ключом, а сам получатель — публичный ключ. Доверие держит
+	// подпись, а не то, кто спросил.
+	r.Get("/api/v1/agent/escrow-recipient", h.agentEscrowRecipient)
 	r.Get("/api/v1/installer", h.getInstaller)
 	r.Get("/ca.crt", h.getCACert)
 	r.Handle("/downloads/*", http.StripPrefix("/downloads/", noDirFileServer(releasesDir)))
@@ -188,7 +222,15 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		// это создавший админ. Без гарда viewer-токен менял бы админу пароль (и
 		// сбрасывал все его живые сессии), зная лишь текущий пароль.
 		r.With(requireHuman).Post("/me/password", h.changePassword)
+		// Мульти-членство (ADR-7 §11.4). requireHuman: у сервисного токена личности
+		// нет — он выпущен на одно членство и переключаться ему некуда.
+		r.With(requireHuman).Get("/auth/tenants", h.listMyTenants)
+		r.With(requireHuman).Post("/auth/tenant", h.switchTenant)
+		r.With(requireHuman).Post("/auth/mfa/enroll", h.mfaEnroll)
+		r.With(requireHuman).Post("/auth/mfa/verify", h.mfaVerifyEnroll)
+		r.With(requireHuman).Delete("/auth/mfa", h.mfaDisable)
 		r.Get("/devices", h.listDevices)
+		r.With(h.requireProviderAdmin, requireHuman).Get("/devices/across-tenants", h.listDevicesAcrossTenants)
 		r.Get("/devices/{id}", h.getDevice)
 		r.Get("/devices/{id}/tasks", h.listTasks)
 		r.Get("/alerts", h.listAlerts)
@@ -199,6 +241,7 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		r.With(requireHuman).Get("/profile/telegram", h.getTelegramStatus)
 		r.With(requireHuman).Post("/profile/notify-min-severity", h.setNotifyMinSeverity)
 		r.Get("/admin-access-requests", h.listAdminAccessRequests)
+		r.Get("/admin-access-requests/{id}/changes", h.listAdminSessionChanges)
 		r.Get("/policies", h.listPolicies)
 		r.Get("/policies/compliance", h.listPolicyCompliance)
 		r.Get("/policies/{id}/compliance", h.listPolicyDeviceCompliance)
@@ -208,8 +251,28 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 		r.Get("/script-policies/compliance", h.listScriptPolicyCompliance)
 		r.Get("/script-policies/{id}/results", h.listScriptResults)
 		r.Get("/device-groups", h.listDeviceGroups)
+		// Картина выкатки по каналам (Q-52): read-only, доступна всем ролям — «на
+		// какой версии сейчас парк» это наблюдение, а не управление.
+		r.Get("/update-rollout", h.updateRollout)
+		// Отчёт соответствия (Q-62): те же данные в JSON и файлом.
+		r.Get("/compliance/report", h.complianceReport)
+		r.Get("/compliance/report.csv", h.complianceReportCSV)
 		r.Get("/audit-log", h.listAuditLog)
 		r.Get("/users", h.listUsers)
+		r.Get("/tenants", h.listTenants)
+
+		// Реестр тенантов — только надзор над инсталляцией (контракт §4/§11.3).
+		r.Group(func(r chi.Router) {
+			r.Use(h.requireProviderAdmin, requireHuman)
+			r.Post("/tenants", h.createTenant)
+			r.Patch("/tenants/{id}", h.renameTenant)
+			r.Delete("/tenants/{id}", h.deleteTenant)
+			// Приглашение В КОНКРЕТНЫЙ тенант и перенос устройства между тенантами —
+			// действия надзора: администратор одного тенанта чужого устройства не
+			// видит, а свежесозданный тенант иначе остаётся недостижим ни для кого.
+			r.Post("/tenants/{id}/invites", h.inviteToTenant)
+			r.Post("/devices/{id}/tenant", h.moveDeviceToTenant)
+		})
 
 		// Мутирующие операции — только it_admin
 		r.Group(func(r chi.Router) {
@@ -306,13 +369,30 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 			r.With(requireHuman).Put("/directory/config", h.setDirectoryConfig)
 			r.With(requireHuman).Post("/directory/test", h.testDirectory)
 			r.With(requireHuman).Post("/directory/sync", h.syncDirectory)
+
 			r.Get("/directory/persons", h.listDirectoryPersons)
 		})
 
-		// Enterprise-оверлей монтирует свои роуты/политику в authed-группу
-		// (WithLockModePolicy, WithRoutes(escrow.StatusRoute)). Open-core: opts пуст.
-		for _, opt := range opts {
-			opt(h, r)
+		// Enterprise-оверлей: роуты для всех ролей, затем группы it_admin и
+		// it_admin+человек. Open-core: все три списка пусты.
+		for _, mount := range h.authedMounts {
+			mount(h, r)
+		}
+		if len(h.adminMounts) > 0 {
+			r.Group(func(ar chi.Router) {
+				ar.Use(h.requireRole("it_admin"))
+				for _, mount := range h.adminMounts {
+					mount(h, ar)
+				}
+			})
+		}
+		if len(h.humanAdminMounts) > 0 {
+			r.Group(func(ar chi.Router) {
+				ar.Use(h.requireRole("it_admin"), requireHuman)
+				for _, mount := range h.humanAdminMounts {
+					mount(h, ar)
+				}
+			})
 		}
 	})
 
@@ -320,7 +400,11 @@ func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *
 }
 
 func (h *Handler) listPolicies(w http.ResponseWriter, r *http.Request) {
-	rules, err := h.db.ListPolicyRules(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rules, err := h.db.ListPolicyRules(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -335,7 +419,11 @@ func (h *Handler) listPolicies(w http.ResponseWriter, r *http.Request) {
 // всему парку и инвентарю, а список правил должен оставаться дешёвым. UI подтягивает
 // счётчики вторым запросом и рисует их, когда придут.
 func (h *Handler) listPolicyCompliance(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.ListSoftwarePolicyCompliance(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.db.ListSoftwarePolicyCompliance(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -349,7 +437,11 @@ func (h *Handler) listPolicyCompliance(w http.ResponseWriter, r *http.Request) {
 // listPolicyDeviceCompliance — GET /policies/{id}/compliance: разрез одного софт-правила
 // по устройствам области действия (кто pass, кто fail и что именно нашлось в инвентаре).
 func (h *Handler) listPolicyDeviceCompliance(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.ListSoftwarePolicyDeviceCompliance(r.Context(), chi.URLParam(r, "id"))
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.db.ListSoftwarePolicyDeviceCompliance(r.Context(), tenantID, chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -361,7 +453,11 @@ func (h *Handler) listPolicyDeviceCompliance(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handler) listScriptPolicyCompliance(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.ListScriptPolicyCompliance(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.db.ListScriptPolicyCompliance(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -415,12 +511,16 @@ func (h *Handler) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Платформы: валидируем значения; пустой набор или все три = «все платформы» (nil-фильтр).
-	validPlatform := map[string]bool{"macOS": true, "Windows": true, "Linux": true}
+	// Регистр нормализуем тем же canonicalPlatform, что и в /scripts: раньше эта ручка
+	// требовала строго "Linux", а /scripts строго "linux", и обе отвечали 400 на вариант
+	// соседа. Сравнение здесь точное (platformMatches в storage), поэтому в БД обязан ехать
+	// канон, а не то, что прислал клиент.
 	seenPlatform := map[string]bool{}
 	var platforms []string
-	for _, p := range req.Platforms {
-		if !validPlatform[p] {
-			http.Error(w, "invalid platform: "+p, http.StatusBadRequest)
+	for _, raw := range req.Platforms {
+		p, ok := canonicalPlatform(raw)
+		if !ok {
+			http.Error(w, "invalid platform: "+raw, http.StatusBadRequest)
 			return
 		}
 		if !seenPlatform[p] { // дедуп: дубли не должны раздувать scope до «все»
@@ -431,7 +531,11 @@ func (h *Handler) createPolicy(w http.ResponseWriter, r *http.Request) {
 	if len(platforms) >= 3 {
 		platforms = nil // все три уникальные платформы = без фильтра
 	}
-	rule, err := h.db.CreatePolicyRule(r.Context(), req.SoftwareName, req.RuleType, req.DeviceID, platforms)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rule, err := h.db.CreatePolicyRule(r.Context(), tenantID, req.SoftwareName, req.RuleType, req.DeviceID, platforms)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -444,7 +548,11 @@ func (h *Handler) createPolicy(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deletePolicy(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.db.DeletePolicyRule(r.Context(), id); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.DeletePolicyRule(r.Context(), tenantID, id); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -461,16 +569,31 @@ func (h *Handler) healthz(w http.ResponseWriter, _ *http.Request) {
 // десятку колонок; километровый запрос — бесплатный способ сжечь CPU базы.
 const maxDeviceSearchLen = 128
 
-func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) listDevicesAcrossTenants(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if runes := []rune(query); len(runes) > maxDeviceSearchLen {
 		query = string(runes[:maxDeviceSearchLen])
 	}
-	// group_id пустой = все устройства. Мусор вместо UUID отдаст пустой список
-	// (сравнение по group_id::text в SQL), а не 500.
 	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
 	limit, offset := parsePage(r)
-	devices, total, err := h.db.ListEnrolledDevices(r.Context(), query, groupID, limit, offset)
+	tenantID, ok := ActorTenant(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	uid, email, ok := Actor(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	auditCtx := storage.WithTenantID(r.Context(), tenantID)
+	if err := h.db.WriteAuditLog(auditCtx, uid, email, "devices.list_across_tenants", "device", "", map[string]any{
+		"q": query, "group_id": groupID, "limit": limit, "offset": offset,
+	}); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	devices, total, err := h.db.ListDevicesAcrossTenants(r.Context(), query, groupID, limit, offset)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -482,9 +605,41 @@ func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, devices)
 }
 
+func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if runes := []rune(query); len(runes) > maxDeviceSearchLen {
+		query = string(runes[:maxDeviceSearchLen])
+	}
+	// group_id пустой = все устройства. Мусор вместо UUID отдаст пустой список
+	// (сравнение по group_id::text в SQL), а не 500.
+	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
+	limit, offset := parsePage(r)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	devices, total, err := h.db.ListEnrolledDevices(r.Context(), tenantID, query, groupID, limit, offset)
+	if err != nil {
+		// Логируем: главный список панели, отдающий 500 молча, не диагностируется
+		// вообще никак — в полевом e2e 30.07 на это ушёл отдельный заход.
+		slog.Error("devices: list", "tenant_id", tenantID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if devices == nil {
+		devices = []storage.Device{}
+	}
+	writeTotal(w, total)
+	writeJSON(w, http.StatusOK, devices)
+}
+
 func (h *Handler) getDevice(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-	device, software, err := h.db.GetDevice(r.Context(), id)
+	device, software, err := h.db.GetDevice(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -512,7 +667,11 @@ func (h *Handler) setDeviceOwner(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	found, err := h.db.SetDeviceOwnerPerson(r.Context(), id, strings.TrimSpace(req.PersonID))
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	found, err := h.db.SetDeviceOwnerPerson(r.Context(), tenantID, id, strings.TrimSpace(req.PersonID))
 	if err != nil {
 		// неверный uuid / несуществующая карточка ловится FK/parse — ввод оператора, 400.
 		http.Error(w, "invalid owner: "+err.Error(), http.StatusBadRequest)
@@ -536,6 +695,19 @@ type createTaskRequest struct {
 
 func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	device, _, err := h.db.GetDevice(r.Context(), tenantID, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 
 	var req createTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -552,6 +724,10 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.db.CreateTask(r.Context(), id, req.ScriptContent, req.Platform, req.Priority)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentTooOld) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		if errors.Is(err, storage.ErrDeviceNotActive) {
 			http.Error(w, "device is not active (pending approval / blocked / rejected)", http.StatusConflict)
 			return
@@ -595,7 +771,11 @@ func (h *Handler) runScriptOnGroup(w http.ResponseWriter, r *http.Request) {
 		req.Priority = "medium"
 	}
 
-	script, err := h.db.GetScript(r.Context(), req.ScriptID)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	script, err := h.db.GetScript(r.Context(), tenantID, req.ScriptID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -607,7 +787,7 @@ func (h *Handler) runScriptOnGroup(w http.ResponseWriter, r *http.Request) {
 
 	// Без этой проверки запуск на удалённой/опечатанной группе отдавал 201 created:0 —
 	// в UI неотличимо от «в группе нет подходящих устройств».
-	exists, err := h.db.DeviceGroupExists(r.Context(), groupID)
+	exists, err := h.db.DeviceGroupExists(r.Context(), tenantID, groupID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -660,7 +840,20 @@ func noDirFileServer(dir string) http.Handler {
 
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	tasks, err := h.db.ListDeviceTasks(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	device, _, err := h.db.GetDevice(r.Context(), tenantID, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	tasks, err := h.db.ListDeviceTasks(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -690,7 +883,11 @@ func (h *Handler) updateDeviceStatus(w http.ResponseWriter, r *http.Request) {
 	// сервисный токен (не requireHuman) флипнул бы pending_approval→active в обход
 	// approve, воскресил rejected/decommissioned. Их меняют только выделенные ручки
 	// (approve/reject/decommission) с правильным гейтом.
-	cur, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	cur, err := h.db.GetDeviceStatusByID(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -704,7 +901,7 @@ func (h *Handler) updateDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device in "+cur+": use approve/reject/decommission, not status", http.StatusConflict)
 		return
 	}
-	if err := h.db.UpdateDeviceStatus(r.Context(), id, req.Status); err != nil {
+	if err := h.db.UpdateDeviceStatus(r.Context(), tenantID, id, req.Status); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -725,7 +922,11 @@ func (h *Handler) updateDeviceStatus(w http.ResponseWriter, r *http.Request) {
 // блокирует удаление (409).
 func (h *Handler) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	found, err := h.db.DeleteDevice(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	found, err := h.db.DeleteDevice(r.Context(), tenantID, id)
 	if errors.Is(err, storage.ErrDeviceHasEscrow) {
 		http.Error(w, "device has recovery-key escrow records — resolve escrow before deleting", http.StatusConflict)
 		return
@@ -745,7 +946,11 @@ func (h *Handler) deleteDevice(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listAdminAccessRequests(w http.ResponseWriter, r *http.Request) {
 	statusFilter := r.URL.Query().Get("status")
-	rows, err := h.db.ListAdminAccessRequests(r.Context(), statusFilter)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.db.ListAdminAccessRequests(r.Context(), tenantID, statusFilter)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -789,7 +994,7 @@ func (h *Handler) respondAdminRequest(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case dur <= 0:
 			// Явного срока нет — берём системную настройку, но не даём ей выйти за границы.
-			defStr, _ := h.db.GetSystemSetting(r.Context(), "admin_request_default_duration")
+			defStr, _ := h.db.GetSystemSetting(r.Context(), claims.TenantID, "admin_request_default_duration")
 			dur, _ = strconv.Atoi(defStr)
 			if dur <= 0 {
 				dur = 3600
@@ -822,7 +1027,11 @@ func (h *Handler) listAlerts(w http.ResponseWriter, r *http.Request) {
 	// ponytail: фиксированный потолок 500 (клиентская фильтрация во фронте). Непринятые
 	// идут первыми (см. ListAlerts), так что практически не теряются; при >500 непринятых
 	// нужна серверная пагинация — апгрейд на тот момент.
-	alerts, err := h.db.ListAlerts(r.Context(), deviceID, 500)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	alerts, err := h.db.ListAlerts(r.Context(), tenantID, deviceID, 500)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -912,8 +1121,12 @@ func (h *Handler) generateTelegramLinkToken(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) acknowledgeAlert(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-	if err := h.db.AcknowledgeAlert(r.Context(), id); err != nil {
+	if err := h.db.AcknowledgeAlert(r.Context(), tenantID, id); err != nil {
 		http.Error(w, "not found or already acknowledged", http.StatusBadRequest)
 		return
 	}
@@ -923,14 +1136,53 @@ func (h *Handler) acknowledgeAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) revokeAdminRequest(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-	if err := h.db.RevokeAdminAccessRequest(r.Context(), id); err != nil {
+	if err := h.db.RevokeAdminAccessRequest(r.Context(), tenantID, id); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
 	h.audit(r.Context(), claims.UserID, claims.Email, "revoke_admin_request", "admin_request", id, nil)
+}
+
+// listAdminSessionChanges — дельта улик по заявке. Список заявок несёт сводку
+// колонками; полные строки — отдельной ручкой, чтобы таблица не раздувалась.
+func (h *Handler) listAdminSessionChanges(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	ev, err := h.db.GetAdminAccessEvidence(r.Context(), tenantID, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if ev == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	changes, err := h.db.ListAdminSessionChanges(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if changes == nil {
+		changes = []storage.AdminSessionChange{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"evidence": ev,
+		"changes":  changes,
+	})
 }
 
 // ====== Enrollment ======
@@ -983,9 +1235,27 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 
 	deviceID := tok.DeviceID
 
+	// Тенант в контекст — ОБЯЗАТЕЛЬНО, и это не симметрия ради красоты.
+	//
+	// Ручка энролла не аутентифицирована (личности ещё нет — за ней и пришли), поэтому
+	// тенанта в r.Context() нет ни при каких условиях. Bulk-ветка ниже передаёт
+	// tok.TenantID явным аргументом и потому работает, а эта ветка звала EnrollDevice с
+	// голым контекстом: beginScoped не выставлял GUC, и под ролью без BYPASSRLS предикат
+	// RLS из 046 кастовал пустой GUC в uuid — fail-closed, то есть 500 на каждую попытку.
+	//
+	// Полевое подтверждение (03.08.2026, прод): энролл по токену, привязанному к
+	// устройству, отвечал 500; тот же прод по bulk-токену энроллит нормально. До перевода
+	// сервера на роль mdm_app (30.07) обе ветки работали — старая роль обходила RLS, и
+	// разница между ними не проявлялась.
+	//
+	// Почему в репозитории нет теста на это: тестовая БД поднимается владельцем, у
+	// которого RLS не действует, поэтому регрессия зелёная и на сломанном коде. Чтобы
+	// такие дефекты ловились, тестам нужна вторая роль без BYPASSRLS — отдельная задача.
+	ctx := storage.WithTenantID(r.Context(), tok.TenantID)
+
 	// Update hostname/os from agent if provided
 	if req.Hostname != "" || req.OS != "" {
-		_ = h.db.UpdatePendingDeviceInfo(r.Context(), deviceID, req.Hostname, req.OS)
+		_ = h.db.UpdatePendingDeviceInfo(ctx, deviceID, req.Hostname, req.OS)
 	}
 
 	certPEM, certSerial, fingerprint, err := h.ca.SignCSR([]byte(req.CSRPem), deviceID)
@@ -997,7 +1267,7 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 
 	// Сохраняем отпечаток выданного серта: иначе после переустановки heartbeat
 	// создаст дубль устройства вместо обновления (БАГ 4).
-	if err := h.db.EnrollDevice(r.Context(), tok.ID, deviceID, certSerial, fingerprint); err != nil {
+	if err := h.db.EnrollDevice(ctx, tok.ID, deviceID, certSerial, fingerprint); err != nil {
 		if errors.Is(err, storage.ErrDeviceNotEnrollable) {
 			// Списанное/заблокированное/неодобренное устройство не возвращается в строй
 			// само по уцелевшему токену — только решением оператора.
@@ -1021,7 +1291,8 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request) {
 // обычному энроллу (агент не различает bulk/single).
 func (h *Handler) enrollBulk(w http.ResponseWriter, r *http.Request, tok *storage.EnrollmentToken, req enrollRequest) {
 	// Резервируем использование + создаём устройство ДО подписи (CN серта = id устройства).
-	deviceID, requireApproval, err := h.db.BeginBulkEnroll(r.Context(), tok.ID, req.Hostname, req.OS)
+	// Скоуп из токена (DEFINER lookup), не из тела — ADR-6.
+	deviceID, requireApproval, err := h.db.BeginBulkEnroll(r.Context(), tok.TenantID, tok.ID, req.Hostname, req.OS)
 	if err != nil {
 		if errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
 			http.Error(w, "token exhausted or expired", http.StatusUnauthorized)
@@ -1039,7 +1310,7 @@ func (h *Handler) enrollBulk(w http.ResponseWriter, r *http.Request, tok *storag
 		return
 	}
 
-	if err := h.db.FinalizeBulkEnroll(r.Context(), deviceID, certSerial, fingerprint, requireApproval); err != nil {
+	if err := h.db.FinalizeBulkEnroll(r.Context(), tok.TenantID, deviceID, certSerial, fingerprint, requireApproval); err != nil {
 		slog.Error("bulk enroll finalize", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1072,7 +1343,11 @@ func (h *Handler) createPendingDevice(w http.ResponseWriter, r *http.Request) {
 		req.OS = "unknown"
 	}
 
-	device, err := h.db.CreatePendingDevice(r.Context(), req.Hostname, req.OS)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	device, err := h.db.CreatePendingDevice(r.Context(), tenantID, req.Hostname, req.OS)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1080,7 +1355,7 @@ func (h *Handler) createPendingDevice(w http.ResponseWriter, r *http.Request) {
 
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(24 * time.Hour)
-	if err := h.db.CreateEnrollmentToken(r.Context(), device.ID, token, expiresAt); err != nil {
+	if err := h.db.CreateEnrollmentToken(r.Context(), tenantID, device.ID, token, expiresAt); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1104,8 +1379,12 @@ func (h *Handler) createPendingDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-	tok, err := h.db.GetActiveEnrollmentToken(r.Context(), id)
+	tok, err := h.db.GetActiveEnrollmentToken(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1123,6 +1402,26 @@ func (h *Handler) getEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // ====== Agent self-update manifest ======
+
+// agentEscrowRecipient отдаёт последнего опубликованного получателя эскроу.
+//
+// Ротация без пересборки агента (миграция 058): агент проверяет подпись релизным
+// ключом, который у него с энроллмента, и держит epoch как anti-rollback floor.
+// 404, пока ничего не публиковали, — агент в этом случае работает по вшитому пину,
+// то есть включение схемы не ломает уже раскатанный парк.
+func (h *Handler) agentEscrowRecipient(w http.ResponseWriter, r *http.Request) {
+	rec, err := h.db.LatestEscrowRecipient(r.Context())
+	if err != nil {
+		slog.Error("получатель эскроу: чтение", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if rec == nil {
+		http.Error(w, "not published", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
 
 func (h *Handler) agentVersion(w http.ResponseWriter, r *http.Request) {
 	osParam := r.URL.Query().Get("os")
@@ -1154,6 +1453,10 @@ func (h *Handler) agentVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) lockDevice(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	var req struct {
 		Reason string `json:"reason"`
@@ -1197,12 +1500,16 @@ func (h *Handler) lockDevice(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.db.CreateLockTask(r.Context(), id, string(hashBytes), req.Reason, false, lockMode)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentTooOld) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to create lock task", http.StatusInternalServerError)
 		return
 	}
 	// Желаемое состояние = locked: источник правды для реконсиляции (FetchLockStatus).
 	// Таск ниже — быстрый push; поллинг агента подхватит то же состояние после ребута.
-	if err := h.db.SetDeviceLockState(r.Context(), id, "locked", string(hashBytes), req.Reason, lockMode, task.ID); err != nil {
+	if err := h.db.SetDeviceLockState(r.Context(), tenantID, id, "locked", string(hashBytes), req.Reason, lockMode, task.ID); err != nil {
 		http.Error(w, "failed to persist lock state", http.StatusInternalServerError)
 		return
 	}
@@ -1219,15 +1526,23 @@ func (h *Handler) lockDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) unlockDevice(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	task, err := h.db.CreateLockTask(r.Context(), id, "", "", true, storage.LockModeOverlay)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentTooOld) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to create unlock task", http.StatusInternalServerError)
 		return
 	}
 	// Желаемое состояние = unlocked, хеш/причина очищаются, режим сброшен в overlay:
 	// реконсиляция уведёт агента из lock даже если push-таск не дойдёт.
-	if err := h.db.SetDeviceLockState(r.Context(), id, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
+	if err := h.db.SetDeviceLockState(r.Context(), tenantID, id, "unlocked", "", "", storage.LockModeOverlay, ""); err != nil {
 		http.Error(w, "failed to persist unlock state", http.StatusInternalServerError)
 		return
 	}
@@ -1256,7 +1571,11 @@ func (h *Handler) decommissionDevice(w http.ResponseWriter, r *http.Request) {
 
 	// Guard: устройство существует и ещё не списано (не плодим мёртвые задачи —
 	// списанное всё равно не примет Connect, задача бы висела pending до свипа).
-	st, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	st, err := h.db.GetDeviceStatusByID(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1272,6 +1591,10 @@ func (h *Handler) decommissionDevice(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.db.CreateDecommissionTask(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentTooOld) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to create decommission task", http.StatusInternalServerError)
 		return
 	}
@@ -1334,7 +1657,11 @@ func (h *Handler) rebootDevice(w http.ResponseWriter, r *http.Request) {
 	var req rebootRequest
 	_ = json.NewDecoder(r.Body).Decode(&req) // тело необязательно: дефолтная отсрочка без причины
 
-	st, err := h.db.GetDeviceStatusByID(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	st, err := h.db.GetDeviceStatusByID(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1353,6 +1680,10 @@ func (h *Handler) rebootDevice(w http.ResponseWriter, r *http.Request) {
 	delay := normalizeRebootDelay(req.DelaySeconds)
 	task, err := h.db.CreateRebootTask(r.Context(), id, req.Reason, delay)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentTooOld) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		slog.Error("create reboot task", "device_id", id, "err", err)
 		http.Error(w, "failed to create reboot task", http.StatusInternalServerError)
 		return
@@ -1387,7 +1718,11 @@ func (h *Handler) rebootGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists, err := h.db.DeviceGroupExists(r.Context(), groupID)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	exists, err := h.db.DeviceGroupExists(r.Context(), tenantID, groupID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1477,7 +1812,11 @@ func (h *Handler) issueBulkEnrollmentToken(w http.ResponseWriter, r *http.Reques
 	}
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(ttl)
-	if err := h.db.CreateBulkEnrollmentToken(r.Context(), token, req.GroupID, req.MaxUses, requireApproval, expiresAt); err != nil {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.db.CreateBulkEnrollmentToken(r.Context(), tenantID, token, req.GroupID, req.MaxUses, requireApproval, expiresAt); err != nil {
 		slog.Error("create bulk token", "err", err)
 		http.Error(w, "internal error (invalid group_id?)", http.StatusInternalServerError)
 		return
@@ -1504,7 +1843,11 @@ func (h *Handler) issueBulkEnrollmentToken(w http.ResponseWriter, r *http.Reques
 // выпуске. Без этой ручки выпущенный массовый токен был невидим — узнать, сколько их
 // живых и сколько раз ими воспользовались, было неоткуда.
 func (h *Handler) listBulkEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
-	tokens, err := h.db.ListBulkEnrollmentTokens(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	tokens, err := h.db.ListBulkEnrollmentTokens(r.Context(), tenantID)
 	if err != nil {
 		slog.Error("list bulk tokens", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -1525,13 +1868,17 @@ func (h *Handler) revokeEnrollmentToken(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid token id", http.StatusBadRequest)
 		return
 	}
-	ok, err := h.db.RevokeEnrollmentToken(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	revoked, err := h.db.RevokeEnrollmentToken(r.Context(), tenantID, id)
 	if err != nil {
 		slog.Error("revoke enrollment token", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !ok {
+	if !revoked {
 		http.Error(w, "token not found or already expired", http.StatusConflict)
 		return
 	}
@@ -1544,12 +1891,16 @@ func (h *Handler) revokeEnrollmentToken(w http.ResponseWriter, r *http.Request) 
 // парке — человеком). pending_approval → active.
 func (h *Handler) approveDevice(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	ok, err := h.db.ApproveDevice(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	approved, err := h.db.ApproveDevice(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !ok {
+	if !approved {
 		http.Error(w, "device not in approval queue", http.StatusConflict)
 		return
 	}
@@ -1563,12 +1914,16 @@ func (h *Handler) approveDevice(w http.ResponseWriter, r *http.Request) {
 // pending_approval → rejected (gateway режет Connect).
 func (h *Handler) rejectDevice(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	ok, err := h.db.RejectDevice(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	rejected, err := h.db.RejectDevice(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !ok {
+	if !rejected {
 		http.Error(w, "device not in approval queue", http.StatusConflict)
 		return
 	}
@@ -1585,7 +1940,11 @@ type pendingBatchRequest struct {
 func (h *Handler) approvePendingDevices(w http.ResponseWriter, r *http.Request) {
 	var req pendingBatchRequest
 	_ = json.NewDecoder(r.Body).Decode(&req) // тело опционально
-	n, err := h.db.ApprovePendingDevices(r.Context(), req.GroupID)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	n, err := h.db.ApprovePendingDevices(r.Context(), tenantID, req.GroupID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1600,7 +1959,11 @@ func (h *Handler) approvePendingDevices(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) rejectPendingDevices(w http.ResponseWriter, r *http.Request) {
 	var req pendingBatchRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	n, err := h.db.RejectPendingDevices(r.Context(), req.GroupID)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	n, err := h.db.RejectPendingDevices(r.Context(), tenantID, req.GroupID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1612,10 +1975,14 @@ func (h *Handler) rejectPendingDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) reenrollDevice(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(24 * time.Hour)
-	if err := h.db.ResetDeviceForReenroll(r.Context(), id, token, expiresAt); err != nil {
+	if err := h.db.ResetDeviceForReenroll(r.Context(), tenantID, id, token, expiresAt); err != nil {
 		// Несуществующее устройство сюда же: WHERE не нашёл строку — 409 честнее 500-й.
 		if errors.Is(err, storage.ErrDeviceNotReenrollable) {
 			http.Error(w, "device status forbids reenroll: use approve/unblock first", http.StatusConflict)
@@ -1733,7 +2100,11 @@ echo "RoutineOps agent installed and started."
 // ---- Users ----
 
 func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.db.ListUsers(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	users, err := h.db.ListUsers(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1767,7 +2138,11 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// Читаем ДО удаления: после него email взять неоткуда, а в журнале безопасности
 	// «удалён пользователь <uuid>» без адреса бесполезно.
-	target, err := h.db.GetUserByID(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	target, err := h.db.GetUserByID(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1777,7 +2152,7 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.db.DeleteUser(r.Context(), id)
+	deleted, err := h.db.DeleteUser(r.Context(), tenantID, id)
 	if errors.Is(err, storage.ErrLastAdmin) {
 		http.Error(w, "cannot delete the last it_admin", http.StatusConflict)
 		return
@@ -1814,6 +2189,17 @@ func (h *Handler) inviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	h.inviteInto(w, r, tenantID, req.Email, req.Role)
+}
+
+// inviteInto — общее тело приглашения: выпуск токена, запись, письмо либо ссылка.
+// Вынесено, чтобы приглашение В КОНКРЕТНЫЙ тенант (надзорный, см. tenants_handler)
+// не повторяло эту логику и не разъезжалось с ней.
+func (h *Handler) inviteInto(w http.ResponseWriter, r *http.Request, tenantID, email, role string) {
 	claims := r.Context().Value(claimsKey).(*jwtClaims)
 	tb := make([]byte, 32)
 	if _, err := rand.Read(tb); err != nil {
@@ -1821,12 +2207,13 @@ func (h *Handler) inviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := hex.EncodeToString(tb)
-	if _, err := h.db.CreateInvitation(r.Context(), req.Email, req.Role, token, claims.UserID); err != nil {
+	if _, err := h.db.CreateInvitation(r.Context(), tenantID, email, role, token, claims.UserID); err != nil {
+		slog.Error("создание приглашения", "tenant_id", tenantID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	h.audit(r.Context(), claims.UserID, claims.Email, "invite_user", "user", "",
-		map[string]string{"email": req.Email, "role": req.Role})
+		map[string]string{"email": email, "role": role, "tenant_id": tenantID})
 
 	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", h.publicWebURL, token)
 	// SMTP может быть выключен (SMTP_HOST пуст) — тогда Send/SendInvite — no-op,
@@ -1842,8 +2229,8 @@ func (h *Handler) inviteUser(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := h.mailer.SendInvite(req.Email, inviteURL); err != nil {
-		slog.Error("send invite email", "to", req.Email, "err", err)
+	if err := h.mailer.SendInvite(email, inviteURL); err != nil {
+		slog.Error("send invite email", "to", email, "err", err)
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":     "invited",
 			"email_sent": "false",
@@ -1897,7 +2284,16 @@ func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	newUser, err := h.db.CreateUser(r.Context(), req.Name, inv.Email, string(hash), inv.Role)
+	// Тенант — ИЗ ПРИГЛАШЕНИЯ, а не дефолтный. Здесь стоял tenancy.DefaultTenantID, и
+	// приглашение, несущее верный tenant_id, его просто выбрасывало: приглашённый админ
+	// заказчика получал свою роль в тенанте Default, где лежат данные другой организации,
+	// а целевой тенант оставался без единого пользователя, то есть недостижимым.
+	//
+	// По ADR-6 тенант выводится из уже доверенной идентичности. Ручка публичная (JWT ещё
+	// нет — человек как раз заводит себе учётку), поэтому единственный доверенный источник
+	// здесь — сам одноразовый токен приглашения, выписанный админом целевого тенанта.
+	// Сторону ВЫПИСКИ закрыли в Q-31, сторона ПРИЁМА осталась.
+	newUser, err := h.db.CreateUser(r.Context(), inv.TenantID, req.Name, inv.Email, string(hash), inv.Role)
 	if err != nil {
 		http.Error(w, "user already exists or internal error", http.StatusConflict)
 		return
@@ -1923,14 +2319,33 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	// Always return 200 to not leak user existence
-	user, _ := h.db.GetUserByEmail(r.Context(), req.Email)
+	// Always return 200 to not leak user existence.
+	// ADR-7: сброс идёт по личности (пароль её), но токен ссылается на строку users,
+	// поэтому берём любое её членство — какое именно, значения не имеет: пароль всё
+	// равно меняется у личности и действует во всех тенантах сразу.
+	identity, _ := h.db.GetIdentityByEmail(r.Context(), req.Email)
+	var user *storage.Membership
+	if identity != nil {
+		if ms, err := h.db.ListMemberships(r.Context(), identity.ID); err == nil && len(ms) > 0 {
+			user = &ms[0]
+		}
+	}
 	if user != nil {
 		tb := make([]byte, 32)
 		_, _ = rand.Read(tb)
 		token := hex.EncodeToString(tb)
-		_ = h.db.CreatePasswordResetToken(r.Context(), user.ID, token)
-		h.audit(r.Context(), user.ID, user.Email, "password_reset_requested", "user", user.ID, nil)
+		// 🔴 Ошибку создания токена НЕЛЬЗЯ отбрасывать: без строки в БД ссылка в письме
+		// мертва с рождения, а сброс по ней отвечает «invalid or expired token» — то
+		// есть пользователю сообщается «ссылка истекла» про ссылку, которой никогда не
+		// было. Ровно это и случилось на проде 30.07 (вставка не проходила WITH CHECK
+		// без привязанного тенанта). Письмо не отправляем: лучше «ничего не пришло»,
+		// чем битая ссылка, на которую человек потратит попытки и доверие.
+		if err := h.db.CreatePasswordResetToken(r.Context(), user.UserID, token); err != nil {
+			slog.Error("создание токена сброса пароля: письмо НЕ отправлено", "to", req.Email, "err", err)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+		h.audit(r.Context(), user.UserID, identity.Email, "password_reset_requested", "user", user.UserID, nil)
 		resetURL := fmt.Sprintf("%s/reset-password?token=%s", h.publicWebURL, token)
 		// Ответ всегда 200 (анти-энумерация), но ошибку мейлера логируем — иначе
 		// оператор не увидит, почему письма сброса не доходят (напр. SMTP-мисконфиг).
@@ -1971,6 +2386,12 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.db.GetPasswordResetToken(r.Context(), req.Token)
+	// Ответ клиенту намеренно один на все случаи (не подсказываем, существует ли
+	// токен), но отказ БД в лог обязан попасть отдельно: иначе сбой выглядит как
+	// «ссылка истекла», и искать причину приходится в самом дезориентирующем месте.
+	if err != nil {
+		slog.Error("сброс пароля: чтение токена", "err", err)
+	}
 	if err != nil || t == nil || t.UsedAt != nil || t.ExpiresAt.Before(time.Now()) {
 		http.Error(w, "invalid or expired token", http.StatusBadRequest)
 		return
@@ -1980,7 +2401,13 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := h.db.UpdateUserPassword(r.Context(), t.UserID, string(hash)); err != nil {
+	// ADR-7: токен ссылается на членство, но пароль принадлежит личности — меняем там.
+	epoch, err := h.db.GetUserEpoch(r.Context(), t.UserID)
+	if err != nil || epoch == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.db.UpdateIdentityPassword(r.Context(), epoch.IdentityID, string(hash)); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1990,8 +2417,8 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var resetEmail string
-	if u, uerr := h.db.GetUserByID(r.Context(), t.UserID); uerr == nil && u != nil {
-		resetEmail = u.Email
+	if email, ok, uerr := h.db.LookupUserEmail(r.Context(), t.UserID); uerr == nil && ok {
+		resetEmail = email
 	}
 	h.audit(r.Context(), t.UserID, resetEmail, "password_reset", "user", t.UserID, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

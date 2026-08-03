@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"context"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"testing"
 	"time"
@@ -176,7 +177,7 @@ func TestMTLS_ReportAdminAccess_HappyPath(t *testing.T) {
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-admreport")
 
-	owner, err := db.CreateUser(context.Background(), "Owner", uniqEmail("owner_mtls_admrep"), "hash", "user")
+	owner, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Owner", uniqEmail("owner_mtls_admrep"), "hash", "user")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

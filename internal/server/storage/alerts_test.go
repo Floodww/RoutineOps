@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 )
 
@@ -40,15 +41,15 @@ func TestCreateAlert_DedupsUnacknowledged(t *testing.T) {
 		t.Fatalf("другой details должен создать алерт: created=%v err=%v", created, err)
 	}
 	// после принятия всех — повтор снова создаётся («проблема вернулась после разбора»)
-	alerts, _ := db.ListAlerts(ctx, d.ID, 10)
+	alerts, _ := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10)
 	for _, a := range alerts {
-		_ = db.AcknowledgeAlert(ctx, a.ID)
+		_ = db.AcknowledgeAlert(ctx, tenancy.DefaultTenantID, a.ID)
 	}
 	created, err = db.CreateAlert(ctx, d.ID, "FORBIDDEN_SOFTWARE", `{"process":"bad.exe"}`, "")
 	if err != nil || !created {
 		t.Fatalf("после ack повтор должен создаться: created=%v err=%v", created, err)
 	}
-	if alerts, _ := db.ListAlerts(ctx, d.ID, 10); len(alerts) != 3 {
+	if alerts, _ := db.ListAlerts(ctx, tenancy.DefaultTenantID, d.ID, 10); len(alerts) != 3 {
 		t.Errorf("ждали 3 строки (bad×2 + other×1), получили %d", len(alerts))
 	}
 }
@@ -58,7 +59,7 @@ func TestListAlerts_ContainsCreated(t *testing.T) {
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-alertlist-%s", uniq(t)), "windows")
 	_, _ = db.CreateAlert(context.Background(), d.ID, "UNAUTHORIZED_INSTALL", `{}`, "")
 
-	alerts, err := db.ListAlerts(context.Background(), d.ID, 50)
+	alerts, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 50)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestListAlerts_FilterByDevice_Isolates(t *testing.T) {
 	_, _ = db.CreateAlert(context.Background(), d1.ID, "TYPE_A", `{}`, "")
 	_, _ = db.CreateAlert(context.Background(), d2.ID, "TYPE_B", `{}`, "")
 
-	alerts, err := db.ListAlerts(context.Background(), d1.ID, 50)
+	alerts, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d1.ID, 50)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -94,18 +95,18 @@ func TestAcknowledgeAlert_SetsTimestamp(t *testing.T) {
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-ack-alert-%s", uniq(t)), "macos")
 	_, _ = db.CreateAlert(context.Background(), d.ID, "FORBIDDEN_SOFTWARE", `{}`, "")
 
-	alerts, _ := db.ListAlerts(context.Background(), d.ID, 1)
+	alerts, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
 	if len(alerts) == 0 {
 		t.Fatal("no alert to acknowledge")
 	}
 	alertID := alerts[0].ID
 
-	if err := db.AcknowledgeAlert(context.Background(), alertID); err != nil {
+	if err := db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID); err != nil {
 		t.Fatalf("AcknowledgeAlert: %v", err)
 	}
 
 	// re-fetch and verify acknowledged_at is set
-	refreshed, _ := db.ListAlerts(context.Background(), d.ID, 1)
+	refreshed, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
 	if refreshed[0].AcknowledgedAt == nil {
 		t.Error("acknowledged_at should be set after acknowledge")
 	}
@@ -116,11 +117,11 @@ func TestAcknowledgeAlert_AlreadyAcknowledged_ReturnsError(t *testing.T) {
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-doubleack-%s", uniq(t)), "windows")
 	_, _ = db.CreateAlert(context.Background(), d.ID, "TYPE_X", `{}`, "")
 
-	alerts, _ := db.ListAlerts(context.Background(), d.ID, 1)
+	alerts, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
 	alertID := alerts[0].ID
 
-	_ = db.AcknowledgeAlert(context.Background(), alertID)
-	err := db.AcknowledgeAlert(context.Background(), alertID)
+	_ = db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID)
+	err := db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID)
 	if err == nil {
 		t.Error("expected error on double-acknowledge, got nil")
 	}

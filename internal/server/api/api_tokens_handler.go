@@ -22,7 +22,11 @@ const maxAPITokenNameLen = 128
 const maxAPITokenTTLDays = 3650
 
 func (h *Handler) listAPITokens(w http.ResponseWriter, r *http.Request) {
-	tokens, err := h.db.ListAPITokens(r.Context())
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	tokens, err := h.db.ListAPITokens(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -33,6 +37,9 @@ func (h *Handler) listAPITokens(w http.ResponseWriter, r *http.Request) {
 type createAPITokenRequest struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
+	// Scope — СУЖЕНИЕ доступа (storage.APITokenScope*). Пустая строка = без сужения.
+	// Токен области scim ходит ТОЛЬКО в /scim/v2/*, и только он туда и ходит (Q-61).
+	Scope string `json:"scope"`
 	// ExpiresInDays — 0/отсутствует означает бессрочный токен.
 	ExpiresInDays int `json:"expires_in_days"`
 }
@@ -76,6 +83,21 @@ func (h *Handler) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Область валидируется явно: неизвестное значение отбивается CHECK'ом миграции
+	// как 500, а должно быть понятным 400. Заодно опечатка вроде "SCIM" не создаёт
+	// токен, который fail-closed не пускает вообще никуда.
+	if !storage.ValidAPITokenScope(req.Scope) {
+		http.Error(w, "scope must be empty or scim", http.StatusBadRequest)
+		return
+	}
+	// 🔴 SCIM-токен заводит и удаляет пользователей панели, поэтому роль ниже
+	// it_admin для него бессмысленна: он получил бы 403 на первом же вызове, а
+	// выглядел бы рабочим.
+	if req.Scope == storage.APITokenScopeSCIM && req.Role != "it_admin" {
+		http.Error(w, "токен области scim выпускается только с ролью it_admin", http.StatusBadRequest)
+		return
+	}
+
 	if req.ExpiresInDays < 0 || req.ExpiresInDays > maxAPITokenTTLDays {
 		http.Error(w, "expires_in_days must be between 0 and 3650", http.StatusBadRequest)
 		return
@@ -91,20 +113,28 @@ func (h *Handler) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	tok, err := h.db.CreateAPIToken(r.Context(), name, req.Role, claims.UserID, secret, expiresAt)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	tok, err := h.db.CreateAPIToken(r.Context(), tenantID, name, req.Role, req.Scope, claims.UserID, secret, expiresAt)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	// В аудит — метаданные, но НЕ секрет и НЕ его хеш: журнал читают шире, чем БД.
 	h.audit(r.Context(), claims.UserID, claims.Email, "create_api_token", "api_token", tok.ID,
-		map[string]any{"name": tok.Name, "role": tok.Role, "expires_at": tok.ExpiresAt})
+		map[string]any{"name": tok.Name, "role": tok.Role, "scope": tok.Scope, "expires_at": tok.ExpiresAt})
 	writeJSON(w, http.StatusCreated, createAPITokenResponse{APIToken: *tok, Token: secret})
 }
 
 func (h *Handler) deleteAPIToken(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	found, err := h.db.DeleteAPIToken(r.Context(), id)
+	tenantID, ok := h.tenantID(w, r)
+	if !ok {
+		return
+	}
+	found, err := h.db.DeleteAPIToken(r.Context(), tenantID, id)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

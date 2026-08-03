@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest"
 import { bulkTokenBody, pendingNotConnected } from "./EnrollmentQueue"
 import { DEVICE_STATUS, DeviceStatus, Device } from "@/lib/api"
+import i18n from "@/i18n/config"
+import ru from "../locales/ru.json"
+import en from "../locales/en.json"
 
 const base = { groupID: "none", maxUses: "", ttlHours: "168", requireApproval: true }
 
@@ -58,10 +61,31 @@ describe("DEVICE_STATUS", () => {
     expect(Object.keys(DEVICE_STATUS).sort()).toEqual([...serverStatuses].sort())
   })
 
-  it("лейблы русские — латиница в UI означала бы непереведённый статус", () => {
-    for (const s of serverStatuses) {
-      expect(DEVICE_STATUS[s].label, `${s} не переведён`).toMatch(/[а-яА-Я]/)
+  // Проверка сместилась с «подпись русская» на «подпись есть в обоих словарях»:
+  // label теперь ключ, а не готовый текст. Прежнее условие после перевода зеленело
+  // бы на любом ключе — а именно ключ и попал бы в бейдж, если словарь отстал.
+  it("каждому статусу есть подпись в обоих словарях", () => {
+    const dicts: Record<string, Record<string, string>> = {
+      ru: ru.deviceStatus,
+      en: en.deviceStatus,
     }
+    for (const [lang, section] of Object.entries(dicts)) {
+      for (const s of serverStatuses) {
+        const key = DEVICE_STATUS[s].label.replace("deviceStatus.", "")
+        expect(section[key], `${lang}: ${s} без подписи`).toBeTruthy()
+      }
+    }
+  })
+
+  it("подпись статуса следует выбранному языку", async () => {
+    await i18n.changeLanguage("ru")
+    const rus = i18n.t(DEVICE_STATUS.blocked.label)
+    await i18n.changeLanguage("en")
+    const eng = i18n.t(DEVICE_STATUS.blocked.label)
+    await i18n.changeLanguage("ru")
+    expect(rus).not.toEqual(eng)
+    expect(rus).not.toContain("deviceStatus.")
+    expect(eng).not.toContain("deviceStatus.")
   })
 })
 

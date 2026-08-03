@@ -36,6 +36,23 @@ const (
 	KindScript   = "script"   // pb.ScriptResult
 	KindLock     = "lock"     // pb.ReportLockStatusRequest
 	KindTask     = "task"     // pb.TaskResult (результат ad-hoc задачи)
+
+	// KindAdminChanges — окно улик сессии админ-прав (что появилось на машине за
+	// время действия прав). Подчёркивание, а не дефис: имя вида уезжает в имя
+	// файла через sanitize, который дефис заменяет, и fileKind перестал бы
+	// узнавать вид — то есть запись потеряла бы свой класс вытеснения.
+	KindAdminChanges = "admin_changes"
+
+	// KindScreenSession — терминальные и консентные события интерактивного сеанса:
+	// чем он кончился, было ли согласие, была ли нарушена область. Protected:
+	// восстановить их неоткуда, а без них сеанс в аудите остаётся без исхода —
+	// то есть выглядит как «кто-то смотрел экран и неизвестно, чем это кончилось».
+	KindScreenSession = "screen_session"
+
+	// KindScreenTelemetry — телеметрия сеанса: кадры, байты, упоры в потолок полосы.
+	// Evictable: она кумулятивна и её потеря стоит дырки в графике, тогда как
+	// вытесненный ИБ-алерт невосстановим (docs/remote-desktop-contract.md §9.20).
+	KindScreenTelemetry = "screen_telemetry"
 )
 
 // Dispatcher доставляет одну запись серверу.
@@ -282,8 +299,34 @@ func (q *Queue) list() ([]string, error) {
 // late_task_result, script менее loss-sensitive). security/admin/lock —
 // ИБ-алерты, аудит прав, статусы лока — серверной компенсации не имеют, их
 // вытесняем в последнюю очередь.
+//
+// admin_changes — тоже вытесняемый, и это осознанно, хотя улики терять жаль:
+// окна кумулятивны (следующее содержит всё, что было в вытесненном), а вот
+// ИБ-алерт невосстановим. Улики не имеют права выдавливать сигнал безопасности.
+//
+// screen_telemetry — вытесняемый по той же логике. А вот screen_session
+// (терминальные и консентные события интерактивного сеанса) — protected: без него
+// сеанс остаётся в аудите без исхода, то есть выглядит как «кто-то смотрел экран
+// сотрудника, и чем это кончилось — неизвестно».
+//
+// ВАЖНО про умолчание: любой НЕ перечисленный здесь вид молча считается
+// protected, а при переполнении protected вытесняются по FIFO — то есть новый
+// вид телеметрии, добавленный без правки этого списка, начнёт выдавливать
+// ИБ-алерты. Это и есть §9.20 контракта удалённого стола; тест
+// TestEvictionClassOfEveryKind держит список полным.
 func isEvictableFirst(kind string) bool {
-	return kind == KindScript || kind == KindTask
+	return kind == KindScript || kind == KindTask || kind == KindAdminChanges ||
+		kind == KindScreenTelemetry
+}
+
+// AllKinds — все виды, которые агент кладёт в очередь.
+//
+// Существует ради теста полноты классификации: без явного перечня «забыл
+// классифицировать новый вид» не отличается от «вид намеренно protected», и
+// разница вскрывается только переполненной очередью в поле.
+var AllKinds = []string{
+	KindSecurity, KindAdmin, KindScript, KindLock, KindTask,
+	KindAdminChanges, KindScreenSession, KindScreenTelemetry,
 }
 
 // fileKind извлекает вид из имени файла (<unixnano>-<seq>-<kind>.json). Вид при

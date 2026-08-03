@@ -103,3 +103,10 @@ web/test-results/
 
 # nfpm staging (генерится pkg-* целями, уникальный per arch+format)
 build/nfpm/stage-*/
+# Скриншоты и логи прогона стенда экрана блокировки (scripts/test-lock-linux.sh)
+build/test/lock-linux/out/
+cmd/agent/rsrc_windows_arm64.syso
+
+# Настройки IDE-сессии (Cursor): содержат рабочий контекст с адресами стендов —
+# в срез такое ехать не должно, leak-скан на них падает.
+.cursor/

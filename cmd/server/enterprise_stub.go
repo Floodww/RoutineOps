@@ -8,6 +8,7 @@ import (
 
 	"github.com/Floodww/RoutineOps/internal/server/api"
 	"github.com/Floodww/RoutineOps/internal/server/gateway"
+	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"github.com/hibiken/asynq"
 )
@@ -19,7 +20,11 @@ func registerEnterpriseFlags() {}
 
 func runEnterpriseCLI() bool { return false }
 
-func enterpriseSetup(_ *gateway.Gateway, _ *storage.DB, _ *asynq.Client, logger *slog.Logger) []api.RouterOption {
+// registerEnterpriseWorkers — no-op: очередей SIEM и CVE в открытой сборке нет.
+func registerEnterpriseWorkers(_ *asynq.ServeMux, _ *storage.DB, _ string, _ *slog.Logger) {}
+
+func enterpriseSetup(_ *gateway.Gateway, _ *storage.DB, _ *asynq.Client, _ *registry.Registry,
+	_, _, _ string, logger *slog.Logger) []api.RouterOption {
 	// Оператор задал ESCROW_* на open-core-бинаре — фичи тут физически нет; молчание
 	// выглядело бы как «эскроу включён». Предупредить, но стартовать (fail-closed).
 	if os.Getenv("ESCROW_RECIPIENT") != "" || os.Getenv("ESCROW_RECIPIENT_FPR") != "" {

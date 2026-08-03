@@ -51,13 +51,15 @@ type capture struct {
 	invCh   chan *pb.InventoryReport
 	secCh   chan *pb.SecurityEvent
 	admCh   chan *pb.ReportAdminAccessRequest
-	polCh   chan *pb.FetchPolicyRequest // захват FetchPolicy-запросов
-	task    *pb.Task                    // отправляется агенту после первого heartbeat
-	blocked bool                        // если true — Connect сразу отдаёт PermissionDenied
+	evdCh   chan *pb.ReportAdminSessionChangesRequest // захват окон улик сессии админ-прав
+	polCh   chan *pb.FetchPolicyRequest               // захват FetchPolicy-запросов
+	task    *pb.Task                                  // отправляется агенту после первого heartbeat
+	blocked bool                                      // если true — Connect сразу отдаёт PermissionDenied
 
 	secNotReceived bool  // если true — ReportSecurityEvent отвечает received=false (без gRPC-ошибки)
 	secErr         error // если задан — ReportSecurityEvent отвечает этой gRPC-ошибкой (после захвата события)
 	admErr         error // если задан — ReportAdminAccess отвечает этой gRPC-ошибкой (после захвата запроса)
+	evdErr         error // если задан — ReportAdminSessionChanges отвечает этой gRPC-ошибкой
 }
 
 type testServer struct {
@@ -119,6 +121,14 @@ func (s *testServer) ReportAdminAccess(_ context.Context, in *pb.ReportAdminAcce
 		return nil, s.c.admErr
 	}
 	return &pb.ReportAdminAccessResponse{Received: true}, nil
+}
+
+func (s *testServer) ReportAdminSessionChanges(_ context.Context, in *pb.ReportAdminSessionChangesRequest) (*pb.ReportAdminSessionChangesResponse, error) {
+	send(s.c.evdCh, in)
+	if s.c.evdErr != nil {
+		return nil, s.c.evdErr
+	}
+	return &pb.ReportAdminSessionChangesResponse{Received: true}, nil
 }
 
 func (s *testServer) FetchPolicy(_ context.Context, in *pb.FetchPolicyRequest) (*pb.FetchPolicyResponse, error) {

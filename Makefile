@@ -77,23 +77,88 @@ check-escrow-tags:
 		exit 1; \
 	fi
 
-.PHONY: help proto tidy fmt hooks agent mockserver build certs up down logs run-mock run-agent test clean \
+# Guard: удалённый стол — enterprise-фича (роадмап, Этап 2), и доказывать это чтением
+# build-тегов нельзя. Проверяются ОБА направления на реальных бинарях: во free-агенте
+# кодов сеанса нет ни одного, в enterprise они есть.
+#
+# Почему по бинарю, а не по `go list -deps`: гард check-oss-no-enterprise.sh строит граф
+# по ИСХОДНИКАМ и на enterprise-БИНАРЬ в build/ радостно печатает «open-core чист» — эта
+# дыра уже описана в scripts/export-free.sh для escrow. Здесь она закрыта тем же способом.
+#
+# Токен — путь пакета: Go кладёт его в таблицы имён, поэтому он есть в бинаре тогда и
+# только тогда, когда пакет реально слинкован. Коды причин (SCOPE_VIOLATION и прочие) на
+# эту роль не годятся, и это выяснилось прогоном: линкер выбрасывает недостижимые строковые
+# константы, а платформенные ветки на чужой ОС просто не компилируются — гейт был бы
+# красным на исправном дереве. Путь пакета проверен на всех трёх ОС в обе стороны.
+# Пакетов теперь два: захват (internal/agent/screen) и формат кадра
+# (internal/screenframe, общий с сервером). Второй проверяется той же меркой не для
+# симметрии: он появился отдельным пакетом ИМЕННО чтобы сервер не тащил платформенный
+# захват, и ровно поэтому его легче всего случайно затянуть во free-граф.
+REMOTE_TOKEN := internal/agent/screen
+FRAME_TOKEN  := internal/screenframe
+check-remote-tags: ## Гейт §9.17: удалённого стола нет во free-сборке и есть в enterprise
+	@fail=0; \
+	for pkg in 'agent/screen' 'internal/screenframe'; do \
+		if go list -deps ./cmd/agent 2>/dev/null | grep -q "$$pkg\$$"; then \
+			echo "ОШИБКА: пакет $$pkg в графе FREE-сборки — удалённый стол утёк в open-core." >&2; \
+			fail=1; \
+		fi; \
+		if ! go list -deps -tags enterprise ./cmd/agent 2>/dev/null | grep -q "$$pkg\$$"; then \
+			echo "ОШИБКА: пакета $$pkg НЕТ в графе enterprise-сборки — фича отвалилась," >&2; \
+			echo "  либо гейт проверяет не то. Зелёный гейт без этой проверки бесполезен." >&2; \
+			fail=1; \
+		fi; \
+	done; \
+	tmp=$$(mktemp -d); \
+	CGO_ENABLED=0 go build -o "$$tmp/free" ./cmd/agent/ >/dev/null 2>&1 || { echo "ОШИБКА: free-сборка не собралась" >&2; fail=1; }; \
+	CGO_ENABLED=0 go build -tags enterprise -o "$$tmp/ent" ./cmd/agent/ >/dev/null 2>&1 || { echo "ОШИБКА: enterprise-сборка не собралась" >&2; fail=1; }; \
+	for tok in "$(REMOTE_TOKEN)" "$(FRAME_TOKEN)"; do \
+		if [ -f "$$tmp/free" ] && grep -qa "$$tok" "$$tmp/free"; then \
+			echo "ОШИБКА: $$tok найден во FREE-БИНАРЕ." >&2; fail=1; \
+		fi; \
+		if [ -f "$$tmp/ent" ] && ! grep -qa "$$tok" "$$tmp/ent"; then \
+			echo "ОШИБКА: $$tok отсутствует в ENTERPRISE-БИНАРЕ — проверка по бинарю бесполезна." >&2; fail=1; \
+		fi; \
+	done; \
+	rm -rf "$$tmp"; \
+	[ "$$fail" -eq 0 ] || exit 1; \
+	echo "check-remote-tags: free чист (граф и бинарь), enterprise содержит фичу ✅"
+
+.PHONY: help proto tidy fmt scan-free hooks agent mockserver build certs up down logs run-mock run-agent test clean \
         pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \
-        build-win build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win check-escrow-tags
+        build-win build-win-arm64 build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win \
+        check-escrow-tags check-remote-tags
 
 help: ## Список целей
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
 
+scan-free: ## Проверить Free-срез на утечки — гейт ПЕРЕД пушем (секунды, без тулчейна)
+	@# Почему цель, а не «просто запусти скрипт»: на macOS скрипт запускаться ОТКАЗЫВАЕТСЯ
+	@# (нужен bash 4+ и GNU sed), то есть половина команды выполнить рекомендацию не может
+	@# в принципе. Здесь этот случай уводится в контейнер, и гейт становится одинаковым
+	@# для всех. В CI суперсета он же есть шагом, но Actions там лежат на биллинге —
+	@# сегодня работает только локальный прогон.
+	@if [ -n "$${BASH_VERSINFO:-}" ] && [ "$$(bash -c 'echo $${BASH_VERSINFO[0]}')" -ge 4 ]; then \
+		bash scripts/export-free.sh --scan-only; \
+	else \
+		echo "== bash 3.x/BSD userland — ухожу в docker (golang:1.26) =="; \
+		docker run --rm -v "$$PWD":/src -w /src golang:1.26 \
+			bash -c 'git config --global --add safe.directory /src && bash scripts/export-free.sh --scan-only'; \
+	fi
+
 fmt: ## Отформатировать весь Go-код (gofmt). Прогоняйте перед пушем — это гейт CI.
 	gofmt -w .
 
-hooks: ## Включить pre-commit гейты репозитория (gofmt + перегенерация proto + buf breaking)
+hooks: ## Включить гейты репозитория: pre-commit (быстрое) + pre-push (тесты и линтеры)
 	@# core.hooksPath, а НЕ копия в .git/hooks: копия протухает молча — правку хука
 	@# получают только те, кто вспомнит переустановить. Здесь хук версионируется
 	@# вместе с кодом.
 	@git config core.hooksPath scripts/hooks
-	@chmod +x scripts/hooks/pre-commit
-	@echo "Хуки включены (core.hooksPath=scripts/hooks). Обойти разово: git commit --no-verify"
+	@chmod +x scripts/hooks/pre-commit scripts/hooks/pre-push
+	@echo "Хуки включены (core.hooksPath=scripts/hooks)."
+	@echo "  pre-commit: gofmt + перегенерация proto + buf breaking. Обойти: git commit --no-verify"
+	@echo "  pre-push:   go test ./internal/server/..., golangci-lint (обе сборки), гейты web."
+	@echo "              Обойти осознанно: SKIP_GATES=1 git push"
 
 proto: ## Перегенерировать Go-код из proto (ОБЩИЙ файл — менять согласованно, ADR-4)
 	@# Версии зафиксированы намеренно. Шапка сгенерированных файлов содержит версию
@@ -174,6 +239,33 @@ build-win: syso-win check-escrow-tags ## Кросс-компиляция аге�
 		$(TAGSFLAG) -ldflags "$(LDFLAGS) -X main.releasePubKey=$(RELEASE_PUBKEY) $(ESCROW_LDFLAGS) -H windowsgui" \
 		-o bin/agent_windows_amd64.exe ./cmd/agent
 
+syso-win-arm64: ## Сгенерировать cmd/agent/rsrc_windows_arm64.syso (манифест + PE-VERSIONINFO для arm64)
+	# Отдельный .syso, а не переиспользование amd64-шного: Go подхватывает ресурс по
+	# СУФФИКСУ АРХИТЕКТУРЫ в имени файла, поэтому rsrc_windows_amd64.syso в arm64-сборку
+	# не попадёт вовсе — молча, без ошибки. Итог был бы: exe без манифеста (нет
+	# longpath/UAC) и без PE-VERSIONINFO, а по этой метке Windows Installer решает,
+	# заменять ли файл при апгрейде MSI.
+	$(GOVERSIONINFO) -arm -64 -o cmd/agent/rsrc_windows_arm64.syso \
+		-manifest cmd/agent/agent.manifest \
+		-ver-major $(WV_MAJ) -ver-minor $(WV_MIN) -ver-patch $(WV_PAT) -ver-build 0 \
+		-product-ver-major $(WV_MAJ) -product-ver-minor $(WV_MIN) -product-ver-patch $(WV_PAT) -product-ver-build 0 \
+		-file-version "$(WINVER).0" -product-version "$(WINVER)" \
+		-company RoutineOps -product-name "RoutineOps Agent" -description "RoutineOps Agent" \
+		-internal-name RoutineOps-agent -original-name RoutineOps-agent.exe \
+		cmd/agent/versioninfo.json
+
+build-win-arm64: syso-win-arm64 check-escrow-tags ## Кросс-компиляция агента для Windows arm64
+	# Нативная сборка под ARM-ноутбуки (Snapdragon X, Surface). Эмуляция x64 на них
+	# работает, но у службы, которая живёт месяцами и лезет в реестр, WMI и SCM,
+	# нативный бинарь дешевле и предсказуемее.
+	#
+	# Артефакт на настоящем arm64-железе НЕ прогонялся — его нет ни у меня, ни на
+	# билд-боксе. Пока это сборка «собирается и линкуется», а не «проверено в поле»:
+	# перед публикацией в releases нужен полевой install/enroll на живой машине.
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
+		$(TAGSFLAG) -ldflags "$(LDFLAGS) -X main.releasePubKey=$(RELEASE_PUBKEY) $(ESCROW_LDFLAGS) -H windowsgui" \
+		-o bin/agent_windows_arm64.exe ./cmd/agent
+
 build-mac: check-escrow-tags ## Кросс-компиляция агента для macOS arm64 (CGO=0: без Cocoa-замка и keychain)
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
 		$(TAGSFLAG) -ldflags "$(LDFLAGS) -X main.releasePubKey=$(RELEASE_PUBKEY) $(ESCROW_LDFLAGS)" \
@@ -239,14 +331,19 @@ msi-exe: build-win ## Подготовить exe для сборки MSI: bin ->
 lint: ## Запустить golangci-lint
 	golangci-lint run ./...
 
-publish-release: ## Опубликовать релиз: make publish-release BINARY=./bin/agent_darwin_arm64 OS=darwin ARCH=arm64 VERSION=v1.0.0
+# CHANNEL — канал выкатки (Q-52). Дефолт stable сознательно совпадает с дефолтом
+# самой команды: забытая переменная обязана вести себя как до появления каналов, а не
+# тихо посадить релиз в канарейку, откуда его никто не ждёт.
+CHANNEL ?= stable
+
+publish-release: ## Опубликовать релиз: make publish-release BINARY=./bin/agent_darwin_arm64 OS=darwin ARCH=arm64 VERSION=v1.0.0 [CHANNEL=beta]
 	@test -n "$(BINARY)"  || { echo "укажи BINARY=<путь>"; exit 1; }
 	@test -n "$(OS)"      || { echo "укажи OS=<darwin|linux|windows>"; exit 1; }
 	@test -n "$(ARCH)"    || { echo "укажи ARCH=<amd64|arm64>"; exit 1; }
 	@test -n "$(VERSION)" || { echo "укажи VERSION=<semver>"; exit 1; }
 	go run ./cmd/publish-release \
 		-binary $(BINARY) -version $(VERSION) -os $(OS) -arch $(ARCH) \
-		-key $(RELEASE_KEY)
+		-key $(RELEASE_KEY) -channel $(CHANNEL)
 
 clean: ## Удалить собранные бинарники
 	rm -rf bin

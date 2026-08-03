@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
 	"testing"
 
@@ -27,23 +28,23 @@ func TestFetchPolicyRules_GroupScope(t *testing.T) {
 		t.Fatalf("GetDeviceIDByFingerprint: id=%q err=%v", deviceID, err)
 	}
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-scope-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-scope-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
 
 	// Глобальное и device-правила видны всегда (сохраняем старое поведение).
 	globalName := "global-" + suffix
-	if _, err := db.CreatePolicyRule(ctx, globalName, "allowed", nil, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, globalName, "allowed", nil, nil); err != nil {
 		t.Fatalf("CreatePolicyRule global: %v", err)
 	}
 	deviceName := "device-" + suffix
-	if _, err := db.CreatePolicyRule(ctx, deviceName, "forbidden", &deviceID, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, deviceName, "forbidden", &deviceID, nil); err != nil {
 		t.Fatalf("CreatePolicyRule device: %v", err)
 	}
 
 	groupName := "group-" + suffix
-	if _, err := db.AssignSoftwarePolicyToGroup(ctx, group.ID, groupName, "forbidden"); err != nil {
+	if _, err := db.AssignSoftwarePolicyToGroup(ctx, tenancy.DefaultTenantID, group.ID, groupName, "forbidden"); err != nil {
 		t.Fatalf("AssignSoftwarePolicyToGroup: %v", err)
 	}
 
@@ -72,7 +73,7 @@ func TestFetchPolicyRules_GroupScope(t *testing.T) {
 	}
 
 	// После добавления в группу: групповое правило становится видимым.
-	if err := db.AddDeviceToGroup(ctx, deviceID, group.ID); err != nil {
+	if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, deviceID, group.ID); err != nil {
 		t.Fatalf("AddDeviceToGroup: %v", err)
 	}
 	after := names()
@@ -84,7 +85,7 @@ func TestFetchPolicyRules_GroupScope(t *testing.T) {
 	}
 
 	// После удаления из группы: групповое правило снова невидимо.
-	if err := db.RemoveDeviceFromGroup(ctx, deviceID, group.ID); err != nil {
+	if err := db.RemoveDeviceFromGroup(ctx, tenancy.DefaultTenantID, deviceID, group.ID); err != nil {
 		t.Fatalf("RemoveDeviceFromGroup: %v", err)
 	}
 	if names()[groupName] {
@@ -97,16 +98,16 @@ func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-assign-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-assign-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
-	other, err := db.CreateDeviceGroup(ctx, "grp-other-"+suffix, "")
+	other, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-other-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup other: %v", err)
 	}
 
-	rule, err := db.AssignSoftwarePolicyToGroup(ctx, group.ID, "app-"+suffix, "forbidden")
+	rule, err := db.AssignSoftwarePolicyToGroup(ctx, tenancy.DefaultTenantID, group.ID, "app-"+suffix, "forbidden")
 	if err != nil {
 		t.Fatalf("AssignSoftwarePolicyToGroup: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 	}
 
 	countRules := func(groupID string) int {
-		groups, err := db.ListDeviceGroups(ctx)
+		groups, err := db.ListDeviceGroups(ctx, tenancy.DefaultTenantID)
 		if err != nil {
 			t.Fatalf("ListDeviceGroups: %v", err)
 		}
@@ -136,7 +137,7 @@ func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 	}
 
 	// Снятие с ЧУЖОЙ группой не удаляет правило.
-	if err := db.UnassignSoftwarePolicyFromGroup(ctx, other.ID, rule.ID); err != nil {
+	if err := db.UnassignSoftwarePolicyFromGroup(ctx, tenancy.DefaultTenantID, other.ID, rule.ID); err != nil {
 		t.Fatalf("UnassignSoftwarePolicyFromGroup wrong group: %v", err)
 	}
 	if n := countRules(group.ID); n != 1 {
@@ -144,7 +145,7 @@ func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 	}
 
 	// Снятие с правильной группой удаляет.
-	if err := db.UnassignSoftwarePolicyFromGroup(ctx, group.ID, rule.ID); err != nil {
+	if err := db.UnassignSoftwarePolicyFromGroup(ctx, tenancy.DefaultTenantID, group.ID, rule.ID); err != nil {
 		t.Fatalf("UnassignSoftwarePolicyFromGroup: %v", err)
 	}
 	if n := countRules(group.ID); n != 0 {
@@ -157,7 +158,7 @@ func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-fanout-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-fanout-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 	macDev := mustCreateActiveDevice(t, db, "mac-"+suffix, "macos")
 	linuxDev := mustCreateActiveDevice(t, db, "lin-"+suffix, "linux")
 	for _, d := range []string{winDev.ID, macDev.ID, linuxDev.ID} {
-		if err := db.AddDeviceToGroup(ctx, d, group.ID); err != nil {
+		if err := db.AddDeviceToGroup(ctx, tenancy.DefaultTenantID, d, group.ID); err != nil {
 			t.Fatalf("AddDeviceToGroup %s: %v", d, err)
 		}
 	}
@@ -196,7 +197,7 @@ func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 	}
 
 	// Пустая группа → 0 задач.
-	empty, err := db.CreateDeviceGroup(ctx, "grp-empty-"+suffix, "")
+	empty, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-empty-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup empty: %v", err)
 	}
@@ -228,7 +229,7 @@ func TestFetchPolicyRules_VersionTracksSetMembership(t *testing.T) {
 
 	var ruleIDs []string
 	for i, name := range []string{"first-" + suffix, "second-" + suffix, "third-" + suffix} {
-		rule, err := db.CreatePolicyRule(ctx, name, "forbidden", &deviceID, nil)
+		rule, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, name, "forbidden", &deviceID, nil)
 		if err != nil {
 			t.Fatalf("CreatePolicyRule %d: %v", i, err)
 		}
@@ -249,7 +250,7 @@ func TestFetchPolicyRules_VersionTracksSetMembership(t *testing.T) {
 	}
 
 	// Удаляем СРЕДНЕЕ правило — MAX(updated_at) при этом не двигается.
-	if err := db.DeletePolicyRule(ctx, ruleIDs[1]); err != nil {
+	if err := db.DeletePolicyRule(ctx, tenancy.DefaultTenantID, ruleIDs[1]); err != nil {
 		t.Fatalf("DeletePolicyRule: %v", err)
 	}
 	if after := version(); after == full {
@@ -262,11 +263,11 @@ func TestCreateDeviceGroup_DuplicateName(t *testing.T) {
 	ctx := context.Background()
 	name := "grp-dup-" + uniq(t)
 
-	if _, err := db.CreateDeviceGroup(ctx, name, ""); err != nil {
+	if _, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, name, "", ""); err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
 	// Регистр и краевые пробелы не делают имя новым.
-	if _, err := db.CreateDeviceGroup(ctx, "  "+strings.ToUpper(name)+" ", ""); !errors.Is(err, storage.ErrDuplicateGroupName) {
+	if _, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "  "+strings.ToUpper(name)+" ", "", ""); !errors.Is(err, storage.ErrDuplicateGroupName) {
 		t.Fatalf("duplicate group name err = %v, want ErrDuplicateGroupName", err)
 	}
 }
@@ -279,7 +280,7 @@ func TestCreateDeviceGroup_Color(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	explicit, err := db.CreateDeviceGroup(ctx, "grp-color-"+suffix, "#a1b2c3")
+	explicit, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-color-"+suffix, "#a1b2c3", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup с цветом: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestCreateDeviceGroup_Color(t *testing.T) {
 		t.Errorf("color = %q, want #a1b2c3", explicit.Color)
 	}
 
-	def, err := db.CreateDeviceGroup(ctx, "grp-nocolor-"+suffix, "")
+	def, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-nocolor-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup без цвета: %v", err)
 	}
@@ -303,13 +304,13 @@ func TestUpdateDeviceGroup_PartialUpdate(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-upd-"+suffix, "#111111")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-upd-"+suffix, "#111111", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
 
 	// Только цвет: имя остаётся прежним.
-	got, err := db.UpdateDeviceGroup(ctx, group.ID, "", "#222222")
+	got, err := db.UpdateDeviceGroup(ctx, tenancy.DefaultTenantID, group.ID, "", "#222222", "")
 	if err != nil {
 		t.Fatalf("UpdateDeviceGroup (цвет): %v", err)
 	}
@@ -319,7 +320,7 @@ func TestUpdateDeviceGroup_PartialUpdate(t *testing.T) {
 
 	// Только имя: цвет остаётся прежним.
 	renamed := "grp-upd-renamed-" + suffix
-	got, err = db.UpdateDeviceGroup(ctx, group.ID, renamed, "")
+	got, err = db.UpdateDeviceGroup(ctx, tenancy.DefaultTenantID, group.ID, renamed, "", "")
 	if err != nil {
 		t.Fatalf("UpdateDeviceGroup (имя): %v", err)
 	}
@@ -329,7 +330,7 @@ func TestUpdateDeviceGroup_PartialUpdate(t *testing.T) {
 
 	// Оба поля сразу.
 	both := "grp-upd-both-" + suffix
-	got, err = db.UpdateDeviceGroup(ctx, group.ID, both, "#333333")
+	got, err = db.UpdateDeviceGroup(ctx, tenancy.DefaultTenantID, group.ID, both, "#333333", "")
 	if err != nil {
 		t.Fatalf("UpdateDeviceGroup (оба): %v", err)
 	}
@@ -349,7 +350,7 @@ func TestUpdateDeviceGroup_NotFound(t *testing.T) {
 		"не-uuid-вовсе",
 		"",
 	} {
-		got, err := db.UpdateDeviceGroup(ctx, id, "new-name-"+uniq(t), "#abcdef")
+		got, err := db.UpdateDeviceGroup(ctx, tenancy.DefaultTenantID, id, "new-name-"+uniq(t), "#abcdef", "")
 		if err != nil {
 			t.Errorf("UpdateDeviceGroup(%q): err = %v, want nil", id, err)
 		}
@@ -365,17 +366,17 @@ func TestUpdateDeviceGroup_DuplicateName(t *testing.T) {
 	ctx := context.Background()
 	suffix := uniq(t)
 
-	taken, err := db.CreateDeviceGroup(ctx, "grp-taken-"+suffix, "")
+	taken, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-taken-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup taken: %v", err)
 	}
-	group, err := db.CreateDeviceGroup(ctx, "grp-free-"+suffix, "")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-free-"+suffix, "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup free: %v", err)
 	}
 
 	// Регистр и краевые пробелы не спасают: уникальность по lower(trim(name)) (026).
-	if _, err := db.UpdateDeviceGroup(ctx, group.ID, "  "+strings.ToUpper(taken.Name)+" ", ""); !errors.Is(err, storage.ErrDuplicateGroupName) {
+	if _, err := db.UpdateDeviceGroup(ctx, tenancy.DefaultTenantID, group.ID, "  "+strings.ToUpper(taken.Name)+" ", "", ""); !errors.Is(err, storage.ErrDuplicateGroupName) {
 		t.Fatalf("duplicate rename err = %v, want ErrDuplicateGroupName", err)
 	}
 }
@@ -388,7 +389,7 @@ func TestDeviceGroupColor_CheckConstraintRejectsGarbage(t *testing.T) {
 	db := newDB(t)
 	ctx := context.Background()
 
-	group, err := db.CreateDeviceGroup(ctx, "grp-check-"+uniq(t), "#123abc")
+	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-check-"+uniq(t), "#123abc", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
 	}
@@ -441,7 +442,7 @@ func TestFetchPolicyRules_VersionResistsSeparatorInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDeviceIDByFingerprint A: %v", err)
 	}
-	if _, err := db.CreatePolicyRule(ctx, "a\x1fforbidden\x1fz"+suffix, "forbidden", &idA, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "a\x1fforbidden\x1fz"+suffix, "forbidden", &idA, nil); err != nil {
 		t.Fatalf("CreatePolicyRule A: %v", err)
 	}
 
@@ -454,10 +455,10 @@ func TestFetchPolicyRules_VersionResistsSeparatorInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDeviceIDByFingerprint B: %v", err)
 	}
-	if _, err := db.CreatePolicyRule(ctx, "a", "forbidden", &idB, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "a", "forbidden", &idB, nil); err != nil {
 		t.Fatalf("CreatePolicyRule B1: %v", err)
 	}
-	if _, err := db.CreatePolicyRule(ctx, "z"+suffix, "forbidden", &idB, nil); err != nil {
+	if _, err := db.CreatePolicyRule(ctx, tenancy.DefaultTenantID, "z"+suffix, "forbidden", &idB, nil); err != nil {
 		t.Fatalf("CreatePolicyRule B2: %v", err)
 	}
 

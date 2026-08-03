@@ -8,21 +8,25 @@ import (
 )
 
 type Config struct {
-	GRPCAddr          string
-	HTTPAddr          string
-	ServerCert        string
-	ServerKey         string
-	CACert            string
-	CAKey             string
-	DatabaseDSN       string
-	RedisAddr         string
-	JWTSecret         string
-	SeedAdminEmail    string
-	SeedAdminPass     string
-	TelegramBotToken  string
-	PublicWebURL      string
-	ReleasePubKey     string
-	ReleasesDir       string
+	GRPCAddr         string
+	HTTPAddr         string
+	ServerCert       string
+	ServerKey        string
+	CACert           string
+	CAKey            string
+	DatabaseDSN      string
+	RedisAddr        string
+	JWTSecret        string
+	SeedAdminEmail   string
+	SeedAdminPass    string
+	TelegramBotToken string
+	PublicWebURL     string
+	ReleasePubKey    string
+	ReleasesDir      string
+	// ScreenDir — каталог записей интерактивных сеансов (enterprise). Отдельный
+	// bind-mount: записи невосстановимы, в отличие от releases/, который регенерируется
+	// из agent_releases (docs/remote-desktop-contract.md §5).
+	ScreenDir         string
 	SMTPHost          string
 	SMTPPort          string
 	SMTPUser          string
@@ -34,6 +38,7 @@ type Config struct {
 	// безопасности; чистить его коротким DataRetentionDays (операционные alerts/results)
 	// бессмысленно. 0/отриц = хранить бессрочно.
 	AuditRetentionDays int
+	AuditArchiveDir    string
 	// UnreachableThresholdMinutes — сколько минут без heartbeat до alert agent_unreachable.
 	// Дефолт 10080 (7 суток): алерт означает «машина реально выпала из парка», а не
 	// «ушла на выходные / в отпуск с ноутбуком». Короткий порог давал шум на каждый
@@ -135,6 +140,7 @@ func Load(configPath string) Config {
 		SeedAdminPass:               coalesce(os.Getenv("SEED_ADMIN_PASSWORD"), y.Admin.SeedPassword),
 		TelegramBotToken:            coalesce(os.Getenv("TELEGRAM_BOT_TOKEN"), y.Telegram.BotToken),
 		ReleasesDir:                 coalesce(os.Getenv("RELEASES_DIR"), y.Releases.Dir, "./releases"),
+		ScreenDir:                   coalesce(os.Getenv("SCREEN_DIR"), "./screen-recordings"),
 		SMTPHost:                    coalesce(os.Getenv("SMTP_HOST"), y.SMTP.Host),
 		SMTPPort:                    coalesce(os.Getenv("SMTP_PORT"), y.SMTP.Port, "587"),
 		SMTPUser:                    coalesce(os.Getenv("SMTP_USER"), y.SMTP.User),
@@ -143,6 +149,7 @@ func Load(configPath string) Config {
 		SMTPUseTLS:                  os.Getenv("SMTP_TLS") == "true",
 		DataRetentionDays:           parseInt(os.Getenv("DATA_RETENTION_DAYS"), 7),
 		AuditRetentionDays:          parseInt(os.Getenv("AUDIT_RETENTION_DAYS"), 365),
+		AuditArchiveDir:             os.Getenv("AUDIT_ARCHIVE_DIR"),
 		UnreachableThresholdMinutes: parseInt(os.Getenv("AGENT_UNREACHABLE_MINUTES"), 10080),
 		UnreachableCooldownMinutes:  parseInt(os.Getenv("AGENT_UNREACHABLE_COOLDOWN_MINUTES"), 360),
 		EscalateAfterMinutes:        parseInt(os.Getenv("ALERT_ESCALATE_AFTER_MINUTES"), 30),

@@ -3,6 +3,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 )
 
@@ -59,7 +60,7 @@ func TestMarkDeviceDecommissioned_ResurrectionGuard(t *testing.T) {
 	if err := db.MarkDeviceDecommissioned(context.Background(), devID); err != nil {
 		t.Fatalf("MarkDeviceDecommissioned: %v", err)
 	}
-	if st, _ := db.GetDeviceStatusByID(context.Background(), devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Fatalf("status = %q, want decommissioned", st)
 	}
 
@@ -67,14 +68,14 @@ func TestMarkDeviceDecommissioned_ResurrectionGuard(t *testing.T) {
 	if err := db.UpsertDeviceHeartbeat(context.Background(), storageHeartbeatData(fp, "decomm-host", "decomm-host", "192.0.2.5")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat (посмертный): %v", err)
 	}
-	if st, _ := db.GetDeviceStatusByID(context.Background(), devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Errorf("списанное устройство воскрешено heartbeat'ом: status = %q, want decommissioned", st)
 	}
 }
 
 func TestGetDeviceStatusByID_NotFoundEmpty(t *testing.T) {
 	db := newDB(t)
-	st, err := db.GetDeviceStatusByID(context.Background(), "00000000-0000-0000-0000-000000000000")
+	st, err := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		t.Fatalf("GetDeviceStatusByID: %v", err)
 	}

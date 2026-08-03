@@ -20,10 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Floodww/RoutineOps/internal/version"
 )
 
 // Manifest — ответ сервера о доступной версии (см. docs/self-update.md).
@@ -52,8 +55,24 @@ type Updater struct {
 	// Сеймы (подменяются в тестах; в проде — HTTP + замена файла + рестарт).
 	check    func(ctx context.Context) (*Manifest, error)
 	download func(ctx context.Context, url string) ([]byte, error)
-	replace  func(newBinary []byte) error // атомарно заменить текущий исполняемый файл
-	restart  func()                       // инициировать перезапуск (graceful-shutdown → супервизор)
+	// channelCheck — манифест КАНАЛА этого устройства, по mTLS (Q-52). nil, пока
+	// не подключён: тогда работает только check (публичный stable-манифест).
+	channelCheck func(ctx context.Context) (*Manifest, error)
+	replace      func(newBinary []byte) error // атомарно заменить текущий исполняемый файл
+	restart      func()                       // инициировать перезапуск (graceful-shutdown → супервизор)
+	// firstDelay — задержка ПЕРВОЙ проверки; nil → startupJitter(interval).
+	// Сейм только для тестов: иначе тест первой проверки ждал бы живой jitter.
+	firstDelay func() time.Duration
+
+	// hold — гейт §9.1: работа, посреди которой заменять бинарь нельзя (интерактивный
+	// сеанс). nil = гейта нет, поведение как раньше. Состояние отсрочки рядом: с какого
+	// момента ждём, что именно держит и просили ли уже завершить.
+	hold         *Hold
+	holdSince    time.Time
+	holdWhat     string
+	holdReleased bool
+	// nowFn — сейм времени для тестов гейта; nil = time.Now.
+	nowFn func() time.Time
 
 	// OnReplaceFail (опционально) зовётся, когда замена бинаря ПРОВАЛИЛАСЬ. Нужен
 	// Windows: replaceExecutable к этому моменту уже убил трей юзер-сессии taskkill'ом
@@ -80,7 +99,7 @@ func New(current string, interval time.Duration, pubKey ed25519.PublicKey, check
 	}
 	// manifest/бинарь отдаёт тот же сервер (приватная CA) — клиент должен ей
 	// доверять, иначе TLS не пройдёт (подлинность бинаря гарантирует подпись).
-	client, ok := newHTTPClient(caFile)
+	client, ok := NewHTTPClient(caFile)
 	if !ok {
 		log.Warn("selfupdate: CA для проверки эндпоинта обновлений не загружен — используются системные корни", slog.String("ca", caFile))
 	}
@@ -90,7 +109,61 @@ func New(current string, interval time.Duration, pubKey ed25519.PublicKey, check
 	return u
 }
 
-// Run периодически проверяет и применяет обновления, пока ctx жив.
+// SetChannelSource подключает канальный источник манифеста — тот, что ходит по
+// mTLS и получает версию КАНАЛА этого устройства (stable/beta, Q-52).
+//
+// Публичная HTTP-ручка остаётся запасным путём: у неё нет личности спрашивающего,
+// поэтому она всегда отдаёт stable. Откат на неё безопасен по построению — он может
+// только НЕ ДОДАТЬ канареечной машине beta-версию, но никогда не отдаст beta
+// обычной: обратного направления у этого отката нет.
+func (u *Updater) SetChannelSource(fetch func(ctx context.Context) (*Manifest, error)) {
+	u.channelCheck = fetch
+}
+
+// fetchManifest — канальный источник, при его отказе — публичный stable.
+//
+// Молчаливым откат быть не должен: «канарейка не поехала» и «канарейка поехала, но
+// манифест ей отдали не тот» выглядят в панели одинаково, и различить их можно
+// только по этой строчке в логе агента.
+func (u *Updater) fetchManifest(ctx context.Context) (*Manifest, error) {
+	if u.channelCheck == nil {
+		return u.check(ctx)
+	}
+	m, err := u.channelCheck(ctx)
+	if err == nil {
+		return m, nil
+	}
+	u.log.Warn("selfupdate: канальный манифест недоступен — беру общедоступный stable",
+		slog.Any("error", err))
+	return u.check(ctx)
+}
+
+// startupJitterCap — потолок задержки первой проверки. Дальше растягивать смысла
+// нет: чем позже первая проверка, тем дольше только что перезапущенный агент сидит
+// на старой версии, хотя релиз уже опубликован.
+const startupJitterCap = 5 * time.Minute
+
+// startupJitterShare — доля интервала, которую занимает потолок jitter'а. Нужна
+// ради коротких интервалов: с `ROUTINEOPS_UPDATE_INTERVAL=60s` (так гоняют полевую
+// приёмку) ждать 5 минут первой проверки абсурдно — потолок станет 6 секунд.
+const startupJitterShare = 10
+
+// startupJitter — полный jitter [0, потолок] перед первой проверкой. Приём тот же,
+// что в transport/backoff.go: парк из тысячи агентов после массового ребута не
+// должен прийти за манифестом (и тем более за бинарём) в одну секунду.
+func startupJitter(interval time.Duration) time.Duration {
+	limit := interval / startupJitterShare
+	if limit > startupJitterCap {
+		limit = startupJitterCap
+	}
+	if limit <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(limit) + 1))
+}
+
+// Run проверяет и применяет обновления: один раз вскоре после старта, дальше — по
+// интервалу, пока ctx жив.
 func (u *Updater) Run(ctx context.Context) {
 	if len(u.pubKey) != ed25519.PublicKeySize {
 		u.log.Warn("selfupdate: нет публичного ключа релиза — автообновление отключено")
@@ -100,6 +173,19 @@ func (u *Updater) Run(ctx context.Context) {
 		u.log.Info("selfupdate: dev-сборка — автообновление отключено")
 		return
 	}
+	// Первая проверка — вскоре после старта, а не через полный интервал. Иначе
+	// перезапуск службы или ребут машины отодвигал бы уже опубликованный релиз на
+	// весь интервал (по умолчанию 6 часов): агент жив, хартбиты идут, версия просто
+	// не растёт — ровно то, что показала полевая приёмка 2.5.6.
+	delay := startupJitter(u.interval)
+	if u.firstDelay != nil {
+		delay = u.firstDelay()
+	}
+	u.log.Info("selfupdate: первая проверка после старта", slog.Duration("через", delay))
+	if !waitOrDone(ctx, delay) {
+		return
+	}
+	u.report("selfupdate: проверка после старта", u.checkAndApply(ctx))
 	ticker := time.NewTicker(u.interval)
 	defer ticker.Stop()
 	for {
@@ -107,17 +193,46 @@ func (u *Updater) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := u.checkAndApply(ctx); err != nil {
-				u.log.Error("selfupdate: цикл обновления", slog.Any("error", err))
-			}
+			u.report("selfupdate: цикл обновления", u.checkAndApply(ctx))
 		}
+	}
+}
+
+// report логирует исход итерации.
+//
+// Отложенное обновление — не ошибка, и печатать его как ошибку нельзя: гейт §9.1
+// срабатывает штатно каждый раз, когда релиз совпал с интерактивным сеансом, и если это
+// красная строка в логе, то через неделю на красные строки перестанут смотреть вовсе.
+func (u *Updater) report(what string, err error) {
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrDeferred):
+		u.log.Info(what+": отложено", slog.Any("причина", err))
+	default:
+		u.log.Error(what, slog.Any("error", err))
+	}
+}
+
+// waitOrDone ждёт d. true — дождались, false — ctx отменён (агент останавливается,
+// и лезть за манифестом на выходе уже незачем).
+func waitOrDone(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 
 // checkAndApply — одна итерация: проверить версию, при наличии новее — скачать,
 // проверить и применить. Выделено для тестируемости.
 func (u *Updater) checkAndApply(ctx context.Context) error {
-	m, err := u.check(ctx)
+	m, err := u.fetchManifest(ctx)
 	if err != nil {
 		return fmt.Errorf("проверка версии: %w", err)
 	}
@@ -129,11 +244,11 @@ func (u *Updater) checkAndApply(ctx context.Context) error {
 	// например, после отката бинаря вручную (SEC-3, аудит 2026-07-01).
 	baseline := u.current
 	if floor := u.loadFloor(); floor != "" {
-		if floorNewer, ferr := IsNewer(baseline, floor); ferr == nil && floorNewer {
+		if floorNewer, ferr := version.IsNewer(baseline, floor); ferr == nil && floorNewer {
 			baseline = floor
 		}
 	}
-	newer, err := IsNewer(baseline, m.Version)
+	newer, err := version.IsNewer(baseline, m.Version)
 	if err != nil {
 		return fmt.Errorf("сравнение версий (%q vs %q): %w", baseline, m.Version, err)
 	}
@@ -142,6 +257,12 @@ func (u *Updater) checkAndApply(ctx context.Context) error {
 	}
 	u.log.Info("selfupdate: доступна новая версия",
 		slog.String("current", u.current), slog.String("available", m.Version))
+
+	// Гейт §9.1 — ДО скачивания. Тянуть 20 МБ по тому же каналу, по которому идёт
+	// интерактивный сеанс, значит превратить его в слайд-шоу ещё до всякой замены exe.
+	if err := u.applyAllowed(ctx); err != nil {
+		return err
+	}
 
 	data, err := u.download(ctx, m.URL)
 	if err != nil {

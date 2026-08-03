@@ -83,6 +83,35 @@ func EnsureUserWritableDir(dir string) error {
 	return ensureRealDir(dir, userWritableDirSDDL)
 }
 
+// EnsureSecretDir закрывает каталог с приватным материалом mTLS (certs/) тем же
+// admin-only DACL, что и каталог состояния, и зачищает уже лежащие файлы.
+//
+// Зачем отдельно от EnsureDataDir: каталог сертов лежит НЕ в ProgramData, а рядом
+// с бинарём — при MSI-установке это C:\Program Files\RoutineOps\certs. Права там
+// не ставит никто: .wxs создаёт INSTALLFOLDER без Permission, а os.WriteFile с
+// режимом 0600 на Windows выражает лишь флаг read-only — доступ определяет
+// унаследованный ACL. У C:\Program Files в наследуемых ACE есть
+// (BUILTIN\Пользователи; ReadAndExecute; OI CI) — проверено чтением Get-Acl на
+// живой машине, — то есть при cert-source=file (значение по умолчанию) приватный
+// ключ устройства читается любым локальным пользователем. По ADR-1 идентичность
+// устройства — это CN его сертификата, поэтому пара ключ+серт позволяет
+// говорить с сервером от имени машины.
+//
+// Родителя (каталог установки) не трогаем — его ACL задаёт установщик.
+// Детей ЗАЧИЩАЕМ: одного protected DACL на каталоге мало. У Users по умолчанию
+// есть SeChangeNotifyPrivilege (bypass traverse checking), поэтому отказ в
+// LIST/TRAVERSE на certs не мешает открыть agent.key по полному пути, если на
+// самом файле остался унаследованный Users RX. Полевой прогон 2.5.4 на
+// тестовом Windows-стенде: каталог стал недоступен icacls'у обычного пользователя, а
+// ReadAllBytes(agent.key) всё равно возвращал ключ. secureExistingChildren
+// ставит тем же admin-only DACL на уже лежащие файлы; содержимое не трогает.
+func EnsureSecretDir(dir string) error {
+	if err := ensureRealDir(dir, dataDirSDDL); err != nil {
+		return err
+	}
+	return secureExistingChildren(dir)
+}
+
 // maxSecureDepth — потолок рекурсии зачистки прав детей state (защита от
 // патологически вложенного pre-seed; наши каталоги — outbox/escrow — плоские).
 const maxSecureDepth = 8

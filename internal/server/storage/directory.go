@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // Хранилище персон каталога (LDAP Phase 1). Это ЧИСТЫЕ DB-операции на общей таблице
@@ -36,12 +38,12 @@ const PersonSourceManual = "manual"
 // UpsertDirectoryPerson — идемпотентный upsert по object_guid. Пустой SID пишется NULL
 // (частичный UNIQUE-индекс по object_sid не должен ловить пустые). synced_at → now().
 func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) error {
-	_, err := db.pool.Exec(ctx, `
+	_, err := db.Q(ctx).Exec(ctx, `
 		INSERT INTO directory_persons
-		    (object_guid, object_sid, sam_account, user_principal, display_name, email, distinguished_name, disabled, synced_at)
-		VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8, now())
-		ON CONFLICT (object_guid) DO UPDATE SET
-		    object_sid         = NULLIF($2,''),
+		    (tenant_id, object_guid, object_sid, sam_account, user_principal, display_name, email, distinguished_name, disabled, synced_at)
+		VALUES ($1, $2, NULLIF($3,''), $4, $5, $6, $7, $8, $9, now())
+		ON CONFLICT (tenant_id, object_guid) DO UPDATE SET
+		    object_sid         = NULLIF($3,''),
 		    sam_account        = EXCLUDED.sam_account,
 		    user_principal     = EXCLUDED.user_principal,
 		    display_name       = EXCLUDED.display_name,
@@ -49,7 +51,7 @@ func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) erro
 		    distinguished_name = EXCLUDED.distinguished_name,
 		    disabled           = EXCLUDED.disabled,
 		    synced_at          = now()
-	`, p.ObjectGUID, p.ObjectSID, p.SAMAccount, p.UserPrincipal, p.DisplayName, p.Email, p.DistinguishedName, p.Disabled)
+	`, tenancy.DefaultTenantID, p.ObjectGUID, p.ObjectSID, p.SAMAccount, p.UserPrincipal, p.DisplayName, p.Email, p.DistinguishedName, p.Disabled)
 	return err
 }
 
@@ -59,7 +61,7 @@ func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) erro
 // sAMAccountName из "DOMAIN\user".
 func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount string) (personID string, err error) {
 	if sid != "" {
-		err = db.pool.QueryRow(ctx,
+		err = db.Q(ctx).QueryRow(ctx,
 			`SELECT id FROM directory_persons WHERE object_sid = $1 AND NOT disabled`, sid,
 		).Scan(&personID)
 		if err == nil {
@@ -70,7 +72,7 @@ func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount s
 		}
 	}
 	if samAccount != "" {
-		err = db.pool.QueryRow(ctx,
+		err = db.Q(ctx).QueryRow(ctx,
 			`SELECT id FROM directory_persons WHERE lower(sam_account) = lower($1) AND NOT disabled LIMIT 1`, samAccount,
 		).Scan(&personID)
 		if err == nil {
@@ -87,10 +89,10 @@ func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount s
 // привязку (owner_directory_id → NULL).
 func (db *DB) SetDeviceOwnerDirectory(ctx context.Context, deviceID, personID string) error {
 	if personID == "" {
-		_, err := db.pool.Exec(ctx, `UPDATE devices SET owner_directory_id = NULL WHERE id = $1`, deviceID)
+		_, err := db.Q(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = NULL WHERE id = $1`, deviceID)
 		return err
 	}
-	_, err := db.pool.Exec(ctx, `UPDATE devices SET owner_directory_id = $2 WHERE id = $1`, deviceID, personID)
+	_, err := db.Q(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = $2 WHERE id = $1`, deviceID, personID)
 	return err
 }
 
@@ -105,7 +107,7 @@ type DeviceForMatch struct {
 // ещё не проставлен. Enterprise-матчер зовёт после синка для ПЕРЕМАТЧА задним числом
 // (роадмап §121-123): синк подтянул персону — привязка срабатывает без миграции.
 func (db *DB) ListDevicesForDirectoryMatch(ctx context.Context) ([]DeviceForMatch, error) {
-	rows, err := db.pool.Query(ctx, `
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT id, COALESCE(console_user, ''), COALESCE(console_user_sid, '')
 		FROM devices
 		WHERE owner_directory_id IS NULL
@@ -127,14 +129,27 @@ func (db *DB) ListDevicesForDirectoryMatch(ctx context.Context) ([]DeviceForMatc
 }
 
 // ListDirectoryPersons — для UI «Каталог». Сортировка по display_name.
-func (db *DB) ListDirectoryPersons(ctx context.Context) ([]DirectoryPerson, error) {
-	rows, err := db.pool.Query(ctx, `
+func (db *DB) ListDirectoryPersons(ctx context.Context, tenantID string) ([]DirectoryPerson, error) {
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := TxFrom(ctx); !ok {
+		var finish func(bool)
+		ctx, finish, err = db.BindTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		defer finish(true)
+	}
+	rows, err := db.Q(ctx).Query(ctx, `
 		SELECT id, object_guid, COALESCE(object_sid,''), COALESCE(sam_account,''),
 		       COALESCE(user_principal,''), COALESCE(display_name,''), COALESCE(email,''),
 		       COALESCE(distinguished_name,''), disabled, source
 		FROM directory_persons
+		WHERE tenant_id = $1
 		ORDER BY lower(COALESCE(display_name, sam_account, object_guid))
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +171,7 @@ func (db *DB) ListDirectoryPersons(ctx context.Context) ([]DirectoryPerson, erro
 // а disabled матч уже не берёт. Возвращает число помеченных (для отчёта синка).
 func (db *DB) MarkDirectoryPersonsStale(ctx context.Context, syncStartedBefore int64) (int64, error) {
 	// syncStartedBefore — unix-время начала текущего синка; всё, что не тронуто им, устарело.
-	tag, err := db.pool.Exec(ctx,
+	tag, err := db.Q(ctx).Exec(ctx,
 		// source <> 'manual': ручные карточки каталог не отдаёт НИКОГДА, и без этого
 		// условия первый же синк погасил бы всех, кого оператор завёл сам.
 		`UPDATE directory_persons SET disabled = true

@@ -121,7 +121,18 @@ func TestCrashMidFlushPreservesFIFO(t *testing.T) {
 	}
 
 	// Фаза 1 — краш-ребёнок: наполняет очередь и падает на доставке записи k.
-	child := exec.Command(os.Args[0], "-test.run=TestMain")
+	//
+	// Путь берём из os.Executable, а НЕ из os.Args[0]: там лежит строка, которой
+	// процесс запустили, и при запуске из текущего каталога («t.exe») Go
+	// отказывается её исполнять — «cannot run executable found relative to
+	// current directory». `go test` в репозитории даёт абсолютный путь и проблему
+	// прячет, а перенесённый на живую Windows тест-бинарь падал бы «крашем,
+	// которого не было».
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	child := exec.Command(self, "-test.run=TestMain")
 	child.Env = append(os.Environ(),
 		crashEnvFlag+"=1",
 		crashEnvDir+"="+dir,
@@ -129,7 +140,7 @@ func TestCrashMidFlushPreservesFIFO(t *testing.T) {
 		crashEnvK+"="+strconv.Itoa(k),
 		crashEnvJrnl+"="+journal,
 	)
-	err := child.Run()
+	err = child.Run()
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("ждали краш ребёнка с кодом 1, получили: %v", err)
