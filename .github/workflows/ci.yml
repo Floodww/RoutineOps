@@ -339,21 +339,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Публичный Free-репозиторий получает ЭТОТ ЖЕ файл (workflow'ы едут в срезе), но
+      # БЕЗ enterprise-исходников — их вырезает export-free.sh. `go build -tags enterprise`
+      # там падает по построению: «undefined: enterpriseSetup» и ещё десяток символов,
+      # которых в открытой сборке нет и не должно быть. Проверено 03.08 на срезе 2.8.0 —
+      # красный CI в публичном репозитории на совершенно здоровом коде.
+      #
+      # Поэтому джоба сначала спрашивает, есть ли что собирать под тегом, и в open-core
+      # ЯВНО пропускает шаги с заметкой в логе, а не притворяется, что проверила. Условие
+      # смотрит на composition-root enterprise: он есть только в приватном суперсете.
+      - name: есть ли enterprise-исходники
+        id: detect
+        run: |
+          if [ -f cmd/server/enterprise.go ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::enterprise-исходников нет (open-core срез) — сборка под тегом пропущена"
+          fi
+
       - uses: actions/setup-go@v5
+        if: steps.detect.outputs.present == 'true'
         with:
           go-version-file: go.mod
 
       - name: build (enterprise)
+        if: steps.detect.outputs.present == 'true'
         run: go build -tags enterprise ./...
 
       # -p 1: пакеты по одному. Параллельные пакеты дерутся за общую тестовую БД и
       # дают «connection refused» на ровном месте, а мигающий гейт хуже медленного.
       - name: test (enterprise)
+        if: steps.detect.outputs.present == 'true'
         env:
           TEST_POSTGRES_DSN: postgres://mdm:mdm@localhost:5432/mdm_test?sslmode=disable
         run: go test -p 1 -tags enterprise ./internal/...
 
       - name: golangci-lint (enterprise)
+        if: steps.detect.outputs.present == 'true'
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
