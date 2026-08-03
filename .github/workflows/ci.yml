@@ -96,8 +96,17 @@ jobs:
       # --scan-only делает срез (шаги 1-4b) и гоняет V1/V4/V4b — чистая работа с
       # текстом: ни protoc, ни npm, ни сборки. Про НЕпокрытое (V4c, бинари) шаг
       # печатает явно — «leak-скан» в логе не должен читаться как «проверено всё».
+      # export-free.sh — мейнтейнерский тулинг, в сам срез он не попадает (как и
+      # check-public-docs.sh выше). В публичном репозитории шаг падал `No such file`
+      # с кодом 127 — то есть красный CI на здоровом коде. Пропуск ЯВНЫЙ: в срезе
+      # сканировать нечего, срез уже сделан этим же скриптом.
       - name: leak-скан Free-среза (утечки в публичный код)
-        run: bash scripts/export-free.sh --scan-only
+        run: |
+          if [ -f scripts/export-free.sh ]; then
+            bash scripts/export-free.sh --scan-only
+          else
+            echo "::notice::export-free.sh отсутствует (Free-срез) — leak-скан пропущен"
+          fi
 
       # Регрессия из поля (13.07): install.sh был идемпотентен настолько, что
       # ИСПРАВЛЕННЫЙ адрес сервера никуда не доезжал — опечатка в цифре IP стоила дня.
@@ -247,9 +256,21 @@ jobs:
       # проверялся ничем, хотя именно он уходит на парк: опечатка в нём всплывала
       # бы на релизной сборке, а не в PR. Нужен util-extension: боевой источник
       # зовёт WixQuietExec для enroll/uninstall.
+      # В публичном срезе боевого бинаря нет: build/msi/mdm-agent.exe — прод-артефакт,
+      # экспорт его не берёт. Собрать боевой авторинг там нечем, и шаг падал WIX0103
+      # на здоровом коде. Пропуск явный, с заметкой в логе.
+      #
+      # 🔴 В ПОЛНОМ дереве этот шаг тоже красный, и это отдельный дефект (зона агента):
+      # wix резолвит пути из .wxs относительно текущего каталога, а icon.ico и
+      # mdm-agent.exe лежат в build/msi — нужен -bindpath. Здесь НЕ чиню вслепую:
+      # проверить можно только на windows-раннере.
       - name: wix build боевого MSI (то, что реально едет в поле)
         shell: pwsh
         run: |
+          if (-not (Test-Path build/msi/mdm-agent.exe)) {
+            Write-Host "::notice::build/msi/mdm-agent.exe отсутствует (Free-срез) — боевой авторинг не собирается"
+            exit 0
+          }
           wix extension add -g WixToolset.Util.wixext/4.0.5
           wix build build/msi/mdm-agent.wxs -arch x64 -ext WixToolset.Util.wixext `
             -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -o prod-authoring.msi
@@ -396,8 +417,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Тот же случай, что у джобы enterprise: в публичном срезе enterprise-исходников
+      # нет, и сборка образа под этим тегом падает по построению. Пропускаем явно.
       - name: docker build (${{ matrix.edition == '' && 'open-core' || matrix.edition }})
         run: |
+          if [ "${{ matrix.edition }}" = "enterprise" ] && [ ! -f cmd/server/enterprise.go ]; then
+            echo "::notice::enterprise-исходников нет (open-core срез) — сборка образа под тегом пропущена"
+            exit 0
+          fi
           docker build \
             --build-arg BUILD_TAGS='${{ matrix.edition }}' \
             --build-arg VERSION="ci-${GITHUB_SHA::8}" \
