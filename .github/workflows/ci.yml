@@ -139,7 +139,12 @@ jobs:
           #   service  — launchd/SCM install paths
           #   keystore — CGO Security.framework / Windows NCrypt
           #   mailer   — SMTP без внешнего сервиса не тестируется
-          #   cmd/*, proto, testutil, node_modules — инфра/генерённый код
+          #   lockui   — X11-оверлей: захват клавиатуры и указателя, переподнятие
+          #              окна и выключение хранителя экрана требуют живого дисплея с
+          #              оконным менеджером, на раннере этих ветвей не существует
+          #   cmd/*, scripts/internal/* — main-пакеты утилит (bcrypthash — обёртка
+          #              вокруг bcrypt.GenerateFromPassword для стенда замка)
+          #   proto, testutil, node_modules — инфра/генерённый код
           LC_ALL=C awk '
             NR == 1 { next }
             {
@@ -159,9 +164,10 @@ jobs:
               grand_total = 0; grand_covered = 0
               for (pkg in total) {
                 if (total[pkg] == 0) continue
-                if (pkg ~ /\/(status|service|keystore|mailer)$/) continue
+                if (pkg ~ /\/(status|service|keystore|mailer|lockui)$/) continue
                 if (pkg ~ /\/(testutil|proto)$/) continue
                 if (pkg ~ /\/cmd\//) continue
+                if (pkg ~ /\/scripts\/internal\//) continue
                 if (pkg ~ /node_modules/) continue
                 grand_total += total[pkg]
                 grand_covered += covered[pkg]
