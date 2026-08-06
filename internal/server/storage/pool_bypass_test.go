@@ -111,17 +111,63 @@ func TestPoolBypassesAreDocumented(t *testing.T) {
 
 	// Обратная сторона: устаревшие записи. Иначе список превращается в свалку, где
 	// нельзя отличить действующее исключение от следа давно переписанной функции.
-	var stale []string
-	for site := range poolBypassAllowed {
-		if !found[site] {
-			stale = append(stale, site)
-		}
+	stale, absent := staleEntries(poolBypassAllowed, found, presentFiles(t))
+	if len(absent) > 0 {
+		// Не молча: пропуск обязан быть виден, иначе гейт в срезе выглядит строгим,
+		// а проверяет меньше, чем в суперсете.
+		t.Logf("пропущено записей (файла нет в этой редакции): %d\n  %s",
+			len(absent), strings.Join(absent, "\n  "))
 	}
-	sort.Strings(stale)
 	if len(stale) > 0 {
 		t.Errorf("в списке исключений %d записей, которым в коде уже ничего не соответствует:\n  %s",
 			len(stale), strings.Join(stale, "\n  "))
 	}
+}
+
+// staleEntries делит записи списка исключений на протухшие и пропущенные.
+//
+// 🔴 Зачем деление вообще. Тест написан в расчёте на суперсет и уезжает в публичный срез
+// как есть, а там его часть кода физически отсутствует: SAML вырезается целиком, запись
+// saml.go:GetSAMLProviderForAuth остаётся — и open-core CI падал по построению на каждом
+// прогоне. Это ровно тот же класс, что «шаг CI собирает enterprise-теги в срезе, где
+// enterprise-исходников нет»: гейт проверяет не то, что едет.
+//
+// Различаем по НАЛИЧИЮ ФАЙЛА, а не по редакции: файла нет — записи здесь и не может ничему
+// соответствовать, это другая сборка продукта; файл есть, а функции в нём нет — запись
+// протухла, и в суперсете гейт обязан упасть ровно как раньше. Иначе протухшие записи
+// перестали бы ловиться там, где они и заводятся.
+func staleEntries(allowed map[string]string, found map[string]bool, present map[string]bool) (stale, absent []string) {
+	for site := range allowed {
+		if found[site] {
+			continue
+		}
+		file, _, ok := strings.Cut(site, ":")
+		if ok && !present[file] {
+			absent = append(absent, site)
+			continue
+		}
+		stale = append(stale, site)
+	}
+	sort.Strings(stale)
+	sort.Strings(absent)
+	return stale, absent
+}
+
+// presentFiles — непроверочные .go-файлы пакета, лежащие в этой редакции.
+func presentFiles(t *testing.T) map[string]bool {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	out := map[string]bool{}
+	for _, p := range files {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		out[filepath.Base(p)] = true
+	}
+	return out
 }
 
 // poolCallSites возвращает множество "файл.go:Функция" по всем вхождениям db.pool
