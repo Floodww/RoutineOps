@@ -300,13 +300,23 @@ jobs:
       - name: smoke регистрации Windows-службы
         shell: pwsh
         run: |
+          # 🔴 Только Start-Process -Wait, не оператор `&`. Агент собран -H windowsgui
+          # (шаг «build agent.exe» выше — намеренно, чтобы гейт щупал ту же подсистему,
+          # что едет в поле). GUI-процесса PowerShell не дожидается: управление
+          # возвращается сразу, $LASTEXITCODE не выставляется ВООБЩЕ и остаётся пустым,
+          # а `"" -ne 0` истинно — шаг падал с «agent install exit » без кода. Это тот же
+          # дефект, что чинили в uninstall.bat (там лечение — start "" /wait).
           $exe = Join-Path $Env:ProgramFiles 'RoutineOps\RoutineOps-agent.exe'
-          & $exe install -server localhost:50051 -server-name localhost -cert C:\mdm\agent.crt -key C:\mdm\agent.key -ca C:\mdm\ca.crt
-          if ($LASTEXITCODE -ne 0) { throw "agent install exit $LASTEXITCODE" }
+          $run = {
+            param($argv, $what)
+            $p = Start-Process $exe -ArgumentList $argv -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "$what exit $($p.ExitCode)" }
+          }
+          & $run @('install','-server','localhost:50051','-server-name','localhost',
+                   '-cert','C:\mdm\agent.crt','-key','C:\mdm\agent.key','-ca','C:\mdm\ca.crt') 'agent install'
           sc.exe query RoutineOps-agent
           if ($LASTEXITCODE -ne 0) { throw "служба RoutineOps-agent не зарегистрирована" }
-          & $exe uninstall
-          if ($LASTEXITCODE -ne 0) { throw "agent uninstall exit $LASTEXITCODE" }
+          & $run @('uninstall') 'agent uninstall'
           Write-Host "OK: служба зарегистрирована и снята"
 
       # Тихое удаление MSI — должно убрать файлы (и службу через DoUninstall CA).
@@ -591,9 +601,29 @@ jobs:
       # хозяйскую ОС раннера (linux). Так и уехало столкновение имён `rect` с Win32-RECT,
       # из-за которого enterprise-агент под Windows не компилировался вообще.
       #
-      # В публичном репозитории enterprise-исходников нет, и шаг там просто собирает то
-      # же самое — он не требует их наличия и не падает от их отсутствия.
+      # 🔴 В публичном репозитории шаг НЕ «собирает то же самое»: `-tags enterprise`
+      # исключает free-заглушки (`//go:build !enterprise`), а реализаций там нет —
+      # их вырезал export-free.sh. Сборка падает по построению:
+      #   cmd/agent/main.go: undefined: wireScreen, runScreenProbe, runScreenWorker,
+      #   runFileVaultProvision, escrowSealerStatus, wireFileVaultChain, …
+      # Поэтому тот же гард, что у джобы `enterprise` ниже. Маркер — агентский, а не
+      # cmd/server/enterprise.go: срез может разойтись по слоям, и проверять надо
+      # наличие ровно того, что этот шаг компилирует.
+      - name: есть ли enterprise-исходники агента
+        id: agent_ent
+        shell: bash
+        run: |
+          if [ -f cmd/agent/screen_wiring.go ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::enterprise-исходников агента нет (open-core срез) — сборка под тегом пропущена"
+          fi
+
+      # То же самое, но с тегом enterprise. Без этого шага целый пласт платформенного
+      # кода не собирался НИ РАЗУ (см. столкновение `rect` с Win32-RECT выше).
       - name: build agent (enterprise) ${{ matrix.goos }}/${{ matrix.goarch }}
+        if: steps.agent_ent.outputs.present == 'true'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}

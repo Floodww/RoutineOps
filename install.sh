@@ -250,6 +250,7 @@ PG=$($DC -f docker-compose.prod.yml ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
 docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" -e RELEASE_PUBKEY="$RELEASE_PUBKEY" \
+  -e BUILD_TAGS="${BUILD_TAGS:-}" -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
   golang:1.26-alpine sh -c '
     set -e
     V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
@@ -257,6 +258,19 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # darwin здесь НЕТ: macOS-агенту нужен cgo (Cocoa-замок + Keychain), а
     # `CGO_ENABLED=0 GOOS=darwin` молча собирает заглушки по тегам `!darwin || !cgo`.
     # Публикуем prebuilt из репо ниже — его собрал мейнтейнер на маке.
+
+    # РЕДАКЦИЯ. Тот же BUILD_TAGS, которым собирается серверный образ (docker-compose.prod.yml),
+    # обязан идти и в агентов. Здесь этого не было ВООБЩЕ: install.sh собирал агентов
+    # безусловно без тегов, поэтому свежая enterprise-инсталляция раздавала парку open-core
+    # агента с первой минуты — до первого update.sh, где редакция уже учитывалась. Симптом
+    # неотличим от «фича не работает»: устройства не докладывают screen_session, создание
+    # сеанса отдаёт 409 agent_unsupported, FileVault-provisioning отказывает.
+    TAGSFLAG=""
+    if [ -n "$BUILD_TAGS" ]; then
+      TAGSFLAG="-tags $BUILD_TAGS"
+      echo "  редакция агента: $BUILD_TAGS (из BUILD_TAGS в install.env/окружении)"
+    fi
+
     for pair in "windows amd64" "linux amd64" "linux arm64"; do
       # shellcheck disable=SC2086
       set -- $pair; OS=$1; ARCH=$2
@@ -281,19 +295,55 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
       # Бинари ДЖЕНЕРИК (без -X main.releasePubKey): один вариант на все деплои.
       # Ключ self-update агент берёт из enroll-ответа (server отдаёт RELEASE_PUBKEY),
       # а не из вшитого на сборке — так тот же бинарь годится для универсального MSI.
-      GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+      GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath -buildvcs=false $TAGSFLAG \
         -ldflags "-s -w -X main.version=${V} ${EXTRA_LDFLAGS}" \
         -o /tmp/agent_${OS}_${ARCH} ./cmd/agent
       [ "$OS" = "windows" ] && rm -f cmd/agent/rsrc_windows_amd64.syso
+      # Редакция — по собранному бинарю, до подписи и публикации (см. update.sh).
+      sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "/tmp/agent_${OS}_${ARCH}" "$OS/$ARCH"
       go run ./cmd/publish-release -binary /tmp/agent_${OS}_${ARCH} \
         -version "v${V}" -os "$OS" -arch "$ARCH" -key release_ed25519.pem
     done
 
     # macOS: prebuilt из репо (cgo-сборка мейнтейнера), подписываем ключом деплойера.
+    #
+    # РЕДАКЦИЯ, как в update.sh: лежащий в репозитории prebuilt ВСЕГДА open-core
+    # (enterprise-бинарь нельзя коммитить — его ловит гейт публичного среза), поэтому на
+    # enterprise-инсталляции публиковать его нельзя: маки получили бы агента, где FileVault
+    # не выключен, а не скомпилирован. Enterprise-бинарь приходит из приватного релиз-канала
+    # и указывается через DARWIN_AGENT (путь ОТНОСИТЕЛЬНО каталога установки).
     PREBUILT=build/darwin/agent_darwin_arm64
+    case "$BUILD_TAGS" in
+      *enterprise*)
+        if [ -z "$DARWIN_AGENT" ]; then
+          echo "ОШИБКА: инсталляция enterprise (BUILD_TAGS=$BUILD_TAGS), а darwin-агент в репозитории — open-core." >&2
+          echo "  Публикация macOS отменена: маки получили бы агента БЕЗ FileVault (не выключен, а не собран)." >&2
+          echo "  Возьмите enterprise-бинарь из приватного релиз-канала, положите в каталог установки" >&2
+          echo "  вместе с файлами .sha256 и .version и укажите путь: DARWIN_AGENT=enterprise/agent_darwin_arm64 ./install.sh" >&2
+          exit 1
+        fi
+        if [ ! -f "$DARWIN_AGENT" ]; then
+          echo "ОШИБКА: DARWIN_AGENT=$DARWIN_AGENT не найден в каталоге установки." >&2
+          exit 1
+        fi
+        sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "$DARWIN_AGENT" "darwin/arm64 (частный канал)"
+        PREBUILT="$DARWIN_AGENT"
+        echo "  darwin: enterprise-бинарь из $DARWIN_AGENT"
+        ;;
+      *)
+        # Отсутствие prebuilt — не ошибка (ниже вырождается в предупреждение), поэтому
+        # гейт (fail-closed на ненайденном файле) зовём только на существующем файле.
+        if [ -f "$PREBUILT" ]; then
+          sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "$PREBUILT" "darwin/arm64 (prebuilt из репо)"
+        fi
+        ;;
+    esac
     if [ -f "$PREBUILT" ] && [ -f "$PREBUILT.sha256" ]; then
-      echo "  → darwin/arm64 (prebuilt из репо)"
-      ( cd build/darwin && sha256sum -c agent_darwin_arm64.sha256 ) || {
+      echo "  → darwin/arm64 ($PREBUILT)"
+      # Путь БЕРЁМ ИЗ ПЕРЕМЕННОЙ: с DARWIN_AGENT бинарь лежит не в build/darwin, и
+      # прибитый гвоздями cd проверял бы контрольную сумму СОСЕДНЕГО файла (репозиторного),
+      # то есть сверял бы не то, что публикуется.
+      ( cd "$(dirname "$PREBUILT")" && sha256sum -c "$(basename "$PREBUILT").sha256" ) || {
         echo "ОШИБКА: sha256 prebuilt darwin-бинаря не сошлась — публикация отменена" >&2
         exit 1
       }

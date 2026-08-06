@@ -106,6 +106,16 @@ if [ -f scripts/check-openapi.sh ]; then
   run "check-openapi.sh" bash scripts/check-openapi.sh
 fi
 
+# Редакция трекнутого darwin-prebuilt. ВСЕГДА, а не внутри go_touched: релизный коммит
+# артефактов (release(darwin): …) не трогает ни одного .go, то есть ровно тот коммит,
+# которым enterprise-бинарь и может заехать в репозиторий, проверку бы пропустил.
+# Тот же гейт внутри make check-remote-tags остаётся — здесь он стоит миллисекунды
+# (голый grep) и не требует Go-тулчейна.
+if [ -f scripts/agent-edition-guard.sh ] && [ -f build/darwin/agent_darwin_arm64 ]; then
+  run "редакция трекнутого darwin-prebuilt" \
+    sh scripts/agent-edition-guard.sh "" build/darwin/agent_darwin_arm64 "трекнутый darwin-prebuilt"
+fi
+
 if [ "$web_touched" = 1 ] && [ -d web ]; then
   if need npm "https://nodejs.org/"; then
     if [ ! -d web/node_modules ]; then

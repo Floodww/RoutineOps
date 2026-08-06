@@ -94,6 +94,13 @@ check-escrow-tags:
 # (internal/screenframe, общий с сервером). Второй проверяется той же меркой не для
 # симметрии: он появился отдельным пакетом ИМЕННО чтобы сервер не тащил платформенный
 # захват, и ровно поэтому его легче всего случайно затянуть во free-граф.
+#
+# Третьим шагом той же меркой меряется ТРЕКНУТЫЙ darwin-prebuilt. Проверки выше говорят
+# только про свежесобранные бинари, а в поле и в публичный Free-срез уезжает файл из
+# build/darwin — и он обязан быть open-core. Здесь он проверяется потому, что это дёшево
+# (голый grep, никаких инструментов) и потому попадает в pre-push. MSI и PKG той же
+# проверкой накрыты в scripts/check-installer-versions.sh: их надо распаковывать
+# (msitools/bsdtar), в pre-push такой зависимости не место.
 REMOTE_TOKEN := internal/agent/screen
 FRAME_TOKEN  := internal/screenframe
 check-remote-tags: ## Гейт §9.17: удалённого стола нет во free-сборке и есть в enterprise
@@ -121,6 +128,11 @@ check-remote-tags: ## Гейт §9.17: удалённого стола нет в
 		fi; \
 	done; \
 	rm -rf "$$tmp"; \
+	if [ -f build/darwin/agent_darwin_arm64 ]; then \
+		sh scripts/agent-edition-guard.sh "" build/darwin/agent_darwin_arm64 "трекнутый darwin-prebuilt" || fail=1; \
+	else \
+		echo "ОШИБКА: нет build/darwin/agent_darwin_arm64 — трекнутый prebuilt пропал из дерева." >&2; fail=1; \
+	fi; \
 	[ "$$fail" -eq 0 ] || exit 1; \
 	echo "check-remote-tags: free чист (граф и бинарь), enterprise содержит фичу ✅"
 

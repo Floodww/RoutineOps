@@ -136,6 +136,12 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
       # файла в примонтированном рабочем каталоге мешал бы `make` у деплойера.
       if [ "$OS" = windows ]; then rm -f cmd/agent/rsrc_windows_amd64.syso; fi
 
+      # Редакция — ПО СОБРАННОМУ БИНАРЮ, до подписи и публикации. Строчкой выше
+      # редакцию задаёт переменная, а переменную можно забыть (перенос окружения,
+      # свежий .env.prod, опечатка) — и парк молча обновится на open-core агента.
+      # Гейт fail-closed, при расхождении деплой падает здесь, а не в поле.
+      sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "/tmp/agent_${OS}_${ARCH}" "$OS/$ARCH"
+
       go run ./cmd/publish-release -binary /tmp/agent_${OS}_${ARCH} \
         -version "v${V}" -os "$OS" -arch "$ARCH" -key release_ed25519.pem
     done
@@ -166,25 +172,26 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
           exit 1
         fi
         # Проверяем, что это ДЕЙСТВИТЕЛЬНО enterprise-сборка, а не переименованный
-        # open-core бинарь: строка есть только в FileVault-коде под тегом.
-        if ! grep -q validaterecovery "$DARWIN_AGENT"; then
-          echo "ОШИБКА: $DARWIN_AGENT собран БЕЗ тега enterprise (нет FileVault-кода) — публикация отменена." >&2
-          exit 1
-        fi
+        # open-core бинарь. Проверка та же, что у windows/linux выше: единственное
+        # определение редакции на все четыре цели. Раньше здесь искался darwin-only
+        # токен — на windows/linux тот же гейт был бы красным на исправном дереве.
+        # Обе фичи едут одним тегом, поэтому одного кросс-платформенного токена хватает.
+        sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "$DARWIN_AGENT" "darwin/arm64 (частный канал)"
         PREBUILT="$DARWIN_AGENT"
         echo "  darwin: enterprise-бинарь из $DARWIN_AGENT"
         ;;
       *)
         # Open-core инсталляция: enterprise-бинарь здесь публиковать нельзя — это
-        # раздача закрытого кода всему парку.
-        if [ -f "$PREBUILT" ] && grep -q validaterecovery "$PREBUILT"; then
-          echo "ОШИБКА: $PREBUILT собран с тегом enterprise, а инсталляция open-core — публикация отменена." >&2
-          exit 1
+        # раздача закрытого кода всему парку. Отсутствие prebuilt тут НЕ ошибка:
+        # ниже это штатно вырождается в «macOS-релиз не опубликован» с предупреждением,
+        # поэтому гейт (он fail-closed на ненайденном файле) зовём только на существующем.
+        if [ -f "$PREBUILT" ]; then
+          sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "$PREBUILT" "darwin/arm64 (prebuilt из репо)"
         fi
         ;;
     esac
     if [ -f "$PREBUILT" ] && [ -f "$PREBUILT.sha256" ]; then
-      echo "  → darwin/arm64 (prebuilt из репо)"
+      echo "  → darwin/arm64 ($PREBUILT)"
       ( cd "$(dirname "$PREBUILT")" && sha256sum -c "$(basename "$PREBUILT").sha256" ) || {
         echo "ОШИБКА: sha256 prebuilt darwin-бинаря не сошлась — публикация отменена" >&2
         exit 1

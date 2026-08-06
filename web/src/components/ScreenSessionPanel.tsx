@@ -14,7 +14,14 @@ import api, {
 } from "@/lib/api"
 import { formatBytes, formatDuration } from "@/lib/format"
 import { drawPart, parseRecords } from "@/lib/screenframe"
-import { FLUSH_MS, InputCollector, keyEvents, toFrame, wheelClicks } from "@/lib/screeninput"
+import {
+  FLUSH_MS,
+  InputCollector,
+  inputOutcome,
+  keyEvents,
+  toFrame,
+  wheelClicks,
+} from "@/lib/screeninput"
 import { formatDistanceToNow } from "@/lib/time"
 
 // Вкладка «Экран» карточки устройства (docs/remote-desktop-contract.md).
@@ -71,6 +78,12 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // кнопка после нажатия исчезает, а не превращается в «взять снова».
   const [controlReturned, setControlReturned] = useState(false)
   const [inputWarning, setInputWarning] = useState("")
+  // Открыт ли стрим агента. Отдельно от `live`: сеанс СОЗДАН с момента ответа 201, а
+  // стрим появляется через 3.5 с — приглашение едет на устройство, захватчик поднимается
+  // в сессии пользователя, в режиме согласия отвечает сотрудник. Управление сервер выдаёт
+  // сразу при создании, поэтому одного `live.control` мало: петля отправки стартовала бы
+  // в окно, когда принимать ввод ещё некому.
+  const [streamOpen, setStreamOpen] = useState(false)
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const stopRef = useRef(false)
@@ -128,6 +141,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
           continue
         }
 
+        // Первый не-202 ответ = стрим зарегистрирован в хабе. Только с этого момента
+        // ввод есть кому принять — до него петля отправки не запускается вовсе.
+        setStreamOpen(true)
+
         const w = Number(res.headers["x-screen-width"] || 0)
         const h = Number(res.headers["x-screen-height"] || 0)
         const canvas = canvasRef.current
@@ -163,6 +180,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
         }
       }
       setLive(null)
+      setStreamOpen(false)
       void loadJournal()
     },
     [loadJournal, t],
@@ -187,7 +205,11 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // чем сервер. Пачка раз в 50 мс добавляет к задержке 25 мс в среднем — на фоне
   // врождённых 80–250 мс ретрансляции кадра это не различимо.
   useEffect(() => {
-    if (!controlOn || !live) {
+    // streamOpen — обязательное условие, а не оптимизация: пачка, отправленная до
+    // открытия стрима, раньше получала 409 и гасила управление до конца сеанса. Сервер
+    // теперь отвечает на этот случай 503 (временный отказ), но не отправлять её вовсе
+    // строго лучше: печатать всё равно некуда — картинки ещё нет.
+    if (!controlOn || !live || !streamOpen) {
       inputRef.current = null
       return
     }
@@ -205,16 +227,18 @@ export function ScreenSessionPanel({ deviceId }: Props) {
         await api.post(`/screen-sessions/${live.id}/input`, batch)
         setInputWarning("")
       } catch (e) {
-        const status = errStatus(e)
-        if (status === 503) {
-          // Затор у агента. Сервер отказал ЯВНО, а не выбросил пачку молча: оператор
-          // должен знать, что его нажатия не доехали, — иначе он будет давить сильнее.
-          setInputWarning(t("screenSession.inputBacklog"))
-        } else if (status === 409 || status === 410) {
-          // Управление отозвано либо сеанс кончился. Дальше слать нечего.
-          setControlReturned(true)
-        } else {
-          setInputWarning(errMessage(e))
+        switch (inputOutcome(errStatus(e))) {
+          case "retry":
+            // Временный отказ. Сервер отказал ЯВНО, а не выбросил пачку молча: оператор
+            // должен знать, что его нажатия не доехали, — иначе он будет давить сильнее.
+            setInputWarning(t("screenSession.inputBacklog"))
+            break
+          case "dead":
+            // Управление отозвано либо сеанс кончился. Дальше слать нечего.
+            setControlReturned(true)
+            break
+          default:
+            setInputWarning(errMessage(e))
         }
       } finally {
         sending = false
@@ -226,7 +250,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
       window.clearInterval(timer)
       inputRef.current = null
     }
-  }, [controlOn, live, t])
+  }, [controlOn, live, streamOpen, t])
 
   // Отпустить всё зажатое при потере фокуса окна.
   //
@@ -272,6 +296,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
         control: wantControl,
       })
       setLive(r.data)
+      setStreamOpen(false)
       setControlReturned(false)
       setInputWarning("")
       setStatus(t("screenSession.waitingAgent"))
@@ -328,6 +353,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   const watch = (s: ScreenSession) => {
     setError("")
     setLive(s)
+    setStreamOpen(false)
     // Подключение к ЧУЖОМУ идущему сеансу — всегда просмотр: ввод сервер примет только
     // от того оператора, который сеанс начал (иначе действия одного человека легли бы в
     // журнал под именем другого). Кнопка управления здесь не появляется.

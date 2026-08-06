@@ -212,6 +212,86 @@ $inner"
   rm -rf "$tmpd"
 fi
 
+# ---------------------------------------------------------------------------
+# Редакция трекнутых артефактов.
+#
+# 🔴 Тот же класс, что и две проверки выше — «проверяем то, что едет», — но в другую
+# сторону. Эти три файла уезжают в публичный Free-срез БАЙТ-В-БАЙТ и раздаются кнопкой
+# «Скачать», поэтому обязаны быть open-core ВСЕГДА. Enterprise-сборку сюда класть нельзя:
+# это раздача закрытого кода. Обратный случай (артефакт собрали с тегом и закоммитили)
+# ловил только полный прогон scripts/export-free.sh — он требует bash 4+ и docker и живёт
+# в конце цепочки, перед публикацией среза, то есть после пуша.
+#
+# Проверяется СИМВОЛ в бинаре, а не переменная окружения сборки: переменную можно забыть,
+# символ забыть нельзя. Гейт fail-closed: нет чем распаковать — отказ, а не пропуск.
+#
+# Чего этот гейт НЕ говорит: что парк получает ту же редакцию. Парк живёт самообновлением,
+# его агента собирает install.sh/update.sh по BUILD_TAGS — там стоит тот же гейт на
+# СОБРАННЫЙ бинарь (scripts/agent-edition-guard.sh), и на enterprise-инсталляции ждётся
+# ровно обратное. Один скрипт, два ожидания.
+# ---------------------------------------------------------------------------
+echo "== редакция трекнутых артефактов (обязаны быть open-core) =="
+GUARD="$ROOT/scripts/agent-edition-guard.sh"
+[ -x "$GUARD" ] || { echo "ОШИБКА: нет $GUARD — редакцию проверить нечем" >&2; exit 2; }
+
+# Пустой первый аргумент = ждём open-core. Диагностику гейт печатает сам.
+edition_open_core() { # <файл> <метка>
+  local rc=0
+  sh "$GUARD" "" "$1" "$2" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) bad "$2: редакция не open-core (диагностика гейта выше)" ;;
+    *) echo "ОШИБКА: редакция $2 не проверена — гейт вернул $rc" >&2; exit 2 ;;
+  esac
+}
+
+DARWIN="$ROOT/build/darwin/agent_darwin_arm64"
+if [ ! -f "$DARWIN" ]; then
+  bad "нет $DARWIN — macOS-парку публиковать нечего"
+else
+  edition_open_core "$DARWIN" "build/darwin/agent_darwin_arm64"
+fi
+
+# exe ВНУТРИ MSI: сам .msi сжат, и grep по контейнеру не видит строк бинаря — он ответил бы
+# «токена нет» на любом пакете, включая enterprise. Поэтому распаковываем.
+if [ -f "$MSI" ] && command -v msiextract >/dev/null 2>&1; then
+  tmpd=$(mktemp -d)
+  xrc=0
+  ( cd "$tmpd" && msiextract "$MSI" >/dev/null 2>&1 ) || xrc=$?
+  inner_exe=$(find "$tmpd" -name '*.exe' -type f | sort)
+  n=$(printf '%s' "$inner_exe" | grep -c . || true)
+  if [ "$n" -eq 0 ]; then
+    bad "в $MSI нет ни одного .exe (msiextract код $xrc) — редакцию проверить нечем"
+  elif [ "$n" -ne 1 ]; then
+    bad "в $MSI несколько .exe ($n шт.) — непонятно, какой едет:
+$inner_exe"
+  else
+    edition_open_core "$inner_exe" "exe внутри MSI"
+  fi
+  rm -rf "$tmpd"
+fi
+
+# Payload у .pkg — gzip'нутый cpio; токен ищем в распакованном потоке.
+if [ -f "$PKG" ]; then
+  tmpd=$(mktemp -d)
+  if command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xOf "$PKG" '*Payload' 2>/dev/null | gunzip -c > "$tmpd/payload" 2>/dev/null || true
+  elif command -v xar >/dev/null 2>&1; then
+    ( cd "$tmpd" && xar -xf "$PKG" Payload >/dev/null 2>&1 ) || true
+    [ -f "$tmpd/Payload" ] && { gunzip -c "$tmpd/Payload" > "$tmpd/payload" 2>/dev/null || true; }
+  else
+    echo "ОШИБКА: нечем распаковать Payload из $PKG (нужен bsdtar/libarchive-tools либо xar)" >&2
+    exit 2
+  fi
+  if [ ! -s "$tmpd/payload" ]; then
+    rm -rf "$tmpd"
+    echo "ОШИБКА: Payload из $PKG не распаковался — редакцию проверить нечем" >&2
+    exit 2
+  fi
+  edition_open_core "$tmpd/payload" "payload внутри PKG"
+  rm -rf "$tmpd"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "С установщиком в репозитории что-то не так (см. выше). Это НЕ про парк — он живёт" >&2
