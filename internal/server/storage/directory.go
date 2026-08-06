@@ -5,14 +5,20 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // Хранилище персон каталога (LDAP Phase 1). Это ЧИСТЫЕ DB-операции на общей таблице
 // directory_persons — go-ldap и синк живут отдельно в enterprise-пакете
 // (internal/server/directory, //go:build enterprise), который зовёт эти методы. В Free
 // таблица пуста (синка нет), методы компилируются, но не вызываются.
+//
+// 🔴 Тенант здесь ПАРАМЕТР, а не умолчание внутри SQL. Так было не всегда: до перехода на
+// TenantScope эти методы ходили прежним Q(ctx) с непривязанным контекстом, то есть
+// соседним соединением из пула, где routineops.tenant_id не выставлен. Под FORCE RLS это
+// значит «предикат не совпал ни с одной строкой»: перематч владельцев не видел ни одного
+// устройства, пометка исчезнувших не трогала ни одной строки — и синк при этом рапортовал
+// успех. В тестах не всплывало: testutil ставит роли дефолтный тенант, и pool-запрос в
+// них «попадает» (см. scope_gate_test.go — теперь это ловится статикой).
 
 // DirectoryPerson — персона каталога. object_guid — канон (стабилен при переименовании).
 type DirectoryPerson struct {
@@ -37,8 +43,13 @@ const PersonSourceManual = "manual"
 
 // UpsertDirectoryPerson — идемпотентный upsert по object_guid. Пустой SID пишется NULL
 // (частичный UNIQUE-индекс по object_sid не должен ловить пустые). synced_at → now().
-func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+func (db *DB) UpsertDirectoryPerson(ctx context.Context, tenantID string, p DirectoryPerson) error {
+	ctx, finish, tenantID, err := db.scopeFor(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer finish(true)
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO directory_persons
 		    (tenant_id, object_guid, object_sid, sam_account, user_principal, display_name, email, distinguished_name, disabled, synced_at)
 		VALUES ($1, $2, NULLIF($3,''), $4, $5, $6, $7, $8, $9, now())
@@ -51,7 +62,7 @@ func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) erro
 		    distinguished_name = EXCLUDED.distinguished_name,
 		    disabled           = EXCLUDED.disabled,
 		    synced_at          = now()
-	`, tenancy.DefaultTenantID, p.ObjectGUID, p.ObjectSID, p.SAMAccount, p.UserPrincipal, p.DisplayName, p.Email, p.DistinguishedName, p.Disabled)
+	`, tenantID, p.ObjectGUID, p.ObjectSID, p.SAMAccount, p.UserPrincipal, p.DisplayName, p.Email, p.DistinguishedName, p.Disabled)
 	return err
 }
 
@@ -59,9 +70,14 @@ func (db *DB) UpsertDirectoryPerson(ctx context.Context, p DirectoryPerson) erro
 // (rename-proof), затем fallback по sAMAccountName без регистра. Отключённые учётки не
 // матчим. "" = матча нет (не ошибка). Вызывающий (enterprise-матчер) уже извлёк
 // sAMAccountName из "DOMAIN\user".
-func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount string) (personID string, err error) {
+func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, tenantID, sid, samAccount string) (personID string, err error) {
+	ctx, finish, _, err := db.scopeFor(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	defer finish(true)
 	if sid != "" {
-		err = db.Q(ctx).QueryRow(ctx,
+		err = db.Scoped(ctx).QueryRow(ctx,
 			`SELECT id FROM directory_persons WHERE object_sid = $1 AND NOT disabled`, sid,
 		).Scan(&personID)
 		if err == nil {
@@ -72,7 +88,7 @@ func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount s
 		}
 	}
 	if samAccount != "" {
-		err = db.Q(ctx).QueryRow(ctx,
+		err = db.Scoped(ctx).QueryRow(ctx,
 			`SELECT id FROM directory_persons WHERE lower(sam_account) = lower($1) AND NOT disabled LIMIT 1`, samAccount,
 		).Scan(&personID)
 		if err == nil {
@@ -87,12 +103,17 @@ func (db *DB) FindDirectoryPersonForMatch(ctx context.Context, sid, samAccount s
 
 // SetDeviceOwnerDirectory — проставить авто-владельца из каталога. personID == "" снимает
 // привязку (owner_directory_id → NULL).
-func (db *DB) SetDeviceOwnerDirectory(ctx context.Context, deviceID, personID string) error {
-	if personID == "" {
-		_, err := db.Q(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = NULL WHERE id = $1`, deviceID)
+func (db *DB) SetDeviceOwnerDirectory(ctx context.Context, tenantID, deviceID, personID string) error {
+	ctx, finish, _, err := db.scopeFor(ctx, tenantID)
+	if err != nil {
 		return err
 	}
-	_, err := db.Q(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = $2 WHERE id = $1`, deviceID, personID)
+	defer finish(true)
+	if personID == "" {
+		_, err := db.Scoped(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = NULL WHERE id = $1`, deviceID)
+		return err
+	}
+	_, err = db.Scoped(ctx).Exec(ctx, `UPDATE devices SET owner_directory_id = $2 WHERE id = $1`, deviceID, personID)
 	return err
 }
 
@@ -106,8 +127,13 @@ type DeviceForMatch struct {
 // ListDevicesForDirectoryMatch — устройства, у которых есть доложенный юзер, но авто-владелец
 // ещё не проставлен. Enterprise-матчер зовёт после синка для ПЕРЕМАТЧА задним числом
 // (роадмап §121-123): синк подтянул персону — привязка срабатывает без миграции.
-func (db *DB) ListDevicesForDirectoryMatch(ctx context.Context) ([]DeviceForMatch, error) {
-	rows, err := db.Q(ctx).Query(ctx, `
+func (db *DB) ListDevicesForDirectoryMatch(ctx context.Context, tenantID string) ([]DeviceForMatch, error) {
+	ctx, finish, _, err := db.scopeFor(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, COALESCE(console_user, ''), COALESCE(console_user_sid, '')
 		FROM devices
 		WHERE owner_directory_id IS NULL
@@ -130,19 +156,12 @@ func (db *DB) ListDevicesForDirectoryMatch(ctx context.Context) ([]DeviceForMatc
 
 // ListDirectoryPersons — для UI «Каталог». Сортировка по display_name.
 func (db *DB) ListDirectoryPersons(ctx context.Context, tenantID string) ([]DirectoryPerson, error) {
-	tenantID, err := requireTenant(tenantID)
+	ctx, finish, tenantID, err := db.scopeFor(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := TxFrom(ctx); !ok {
-		var finish func(bool)
-		ctx, finish, err = db.BindTenant(ctx, tenantID)
-		if err != nil {
-			return nil, err
-		}
-		defer finish(true)
-	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, object_guid, COALESCE(object_sid,''), COALESCE(sam_account,''),
 		       COALESCE(user_principal,''), COALESCE(display_name,''), COALESCE(email,''),
 		       COALESCE(distinguished_name,''), disabled, source
@@ -169,9 +188,14 @@ func (db *DB) ListDirectoryPersons(ctx context.Context, tenantID string) ([]Dire
 // MarkDirectoryPersonsStale — пометить disabled персон, не обновлённых последним синком
 // (synced_at < cutoff): исчезли из выдачи каталога. НЕ удаляем — owner-историю не рушим,
 // а disabled матч уже не берёт. Возвращает число помеченных (для отчёта синка).
-func (db *DB) MarkDirectoryPersonsStale(ctx context.Context, syncStartedBefore int64) (int64, error) {
+func (db *DB) MarkDirectoryPersonsStale(ctx context.Context, tenantID string, syncStartedBefore int64) (int64, error) {
+	ctx, finish, _, err := db.scopeFor(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer finish(true)
 	// syncStartedBefore — unix-время начала текущего синка; всё, что не тронуто им, устарело.
-	tag, err := db.Q(ctx).Exec(ctx,
+	tag, err := db.Scoped(ctx).Exec(ctx,
 		// source <> 'manual': ручные карточки каталог не отдаёт НИКОГДА, и без этого
 		// условия первый же синк погасил бы всех, кого оператор завёл сам.
 		`UPDATE directory_persons SET disabled = true

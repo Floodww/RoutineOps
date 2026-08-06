@@ -55,6 +55,36 @@
     <Launch Condition="Installed OR (ENROLL_URL AND ENROLL_TOKEN AND CA_URL AND CA_SHA256 AND SERVER_ADDR)"
             Message="Задайте ENROLL_URL, ENROLL_TOKEN, CA_URL, CA_SHA256 и SERVER_ADDR: msiexec /i RoutineOps-agent.msi ENROLL_URL=... ENROLL_TOKEN=... CA_URL=... CA_SHA256=... SERVER_ADDR=host:50051" />
 
+    <!-- Второй гейт: свойства энроллмента ПЕРЕДАНЫ, но enroll в этом прогоне не выполнится.
+         Условие выше при Installed=true проходит по ЛЕВОЙ части, то есть на уже
+         зарегистрированном продукте набор из пяти свойств не проверяется вовсе, а
+         EnrollExec (NOT Installed OR REINSTALL) пропускается: msiexec отдаёт 0 при нулевом
+         результате — ни установки, ни ошибки.
+
+         🔴 Поймано в поле. Ручное снятие (uninstall.bat) снимает службу, файлы и ключи, но
+         MSI-регистрацию не трогало — продукт оставался числиться установленным при пустом
+         диске. Повтор той же команды msiexec уходил в maintenance и молча ничего не делал.
+         Причину чинит батник (он теперь зовёт `RoutineOps-agent.exe msi-unregister`), а этот
+         гейт — сеть безопасности: он же ловит и повтор enroll на ЗДОРОВОЙ машине командой
+         из веб-UI, в которой REINSTALL нет.
+
+         Почему безопасно на удалении. LaunchConditions выполняется и при REMOVE=ALL — это
+         классические грабли, из-за них первое условие и начинается с `Installed OR`. Защит
+         здесь две, и они независимы: `NOT REMOVE` и — главное — пустая OR-группа, потому
+         что командная строка удаления enroll-свойств не несёт. Полагаться на один
+         `NOT REMOVE` нельзя: LaunchConditions идёт на seq 100, а REMOVE в UI-потоке
+         («Изменить/Удалить» в ARP) вычисляется только на InstallValidate (seq 1400). У пяти
+         свойств нет значений по умолчанию в таблице Property (они только в
+         SecureCustomProperties), поэтому на любом maintenance/repair-прогоне без командной
+         строки OR-группа пуста и гейт выстрелить не может.
+
+         Message — поле Formatted, поэтому [ProductCode] раскроется в реальный GUID. Длина
+         ограничена 255 символами (тип l255 в _Validation). Под /qn текст на экран не
+         попадает — он уходит в /l*v-лог и в журнал Windows «Приложение» (источник
+         MsiInstaller), см. docs/field-troubleshooting.md. -->
+    <Launch Condition="NOT (Installed AND NOT REINSTALL AND NOT REMOVE AND (ENROLL_URL OR ENROLL_TOKEN OR CA_URL OR CA_SHA256 OR SERVER_ADDR))"
+            Message="RoutineOps Agent уже зарегистрирован: этот запуск ничего не установит и enroll не выполнит. Повторите ту же команду с REINSTALL=ALL REINSTALLMODE=vomus. Если агента на диске нет, сначала снимите запись: msiexec /x [ProductCode] /qn" />
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="RoutineOps">
         <Component Id="AgentExe" Guid="1B812CD8-2957-464D-8B71-FE6363DBCE27">
@@ -64,6 +94,18 @@
              CA по CA_URL и пинит по CA_SHA256 (TOFU без пина отклоняется, SEC-1); пин
              доставляется в команде msiexec из доверенного веб-UI. Deployment-специфики
              в MSI больше нет — ключ self-update агент тоже берёт из enroll-ответа. -->
+        <!-- Скрипт ручного снятия агента.
+             🔴 Кладётся В КАТАЛОГ УСТАНОВКИ, а не «лежит в репозитории на всякий
+             случай». Штатный путь удаления — «Установка и удаление программ» либо
+             `RoutineOps-agent.exe uninstall`; батник нужен там, где штатный путь
+             недоступен: взведена tamper-protection, служба не снимается, машина в
+             безопасном режиме. Пока файла не было на диске, администратору приходилось
+             искать его в исходниках на GitHub и копировать из браузера — а копипаст
+             ломает переносы строк, и cmd.exe разбирает файл со сдвигом (поймано в поле).
+             Файл в каталоге установки этот этап убирает целиком. -->
+        <Component Id="UninstallScript" Guid="*">
+          <File Id="uninstall.bat" Name="uninstall.bat" Source="uninstall.bat" KeyPath="yes" />
+        </Component>
         <!-- Автозапуск трея в сессии любого вошедшего пользователя (per-user UI). -->
         <Component Id="TrayAutostart" Guid="*">
           <RegistryValue Root="HKLM"
@@ -77,6 +119,7 @@
 
     <Feature Id="Main" Title="RoutineOps Agent" Level="1">
       <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="UninstallScript" />
       <ComponentRef Id="TrayAutostart" />
     </Feature>
 

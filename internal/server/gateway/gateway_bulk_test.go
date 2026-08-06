@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 func TestFetchScriptPolicies_GatedForPendingApproval(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	certCtx, fp := makeCertCtx(t, "pending-approval-dev")
 	registerDevice(t, db, "pending-approval-dev", fp)
@@ -82,7 +81,7 @@ func TestFetchScriptPolicies_GatedForPendingApproval(t *testing.T) {
 func TestFetchPolicy_EmptyForPendingApproval(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	certCtx, fp := makeCertCtx(t, "pending-softpolicy-dev")
 	registerDevice(t, db, "pending-softpolicy-dev", fp)
@@ -104,7 +103,7 @@ func TestFetchPolicy_EmptyForPendingApproval(t *testing.T) {
 func TestConnect_RejectedDevice(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	c, fp := makeCertCtx(t, "rejected-dev")
 	registerDevice(t, db, "rejected-dev", fp)

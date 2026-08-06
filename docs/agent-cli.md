@@ -18,14 +18,15 @@
 | `enroll` | Получить mTLS-сертификат по одноразовому токену; опц. скачать CA и поставить службу |
 | `run` | Запустить агент (значение по умолчанию, если команда не указана) |
 | `install` | Зарегистрировать системную службу (launchd/SCM); нужны root/админ |
-| `uninstall` | Снять службу |
+| `uninstall` | Снять службу. Windows: плюс трей и следы прежних ручных установок `C:\mdm-extract`. macOS: плюс LaunchAgent-plist трея и `pkgutil --forget`. Ни каталога установки, ни сертификатов, ни регистрации установщика не трогает — её снимает `msi-unregister` (Windows) либо сам MSI при удалении. Полное ручное снятие на Windows — `uninstall.bat` |
 | `cleanup-legacy` | Удалить следы прежних ручных установок (Windows: `C:\mdm-extract`) |
+| `msi-unregister` | Windows: снять регистрацию установщика — найти продукт по стабильному `UpgradeCode` и выполнить `msiexec /x`. Вызывается из `uninstall.bat`; без неё продукт остаётся числиться установленным при пустом диске, и повторная установка того же пакета уходит в режим обслуживания. Продукта нет — no-op, не ошибка. macOS/Linux: no-op |
 | `request-admin` | Запросить временные права администратора |
 | `diag` | Диагностика: конфиг, провайдер сертификата, опц. проба связи (`-probe`) |
 | `tray` | Иконка статуса в трее (Windows и macOS, per-user процесс) |
 | `tamper-status` | Состояние защиты от удаления. Windows: флаги в реестре + режим загрузки. macOS: флаг `schg` на бинаре и plist'ах. Linux: защиты нет |
 | `tamper-disarm` | Разоружить защиту. Windows: только из безопасного режима. macOS: `chflags noschg` от root — **обязателен перед `uninstall`**. Linux: вернёт ошибку «не реализована» |
-| `tamper-cleanup` | Windows: снять SafeBoot-регистрацию и флаги (вызывается из `uninstall.bat`). macOS/Linux: no-op |
+| `tamper-cleanup` | Windows: снять SafeBoot-регистрацию и флаги (вызывается из `uninstall.bat` — он же зовёт `msi-unregister`). macOS/Linux: no-op |
 | `filevault-provision` | Дозавершить FileVault-provisioning (macOS, интерактивно; только enterprise-сборка, в free вернёт ошибку) |
 | `version` | Версия, платформа, статус self-update и escrow |
 | `help` | Справка с примерами |

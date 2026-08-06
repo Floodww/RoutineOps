@@ -39,6 +39,18 @@ jobs:
         run: npm run build
       - name: Unit tests
         run: npm test
+      # 🔴 Браузерный гейт выпадающего списка. Заведён по факту, а не на всякий случай:
+      # компонент ломался ДВАЖДЫ, и оба раза по причинам, которых в jsdom не существует —
+      # stacking context от backdrop-filter (меню уезжало под соседнюю карточку) и
+      # `pointer-events: none`, который Radix ставит на body в модальном режиме (меню
+      # рисовалось и не нажималось). Оба раза `npm test` был зелёным.
+      #
+      # Бэкенда не требует: стенд /select-harness.html поднимается тем же vite dev и в
+      # продакшн-сборку не попадает (Vite собирает только index.html).
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - name: UI gate (dropdown)
+        run: npm run test:ui
       # Lint информативный — не блокируем на существующем долге (7 warning'ов
       # react-refresh в ui-примитивах на дату правки).
       - name: Lint

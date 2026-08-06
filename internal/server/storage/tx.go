@@ -42,7 +42,30 @@ func TenantIDFrom(ctx context.Context) (string, bool) {
 	return id, ok
 }
 
-// Querier — общий интерфейс pool и tx; Q() выбирает активный скоуп (контракт §5.1).
+// DetachTenant отвязывает контекст от жизни запроса, СОХРАНЯЯ тенанта.
+//
+// Нужен отправке уведомлений: она уходит в detached-гоурутину (`go bot.NotifyAlert(...)`),
+// потому что ходит в сеть и не должна задерживать ответ агенту. К моменту отправки
+// контекст запроса уже отменён, а транзакция его скоупа — закрыта, поэтому передать
+// туда ctx запроса нельзя. Передать context.Background() тоже нельзя: вместе с отменой
+// он теряет и тенанта, а рассылка без тенанта — это рассылка по всей инсталляции.
+//
+// Транзакция НЕ переносится намеренно: она принадлежит запросу и будет закрыта раньше,
+// чем гоурутина дойдёт до базы. Переносится ровно tenant_id — по нему scopeFor откроет
+// уже в гоурутине СВОЮ транзакцию с тем же GUC.
+//
+// Тенанта в исходном контексте нет → возвращается голый Background: обязанность отказать
+// лежит на потребителе (он один знает, законна ли для него работа без тенанта), а тихо
+// подставлять сюда «какой-нибудь» тенант нельзя.
+func DetachTenant(ctx context.Context) context.Context {
+	if id, ok := TenantIDFrom(ctx); ok && id != "" {
+		return WithTenantID(context.Background(), id)
+	}
+	return context.Background()
+}
+
+// Querier — общий интерфейс pool и tx. Остался ровно для таблиц БЕЗ тенанта: к
+// тенантским ходят через TenantScope, и pool в тот путь не подставляется никогда.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -52,15 +75,82 @@ type Querier interface {
 var (
 	_ Querier = (*pgxpool.Pool)(nil)
 	_ Querier = (pgx.Tx)(nil)
+	_ Querier = TenantScope{}
 )
 
-// Q — tx из контекста, иначе pool. Одиночные pool-запросы со скоупом запрещены контрактом.
-func (db *DB) Q(ctx context.Context) Querier {
-	if tx, ok := TxFrom(ctx); ok {
-		return tx
-	}
-	return db.pool
+// TenantScope — хэндл тенантского скоупа: доказательство того, что запрос уйдёт в
+// транзакцию, где уже выполнен set_config('routineops.tenant_id'). Это ЕДИНСТВЕННЫЙ
+// способ обратиться к таблице под RLS.
+//
+// 🔴 Зачем тип, а не прежняя развилка. Раньше Q(ctx) отдавал tx из контекста, а при его
+// отсутствии — pool. Соседнее соединение из пула тенанта не знает, и для таблицы под
+// FORCE RLS это значит: current_setting(...,true) → NULL, предикат не совпадает ни с
+// одной строкой. SELECT отдаёт ноль, UPDATE трогает ноль строк, и вызывающий читает это
+// как «нет данных». Тихо. Ровно так в июле лёг командный канал, так же терялся отчёт
+// агента о выдаче локального админа (UpdateAdminAccessReport), и так же — до этой
+// правки — уходил в никуда синк каталога. Локальные тесты класс не ловят: testutil
+// ставит роли дефолтный routineops.tenant_id, и мимо-скоупный запрос в них «попадает».
+//
+// Теперь непривязанный контекст не доезжает до базы вовсе: нулевой TenantScope отдаёт
+// ErrTenantScopeMissing из любого метода. Собрать его снаружи нельзя — поле
+// неэкспортируемое, конструктор один (Scoped/BindTenant*), нулевое значение fail-closed.
+//
+// Что тип НЕ ловит: он не доказывает, что вызывающий выше по стеку вообще подумал о
+// тенанте. Развилка «есть ли скоуп в ctx» осталась ровно одна — Scoped(ctx), и она
+// fail-closed. Соответствие «таблица под RLS ⇒ обращение через TenantScope» проверяется
+// статически: scope_gate_test.go разбирает SQL всех вызовов и сверяет с классификацией
+// internal/server/tenancy.
+type TenantScope struct{ tx pgx.Tx }
+
+// Scoped — тенантский querier из контекста. Скоупа нет → нулевой хэндл, и любой запрос
+// через него вернёт ErrTenantScopeMissing вместо тихого нуля строк.
+func (db *DB) Scoped(ctx context.Context) TenantScope {
+	tx, _ := TxFrom(ctx)
+	return TenantScope{tx: tx}
 }
+
+func (s TenantScope) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if s.tx == nil {
+		return nil, tenancy.ErrTenantScopeMissing
+	}
+	return s.tx.Query(ctx, sql, args...)
+}
+
+func (s TenantScope) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if s.tx == nil {
+		return errRow{err: tenancy.ErrTenantScopeMissing}
+	}
+	return s.tx.QueryRow(ctx, sql, args...)
+}
+
+func (s TenantScope) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if s.tx == nil {
+		return pgconn.CommandTag{}, tenancy.ErrTenantScopeMissing
+	}
+	return s.tx.Exec(ctx, sql, args...)
+}
+
+// Tx — транзакция скоупа для того, что не выражается тремя методами выше (pgx.Batch).
+// Ошибка, а не nil: пропущенная проверка иначе даёт панику вместо внятного отказа.
+func (s TenantScope) Tx() (pgx.Tx, error) {
+	if s.tx == nil {
+		return nil, tenancy.ErrTenantScopeMissing
+	}
+	return s.tx, nil
+}
+
+// errRow — pgx.Row, отдающий ошибку в Scan. Нужен, потому что QueryRow ошибку не
+// возвращает: единственный способ довести отказ до вызывающего — через Scan, и он
+// проверяется всегда.
+type errRow struct{ err error }
+
+func (r errRow) Scan(...any) error { return r.err }
+
+// Третьего пути нет намеренно. К таблице БЕЗ тенанта (tenancy.ScopeGlobal/ScopeMixed)
+// ходят либо тем же TenantScope, если скоуп и так открыт (revoked_fingerprints внутри
+// удаления устройства), либо прямо через db.pool — и тогда функция обязана попасть в
+// поимённый список pool_bypass_test.go с причиной. Отдельный «querier без скоупа» был бы
+// ровно тем фолбэком, который здесь и убирается: удобным, коротким и молчаливым.
 
 func (db *DB) setTenantGUC(ctx context.Context, q Querier, tenantID string) error {
 	_, err := q.Exec(ctx, `SELECT set_config('routineops.tenant_id', $1, true)`, tenantID)
@@ -99,21 +189,60 @@ func (db *DB) BindTenant(ctx context.Context, tenantID string) (context.Context,
 	return scoped, finish, nil
 }
 
-// beginScoped возвращает tx для запроса: переиспользует ctx или открывает новую.
-// owned=true — вызывающий обязан Commit/Rollback; при TenantIDFrom в ctx GUC уже выставлен.
+// scopeFor — «открыть скоуп, если его ещё нет выше по стеку», единым местом.
+//
+// tenantID пустой означает «взять из контекста» (WithTenantID): так тенант приезжает по
+// агентским путям (gateway ставит его после резолва по отпечатку серта) и по панельным
+// (jwtMiddleware — из проверенных claims). Не нашлось ни там, ни там — ошибка, а не
+// «работаем без тенанта»: последнее и есть тот отказ, который потом читают как «нет
+// данных».
+//
+// Возвращает: контекст со скоупом, finish (вызывающий обязан отложить), нормализованный
+// tenantID и ошибку.
+func (db *DB) scopeFor(ctx context.Context, tenantID string) (context.Context, func(bool), string, error) {
+	if tenantID == "" {
+		tenantID, _ = TenantIDFrom(ctx)
+	}
+	if _, ok := TxFrom(ctx); ok {
+		// Скоуп уже открыт выше — тенант там же и зафиксирован; свой не открываем и
+		// пустой tenantID здесь не ошибка (вложенный вызов его знать не обязан).
+		return ctx, func(bool) {}, tenantID, nil
+	}
+	tenantID, err := requireTenant(tenantID)
+	if err != nil {
+		return ctx, nil, "", err
+	}
+	ctx, finish, err := db.BindTenant(ctx, tenantID)
+	if err != nil {
+		return ctx, nil, "", err
+	}
+	return ctx, finish, tenantID, nil
+}
+
+// beginScoped возвращает tx для многошагового запроса: переиспользует транзакцию из
+// контекста либо открывает свою и выставляет в ней GUC. owned=true — вызывающий обязан
+// Commit/Rollback.
+//
+// 🔴 Тенант обязателен. Раньше отсутствие TenantIDFrom означало «открыть транзакцию без
+// GUC» — то есть ту же тихую дыру, что и pool-фолбэк в старом Q, только на несколько
+// запросов сразу. Всеми шестью вызывающими (WriteAuditLog, UpsertInventory,
+// GetPendingTasks, EnrollDevice, ResetDeviceForReenroll, AcceptAdminSessionWindow)
+// трогаются таблицы под RLS, поэтому непривязанный контекст здесь — отказ, а не режим.
 func (db *DB) beginScoped(ctx context.Context) (tx pgx.Tx, owned bool, err error) {
 	if tx, ok := TxFrom(ctx); ok {
 		return tx, false, nil
+	}
+	tenantID, ok := TenantIDFrom(ctx)
+	if !ok {
+		return nil, false, tenancy.ErrTenantScopeMissing
 	}
 	tx, err = db.pool.Begin(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-	if tenantID, ok := TenantIDFrom(ctx); ok {
-		if err := db.setTenantGUC(ctx, tx, tenantID); err != nil {
-			_ = tx.Rollback(ctx)
-			return nil, false, err
-		}
+	if err := db.setTenantGUC(ctx, tx, tenantID); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, false, err
 	}
 	return tx, true, nil
 }
@@ -168,6 +297,20 @@ func (db *DB) BindTenantForDevice(ctx context.Context, deviceID string) (context
 		return ctx, nil, tenancy.ErrTenantScopeMissing
 	}
 	return db.BindTenant(ctx, tenantID)
+}
+
+// DeviceTenantID — тенант устройства по его id, через тот же SECURITY DEFINER, что и
+// BindTenantForDevice. Нужен операциям НАД устройством, которые выполняются из-под
+// надзора инсталляции и потому тенанта устройства не знают: перенос между тенантами
+// обязан сначала разобраться с данными прежнего владельца. Пустая строка — устройства
+// нет (не ошибка: вызывающий решает сам, 404 это или пропуск).
+func (db *DB) DeviceTenantID(ctx context.Context, deviceID string) (string, error) {
+	var tenantID string
+	err := db.pool.QueryRow(ctx, `SELECT COALESCE(auth_device_tenant($1::uuid)::text, '')`, deviceID).Scan(&tenantID)
+	if err != nil {
+		return "", err
+	}
+	return tenantID, nil
 }
 
 // BindTenantForTask резолвит tenant_id задачи (DEFINER, миграция 054) и открывает скоуп.

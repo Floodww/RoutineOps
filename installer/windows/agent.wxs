@@ -58,6 +58,14 @@
       <Component Id="CaCert">
         <File Id="caCrt" Source="$(var.CaCert)" Name="ca.crt" KeyPath="yes" />
       </Component>
+      <!-- Скрипт ручного снятия — на диск, а не «есть в репозитории». Нужен ровно там,
+           где штатное удаление недоступно (взведена tamper-protection, служба не
+           снимается, безопасный режим), то есть там, где искать его в браузере и
+           копировать текстом — худший из возможных вариантов: копипаст ломает переносы
+           строк, и cmd.exe разбирает файл со сдвигом. -->
+      <Component Id="UninstallScript">
+        <File Id="uninstallBat" Source="$(var.UninstallBat)" Name="uninstall.bat" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <Feature Id="Main" Title="RoutineOps Agent" Level="1">

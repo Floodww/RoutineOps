@@ -6,8 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -166,4 +168,17 @@ func makeCSR(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+}
+
+// serviceTokenSecret — секрет сервисного токена, выведенный ИЗ ИМЕНИ ТЕСТА.
+//
+// Литералы вида strings.Repeat("c", 40) здесь ломаются: пакет ходит в ОДНУ общую базу
+// (sharedDSN), у api_tokens уникальный индекс по хешу токена, и два теста с одинаковым
+// литералом валят друг друга «duplicate key» — причём падает тот, кто запустился вторым,
+// то есть жалоба приходит на невиновного. По отдельности оба при этом зелёные. Поймали
+// ровно так: новый тест взял ту же букву, что уже занятая соседом.
+func serviceTokenSecret(t *testing.T) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(t.Name()))
+	return "rops_" + hex.EncodeToString(sum[:])[:40]
 }

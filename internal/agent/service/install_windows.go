@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -175,6 +176,35 @@ func Uninstall() error {
 		waitState(s, svc.Stopped, 20*time.Second)
 	}
 	return s.Delete()
+}
+
+// agentImageName — имя образа агента. То же, что кладёт MSI (File Name в авторинге).
+const agentImageName = "RoutineOps-agent.exe"
+
+// StopUserProcesses снимает процессы агента в ПОЛЬЗОВАТЕЛЬСКИХ сессиях: трей и оверлей
+// блокировки.
+//
+// 🔴 Снятия службы недостаточно, и это поймано в поле. Трей живёт в сессии вошедшего
+// пользователя, службой не является и после `sc delete` продолжает работать — а вместе с
+// ним остаётся ОТКРЫТЫМ `RoutineOps-agent.exe`. Удаление каталога об это спотыкается:
+// «Отказано в доступе к файлу RoutineOps-agent.exe», каталог остаётся, и выглядит это
+// как «удаление не сработало». Тот же хвост получал и MSI: файлы, занятые живым
+// процессом, он оставляет до перезагрузки.
+//
+// Безусловный taskkill здесь безопасен ровно потому, что зовётся ПОСЛЕ снятия службы:
+// трей и оверлей не службы, и воскрешать их через FailureActions некому. Себя процесс не
+// трогает — фильтр по PID: иначе снос убил бы сам себя на середине.
+//
+// Best-effort: код возврата 1 у taskkill означает «процессов не найдено» (никто не
+// залогинен), и это норма, а не сбой.
+func StopUserProcesses(log *slog.Logger) {
+	filter := fmt.Sprintf("PID ne %d", os.Getpid())
+	// `.exe.old` — запущенный старый бинарь незавершённого самообновления: держит файл
+	// точно так же.
+	for _, image := range []string{agentImageName, agentImageName + ".old"} {
+		_ = exec.Command("taskkill", "/F", "/IM", image, "/FI", filter).Run()
+	}
+	log.Info("остаточные процессы агента (трей, оверлей) сняты", slog.Int("keep_pid", os.Getpid()))
 }
 
 // legacyDirs — каталоги ПРЕЖНИХ (ручных) установок агента, которые MSI не

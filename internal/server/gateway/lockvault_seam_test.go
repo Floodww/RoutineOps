@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -33,11 +32,11 @@ func (f *fakeVault) TakeLockSecrets(deviceID, requestID string) (pb.ArmStatus, s
 func armDevice(t *testing.T, db *storage.DB, cn, fingerprint, mode, requestID string) string {
 	t.Helper()
 	registerDevice(t, db, cn, fingerprint)
-	devID, err := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	devID, err := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
 	if err != nil || devID == "" {
 		t.Fatalf("GetDeviceIDByFingerprint: %v (id=%q)", err, devID)
 	}
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "bcrypt-hash", "увольнение",
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "bcrypt-hash", "увольнение",
 		mode, requestID); err != nil {
 		t.Fatalf("SetDeviceLockState: %v", err)
 	}
@@ -79,7 +78,7 @@ func TestFetchLockSecrets_LockCancelled_DoesNotTouchVault(t *testing.T) {
 	devID := armDevice(t, db, "fv-cancelled", fp, storage.LockModeFileVault, "req-1")
 
 	// Оператор снял лок: desired сбрасывается, режим возвращается в overlay.
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "unlocked", "", "", "", ""); err != nil {
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "unlocked", "", "", "", ""); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
 
@@ -160,7 +159,7 @@ func TestFetchLockSecrets_FreeBuildUnimplemented(t *testing.T) {
 func lockActualState(t *testing.T, db *storage.DB, deviceID string) string {
 	t.Helper()
 	var s *string
-	if err := db.Pool().QueryRow(context.Background(),
+	if err := db.Pool().QueryRow(tenantCtx(),
 		`SELECT lock_actual_state FROM devices WHERE id = $1`, deviceID).Scan(&s); err != nil {
 		t.Fatalf("select lock_actual_state: %v", err)
 	}
@@ -173,7 +172,7 @@ func lockActualState(t *testing.T, db *storage.DB, deviceID string) string {
 func alertCount(t *testing.T, db *storage.DB, deviceID, alertType string) int {
 	t.Helper()
 	var n int
-	if err := db.Pool().QueryRow(context.Background(),
+	if err := db.Pool().QueryRow(tenantCtx(),
 		`SELECT count(*) FROM alerts WHERE device_id = $1 AND alert_type = $2`,
 		deviceID, alertType).Scan(&n); err != nil {
 		t.Fatalf("count alerts: %v", err)
@@ -204,7 +203,7 @@ func TestReportLockStatus_NotArmed_NoAlertRow(t *testing.T) {
 	if n := alertCount(t, db, devID, "filevault_not_armed"); n != 0 {
 		t.Fatalf("заведено %d строк alerts — NOT_ARMED не событие ИБ", n)
 	}
-	lockStatus, _, _, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, _, _, lockMode, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}

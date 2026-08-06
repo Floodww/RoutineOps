@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
 	"testing"
@@ -17,7 +16,7 @@ import (
 // появится ещё один источник алертов.
 func outboxAlerts(t *testing.T, db *storage.DB, deviceID string) []storage.Alert {
 	t.Helper()
-	all, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, deviceID, 100)
+	all, err := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, deviceID, 100)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -32,11 +31,11 @@ func outboxAlerts(t *testing.T, db *storage.DB, deviceID string) []storage.Alert
 
 func deviceByFP(t *testing.T, db *storage.DB, fp string) *storage.Device {
 	t.Helper()
-	id, err := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	id, err := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 	if err != nil || id == "" {
 		t.Fatalf("device by fingerprint: id=%q err=%v", id, err)
 	}
-	d, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, id)
+	d, _, err := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, id)
 	if err != nil || d == nil {
 		t.Fatalf("GetDevice: %v", err)
 	}

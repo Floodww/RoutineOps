@@ -37,6 +37,16 @@ func uniq(t *testing.T) string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+// tenantCtx — контекст «как в бою»: тенант в нём уже лежит. На панельных путях его
+// кладёт jwtMiddleware (из перечитанного из БД членства), на агентских — gateway после
+// резолва по отпечатку серта. Голый context.Background() в тесте storage проверял бы
+// путь, которого в проде нет, и до перехода на TenantScope именно так и получалось:
+// запрос уходил в пул, RLS не совпадал ни с одной строкой, а тест был зелёным, потому
+// что testutil ставит роли дефолтный routineops.tenant_id.
+func tenantCtx() context.Context {
+	return storage.WithTenantID(context.Background(), tenancy.DefaultTenantID)
+}
+
 // withCommittedTenant выполняет fn в tenant-tx и коммитит до возврата (видно другим вызовам storage).
 func withCommittedTenant(t *testing.T, db *storage.DB, fn func(ctx context.Context)) {
 	t.Helper()

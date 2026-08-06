@@ -60,6 +60,8 @@ state:
 | outbox растёт, не сливается | `agent diag` (state) | сервер недоступен — алерты не теряются, дошлются после восстановления. Чинить связь |
 | задача выполнилась дважды | проверить `task-state` файл | `-task-state` указывает на непишемый путь → дедуп только в памяти, теряется при рестарте. Дать пишемый путь |
 | macOS: `uninstall` падает с `operation not permitted` (plist/бинарь не удаляются) | `sudo RoutineOps-agent tamper-status` | взведена tamper-protection (`schg`): `sudo RoutineOps-agent tamper-disarm`, затем повторить `uninstall` |
+| Windows: `msiexec /i` отдал **0**, но службы нет и `%ProgramFiles%\RoutineOps` пуст | `reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s /f "RoutineOps Agent" /reg:64` | Сиротская регистрация установщика: агента снимали руками, не сняв запись продукта. Он числится установленным, `msiexec` уходит в режим обслуживания и пропускает и проверку свойств, и энроллмент. Лечение: `msiexec /x {ProductCode} /qn` (ProductCode = имя найденного ключа), затем повторить установку командой из UI. Штатно этого не бывает: `uninstall.bat` снимает запись сам (`msi-unregister`) |
+| Windows: `msiexec /i` прерывается, в журнале «Приложение» запись MsiInstaller про «уже зарегистрирован» | `reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s /f "RoutineOps Agent" /reg:64` | Ожидаемое поведение, а не сбой: установщик отказывается ставиться поверх уже зарегистрированного продукта, потому что энроллмент в этом прогоне не выполнится. Повторить ту же команду с `REINSTALL=ALL REINSTALLMODE=vomus`; если агента на диске нет — сперва `msiexec /x {ProductCode} /qn`. Под `/qn` текст отказа виден только в журнале и в `/l*v`-логе |
 
 ## Linux: служба под systemd
 

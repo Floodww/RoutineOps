@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -14,7 +13,7 @@ import (
 // устройства это один и тот же владелец, и ставится он одной ручкой.
 func TestDevice_OwnerIsPerson(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := uniq(t)
 
 	fp := "own-fp-" + u
@@ -56,16 +55,16 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 
 	// Карточка из каталога — тот же слот владельца, разница только в source.
 	guid := "own-guid-" + u
-	if err := db.UpsertDirectoryPerson(ctx, storage.DirectoryPerson{
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, storage.DirectoryPerson{
 		ObjectGUID: guid, SAMAccount: "sam" + u, DisplayName: "Пётр Петров",
 	}); err != nil {
 		t.Fatalf("upsert person: %v", err)
 	}
-	pid, err := db.FindDirectoryPersonForMatch(ctx, "", "sam"+u)
+	pid, err := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, "", "sam"+u)
 	if err != nil || pid == "" {
 		t.Fatalf("find person: id=%q err=%v", pid, err)
 	}
-	if err := db.SetDeviceOwnerDirectory(ctx, devID, pid); err != nil {
+	if err := db.SetDeviceOwnerDirectory(ctx, tenancy.DefaultTenantID, devID, pid); err != nil {
 		t.Fatalf("set dir owner: %v", err)
 	}
 	d, _, _ = db.GetDevice(ctx, tenancy.DefaultTenantID, devID)
@@ -83,7 +82,7 @@ func TestDevice_OwnerIsPerson(t *testing.T) {
 // правка здесь пережила бы ровно до следующего синка.
 func TestManualPerson_EditDeleteGuards(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := uniq(t)
 
 	p, err := db.CreateManualPerson(ctx, tenancy.DefaultTenantID, "Ручной Человек", "")
@@ -100,7 +99,7 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 	}
 
 	// Каталожную не трогаем.
-	if err := db.UpsertDirectoryPerson(ctx, storage.DirectoryPerson{
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, storage.DirectoryPerson{
 		ObjectGUID: "ldap-guid-" + u, DisplayName: "Из Каталога",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -139,21 +138,21 @@ func TestManualPerson_EditDeleteGuards(t *testing.T) {
 // Enterprise погасил бы всех владельцев, заведённых во Free.
 func TestManualPerson_SurvivesDirectorySync(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := uniq(t)
 
 	manual, err := db.CreateManualPerson(ctx, tenancy.DefaultTenantID, "Пережил Синк", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := db.UpsertDirectoryPerson(ctx, storage.DirectoryPerson{
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, storage.DirectoryPerson{
 		ObjectGUID: "stale-guid-" + u, DisplayName: "Исчезнет Из AD",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
 	// Синк «в будущем»: всё, что не тронуто им, считается устаревшим.
-	if _, err := db.MarkDirectoryPersonsStale(ctx, 1<<40); err != nil {
+	if _, err := db.MarkDirectoryPersonsStale(ctx, tenancy.DefaultTenantID, 1<<40); err != nil {
 		t.Fatalf("mark stale: %v", err)
 	}
 

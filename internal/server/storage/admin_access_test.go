@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -13,7 +12,7 @@ import (
 func mustCreateAdminRequest(t *testing.T, db *storage.DB, deviceID, userID string) *storage.AdminAccessRequest {
 	t.Helper()
 	req, err := db.CreateAdminAccessRequest(
-		context.Background(), deviceID, userID, "need admin",
+		tenantCtx(), deviceID, userID, "need admin",
 		time.Now(), time.Now().Add(1*time.Hour),
 	)
 	if err != nil {
@@ -42,7 +41,7 @@ func TestFetchActiveAdminRequest_Pending(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("fetch-%s@test.com", uniq(t)))
 	req := mustCreateAdminRequest(t, db, d.ID, u.ID)
 
-	got, err := db.FetchActiveAdminRequest(context.Background(), d.ID)
+	got, err := db.FetchActiveAdminRequest(tenantCtx(), d.ID)
 	if err != nil {
 		t.Fatalf("FetchActiveAdminRequest: %v", err)
 	}
@@ -58,7 +57,7 @@ func TestFetchActiveAdminRequest_NoActive_ReturnsNil(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-noactive-%s", uniq(t)), "macos")
 
-	got, err := db.FetchActiveAdminRequest(context.Background(), d.ID)
+	got, err := db.FetchActiveAdminRequest(tenantCtx(), d.ID)
 	if err != nil {
 		t.Fatalf("FetchActiveAdminRequest: %v", err)
 	}
@@ -74,12 +73,12 @@ func TestRespondToAdminRequest_Approve(t *testing.T) {
 	req := mustCreateAdminRequest(t, db, d.ID, u.ID)
 
 	expires := time.Now().Add(1 * time.Hour)
-	if err := db.RespondToAdminRequest(context.Background(), req.ID, "approved", u.ID, &expires); err != nil {
+	if err := db.RespondToAdminRequest(tenantCtx(), req.ID, "approved", u.ID, &expires); err != nil {
 		t.Fatalf("RespondToAdminRequest: %v", err)
 	}
 
 	// FetchActive should still return it (approved is still "active")
-	got, _ := db.FetchActiveAdminRequest(context.Background(), d.ID)
+	got, _ := db.FetchActiveAdminRequest(tenantCtx(), d.ID)
 	if got == nil || got.Status != "approved" {
 		t.Errorf("status = %v, want approved", got)
 	}
@@ -91,12 +90,12 @@ func TestRespondToAdminRequest_Reject(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("reject-%s@test.com", uniq(t)))
 	req := mustCreateAdminRequest(t, db, d.ID, u.ID)
 
-	if err := db.RespondToAdminRequest(context.Background(), req.ID, "rejected", u.ID, nil); err != nil {
+	if err := db.RespondToAdminRequest(tenantCtx(), req.ID, "rejected", u.ID, nil); err != nil {
 		t.Fatalf("RespondToAdminRequest (reject): %v", err)
 	}
 
 	// FetchActive should return nil — rejected is not active
-	got, _ := db.FetchActiveAdminRequest(context.Background(), d.ID)
+	got, _ := db.FetchActiveAdminRequest(tenantCtx(), d.ID)
 	if got != nil {
 		t.Errorf("expected nil after rejection, got %+v", got)
 	}
@@ -110,13 +109,13 @@ func TestRevokeAdminAccessRequest(t *testing.T) {
 
 	// approve first (revoke only works on approved)
 	expires := time.Now().Add(1 * time.Hour)
-	_ = db.RespondToAdminRequest(context.Background(), req.ID, "approved", u.ID, &expires)
+	_ = db.RespondToAdminRequest(tenantCtx(), req.ID, "approved", u.ID, &expires)
 
-	if err := db.RevokeAdminAccessRequest(context.Background(), tenancy.DefaultTenantID, req.ID); err != nil {
+	if err := db.RevokeAdminAccessRequest(tenantCtx(), tenancy.DefaultTenantID, req.ID); err != nil {
 		t.Fatalf("RevokeAdminAccessRequest: %v", err)
 	}
 
-	got, _ := db.FetchActiveAdminRequest(context.Background(), d.ID)
+	got, _ := db.FetchActiveAdminRequest(tenantCtx(), d.ID)
 	if got != nil {
 		t.Errorf("expected nil after revoke, got %+v", got)
 	}
@@ -129,14 +128,14 @@ func TestExpireStaleAdminRequests(t *testing.T) {
 
 	// use UTC with large offset to be safe against any TZ skew between Go and Postgres
 	_, err := db.CreateAdminAccessRequest(
-		context.Background(), d.ID, u.ID, "expired request",
+		tenantCtx(), d.ID, u.ID, "expired request",
 		time.Now().UTC().Add(-26*time.Hour), time.Now().UTC().Add(-25*time.Hour),
 	)
 	if err != nil {
 		t.Fatalf("CreateAdminAccessRequest: %v", err)
 	}
 
-	n, err := db.ExpireStaleAdminRequests(context.Background())
+	n, err := db.ExpireStaleAdminRequests(tenantCtx())
 	if err != nil {
 		t.Fatalf("ExpireStaleAdminRequests: %v", err)
 	}
@@ -151,7 +150,7 @@ func TestListAdminAccessRequests_StatusFilter(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("listaar-%s@test.com", uniq(t)))
 	mustCreateAdminRequest(t, db, d.ID, u.ID)
 
-	rows, err := db.ListAdminAccessRequests(context.Background(), tenancy.DefaultTenantID, "pending")
+	rows, err := db.ListAdminAccessRequests(tenantCtx(), tenancy.DefaultTenantID, "pending")
 	if err != nil {
 		t.Fatalf("ListAdminAccessRequests: %v", err)
 	}

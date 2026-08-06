@@ -8,6 +8,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/api"
 	"github.com/Floodww/RoutineOps/internal/server/mailer"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // fvEnabledPolicy — тест-политика, разрешающая filevault (зеркалит enterprise
@@ -62,7 +63,7 @@ func TestLockDevice_FileVault_WithEscrow(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	task, err := db.GetTask(t.Context(), resp["task_id"])
+	task, err := db.GetTask(storage.WithTenantID(t.Context(), tenancy.DefaultTenantID), resp["task_id"])
 	if err != nil || task == nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestLockDevice_DefaultOverlay(t *testing.T) {
 	}
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
-	task, err := db.GetTask(t.Context(), resp["task_id"])
+	task, err := db.GetTask(storage.WithTenantID(t.Context(), tenancy.DefaultTenantID), resp["task_id"])
 	if err != nil || task == nil {
 		t.Fatalf("GetTask: %v", err)
 	}

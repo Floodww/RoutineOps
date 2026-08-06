@@ -5,9 +5,14 @@ import (
 )
 
 // ListDevicesAcrossTenants — кросс-тенантный список через SECURITY DEFINER (миграция 048).
+//
+// Идёт прямо в пул, а не через TenantScope, и это не обход, а суть ручки: она отвечает на
+// вопрос надзора «покажи парк всей инсталляции», ответ на который одним тенантом в GUC не
+// выражается. Изоляцию здесь держит не RLS, а сама функция (SECURITY DEFINER, фиксированный
+// search_path) плюс гард роли у вызывающего. Запись — в pool_bypass_test.go.
 func (db *DB) ListDevicesAcrossTenants(ctx context.Context, query, groupID string, limit, offset int) ([]Device, int, error) {
 	limit, offset = clampPage(limit, offset)
-	rows, err := db.Q(ctx).Query(ctx, `SELECT * FROM list_devices_across_tenants($1, $2, $3, $4)`,
+	rows, err := db.pool.Query(ctx, `SELECT * FROM list_devices_across_tenants($1, $2, $3, $4)`,
 		query, groupID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -57,7 +62,7 @@ func (db *DB) attachDeviceGroupsAcrossTenants(ctx context.Context, devices []Dev
 			ids[i] = d.ID
 			byID[d.ID] = d
 		}
-		rows, err := db.Q(tctx).Query(tctx, `
+		rows, err := db.Scoped(tctx).Query(tctx, `
 			SELECT m.device_id, g.id, g.name, g.color
 			FROM device_group_members m
 			JOIN device_groups g ON g.id = m.group_id

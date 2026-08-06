@@ -17,8 +17,10 @@ const DropdownMenuContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        // Меню — контрол, а не карта: стеклянная поверхность, но радиус меньше карточного.
-        "glass rounded-lg z-50 min-w-[8rem] overflow-hidden p-1 text-foreground",
+        // Поверхность НЕПРОЗРАЧНАЯ, как и у выпадающего списка: Radix уносит меню порталом
+        // в body, где стеклу нечего размывать, кроме фона страницы, — а под меню лежит
+        // контент, который оно обязано перекрыть. Разбор — в index.css у .popover-surface.
+        "popover-surface z-50 min-w-[8rem] overflow-hidden p-1 text-foreground",
         "data-[state=open]:animate-dropdown-in data-[state=closed]:animate-dropdown-out",
         className
       )}

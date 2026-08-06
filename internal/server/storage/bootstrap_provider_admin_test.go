@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"testing"
 )
 
@@ -14,7 +13,7 @@ import (
 // привилегий — любой приглашённый viewer стал бы надзорным над всей инсталляцией.
 func TestPromoteBootstrapProviderAdmin_OnlyWhenSoleIdentity(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Предусловие создаём сами, а не полагаемся на состояние общей тестовой БД:
 	// тест, который пропускается при «неудобных» данных, не доказывает ничего.

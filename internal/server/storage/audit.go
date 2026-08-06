@@ -168,7 +168,7 @@ func (db *DB) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChai
 
 	st := &AuditChainStatus{OK: true}
 
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT COUNT(*) FILTER (WHERE seq IS NOT NULL),
 		       COUNT(*) FILTER (WHERE seq IS NULL),
 		       COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0)
@@ -180,7 +180,7 @@ func (db *DB) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChai
 		return st, nil
 	}
 
-	if err := db.Q(ctx).QueryRow(ctx,
+	if err := db.Scoped(ctx).QueryRow(ctx,
 		`SELECT hash FROM audit_log WHERE seq = $1`, st.LastSeq).Scan(&st.HeadHash); err != nil {
 		return nil, fmt.Errorf("audit verify: head: %w", err)
 	}
@@ -189,7 +189,7 @@ func (db *DB) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChai
 	// канонизации между записью и проверкой невозможно по построению.
 	var brokenSeq *int64
 	var reason *string
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		WITH c AS (
 		  SELECT seq, prev_hash, hash,
 		         audit_row_hash(prev_hash, seq, user_id, user_email, action,
@@ -223,7 +223,7 @@ func (db *DB) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChai
 	// единственная проверка, которую нельзя пройти пересчётом всей цепочки, —
 	// при условии, что якорь хранится не только здесь (лог сервера, Telegram).
 	var mismatch int64
-	if err := db.Q(ctx).QueryRow(ctx, `
+	if err := db.Scoped(ctx).QueryRow(ctx, `
 		SELECT COUNT(*) FROM audit_anchors an
 		JOIN audit_log a ON a.seq = an.seq
 		WHERE a.hash IS DISTINCT FROM an.hash`).Scan(&mismatch); err != nil {
@@ -250,13 +250,18 @@ func (db *DB) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChai
 // tamper-evidence молча отсутствует — при живом эндпоинте /audit-log/verify.
 // Вызывающий обязан обойти тенанты (ForEachTenant).
 func (db *DB) WriteAuditAnchor(ctx context.Context) (int64, string, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return 0, "", scopeErr
+	}
+	defer finish(true)
 	tenantID, ok := TenantIDFrom(ctx)
 	if !ok || tenantID == "" {
 		return 0, "", tenancy.ErrTenantScopeMissing
 	}
 	var seq int64
 	var hash string
-	err := db.Q(ctx).QueryRow(ctx, `
+	err := db.Scoped(ctx).QueryRow(ctx, `
 		SELECT seq, hash FROM audit_log
 		WHERE tenant_id = $1 AND seq IS NOT NULL
 		ORDER BY seq DESC LIMIT 1`, tenantID).Scan(&seq, &hash)
@@ -266,7 +271,7 @@ func (db *DB) WriteAuditAnchor(ctx context.Context) (int64, string, error) {
 		}
 		return 0, "", fmt.Errorf("audit anchor: head: %w", err)
 	}
-	if _, err := db.Q(ctx).Exec(ctx, `
+	if _, err := db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO audit_anchors (tenant_id, seq, hash) VALUES ($1, $2, $3)
 		ON CONFLICT (tenant_id, seq) DO NOTHING`,
 		tenantID, seq, hash); err != nil {
@@ -307,7 +312,7 @@ func (db *DB) ListAuditLog(ctx context.Context, tenantID string, f AuditFilter, 
 	}
 	// ORDER BY дополнен id: события пишутся пачками в одну транзакцию и делят
 	// created_at до микросекунды — без тай-брейка страницы разъезжаются.
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, seq, user_id, user_email, action, target_type, target_id,
 		       COALESCE(details::text, 'null'), created_at, COUNT(*) OVER() AS total
 		FROM audit_log
@@ -357,7 +362,7 @@ func (db *DB) archiveAuditLogs(ctx context.Context, cutoff time.Time, archiveDir
 		return err
 	}
 
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, seq, tenant_id, user_id, user_email, action, target_type, target_id,
 		       COALESCE(details::text, 'null'), created_at, prev_hash, hash
 		FROM audit_log

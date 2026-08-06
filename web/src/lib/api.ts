@@ -516,9 +516,43 @@ export interface ScreenSession {
   frames: number
   bytes: number
   has_recording: boolean
+  // Запись оборвана до конца сеанса. Видно ДО скачивания намеренно: узнать о неполноте
+  // улики, уже открыв её, — поздно, а в режиме unattended запись это единственное, чем
+  // восстанавливают, что видел оператор.
+  recording_truncated?: boolean
+  recording_truncated_reason?: string
+  // Размер файла записи. Нужен оператору до скачивания: запись часового сеанса и
+  // запись, оборвавшаяся на первой минуте, в списке выглядят одинаково.
+  recording_bytes?: number
+  // Агент не опознал запрошенный профиль и взял low — расхождение версий сервера и
+  // агента. Без этого признака оно выглядит как «удалёнка стала хуже показывать».
+  profile_fallback?: boolean
+  // Когда агент последний раз отчитывался о ходе сеанса.
+  telemetry_at?: string
   created_at: string
   started_at?: string
   ended_at?: string
+  // Пусто = вопрос не задавался (режим unattended). Это НЕ «нет ответа»: сеанс без
+  // спрошенного согласия и сеанс, где сотрудник промолчал, — разные события.
+  consent_state?: string
+  consent_at?: string
+  // Сеанс запрошен С УПРАВЛЕНИЕМ (Ф3). Объявляется приглашением один раз: расширить
+  // область на лету нельзя, поэтому «взять управление» — это всегда новый сеанс.
+  control?: boolean
+  // Момент возврата управления сотруднику. Закрывает окно, за которое отвечает оператор,
+  // раньше конца сеанса.
+  control_returned_at?: string
+}
+
+// Одна строка журнала ввода (§9.21). Печатные символы здесь ОТСУТСТВУЮТ по построению:
+// для kind="text" едет только количество символов, потому что пароль, введённый
+// оператором в чужую машину, не должен лежать у нас в базе открытым текстом.
+export interface ScreenInputEntry {
+  kind: string
+  detail?: string
+  events: number
+  offset_ms: number
+  at?: string
 }
 
 // Коды завершения сеанса (§7 контракта). Ключ i18n, а не готовая строка: причина едет
@@ -526,8 +560,11 @@ export interface ScreenSession {
 // из агентского сообщения.
 export const SCREEN_END_REASON: Record<string, string> = {
   USER_TERMINATED: "screenSession.end.userTerminated",
+  OPERATOR_STOPPED: "screenSession.end.operatorStopped",
   CONSENT_DENIED: "screenSession.end.consentDenied",
   CONSENT_TIMEOUT: "screenSession.end.consentTimeout",
+  CONSENT_UNAVAILABLE: "screenSession.end.consentUnavailable",
+  NOTICE_UNAVAILABLE: "screenSession.end.noticeUnavailable",
   SESSION_LOCKED: "screenSession.end.sessionLocked",
   USER_SWITCHED: "screenSession.end.userSwitched",
   SESSION_DISCONNECTED: "screenSession.end.sessionDisconnected",
@@ -549,6 +586,44 @@ export const SCREEN_END_REASON: Record<string, string> = {
   AGENT_GONE: "screenSession.end.agentGone",
   PROTOCOL_ERROR: "screenSession.end.protocolError",
   RECORDING_FAILED: "screenSession.end.recordingFailed",
+  RECORDING_QUOTA: "screenSession.end.recordingQuota",
+  INPUT_UNAVAILABLE: "screenSession.end.inputUnavailable",
+  ACCESSIBILITY_DENIED: "screenSession.end.accessibilityDenied",
+}
+
+// Почему запись неполная. Ключи i18n, как и коды завершения: причина едет кодом, чтобы
+// её показать на языке оператора.
+export const SCREEN_TRUNCATION: Record<string, string> = {
+  quota: "screenSession.truncated.quota",
+  tenant_quota: "screenSession.truncated.tenantQuota",
+  io_error: "screenSession.truncated.ioError",
+}
+
+// Исход согласия сотрудника (§4). Пустая строка сюда не попадает намеренно: «вопрос не
+// задавался» — это не исход, и рисовать его как исход значит утверждать, что сотрудника
+// спросили.
+export const SCREEN_CONSENT: Record<string, string> = {
+  GRANTED: "screenSession.consent.granted",
+  DENIED: "screenSession.consent.denied",
+  TIMEOUT: "screenSession.consent.timeout",
+  UNAVAILABLE: "screenSession.consent.unavailable",
+}
+
+// Режим доступа к экрану и состояние квоты записей — свойства ТЕНАНТА (§4, §5).
+export interface ScreenAccessPolicy {
+  mode: "unattended" | "consent_required"
+  recording_used: number
+  recording_quota: number
+  recording_retention: number
+}
+
+// Отзываемый грант на просмотр записей. До появления ручки колонка не имела ни одного
+// места записи: записи велись, а открыть их не мог никто.
+export interface ScreenRecordingGrant {
+  user_id: string
+  email: string
+  role: string
+  can_view_session_recording: boolean
 }
 
 export const ESCROW_SECRET_TYPE: Record<string, string> = {

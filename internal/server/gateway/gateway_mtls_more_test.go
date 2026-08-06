@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"io"
 	"testing"
@@ -49,7 +48,7 @@ func TestMTLS_Connect_HappyPath(t *testing.T) {
 		}
 	}
 
-	dbID, err := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	dbID, err := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 	if err != nil || dbID == "" {
 		t.Fatalf("устройство не появилось в БД после Connect: id=%q err=%v", dbID, err)
 	}
@@ -62,7 +61,7 @@ func TestMTLS_AckTaskReceived_HappyPath(t *testing.T) {
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-ack")
 
-	task, err := db.CreateTask(context.Background(), deviceID, "echo hi", "linux", "normal")
+	task, err := db.CreateTask(tenantCtx(), deviceID, "echo hi", "linux", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestMTLS_AckTaskReceived_HappyPath(t *testing.T) {
 		t.Error("ожидали Acknowledged=true")
 	}
 
-	got, _ := db.GetTask(context.Background(), task.ID)
+	got, _ := db.GetTask(tenantCtx(), task.ID)
 	if got == nil || got.Status != "acked" {
 		t.Errorf("статус задачи = %v, want acked", got)
 	}
@@ -112,7 +111,7 @@ func TestMTLS_ReportTaskResult_HappyPath(t *testing.T) {
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-taskresult")
 
-	task, err := db.CreateTask(context.Background(), deviceID, "echo done", "linux", "normal")
+	task, err := db.CreateTask(tenantCtx(), deviceID, "echo done", "linux", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -129,7 +128,7 @@ func TestMTLS_ReportTaskResult_HappyPath(t *testing.T) {
 		t.Error("ожидали Received=true")
 	}
 
-	got, _ := db.GetTask(context.Background(), task.ID)
+	got, _ := db.GetTask(tenantCtx(), task.ID)
 	if got == nil || got.Status != "completed" {
 		t.Errorf("статус задачи = %v, want completed", got)
 	}
@@ -177,13 +176,13 @@ func TestMTLS_ReportAdminAccess_HappyPath(t *testing.T) {
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-admreport")
 
-	owner, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Owner", uniqEmail("owner_mtls_admrep"), "hash", "user")
+	owner, err := db.CreateUser(tenantCtx(), tenancy.DefaultTenantID, "Owner", uniqEmail("owner_mtls_admrep"), "hash", "user")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
 	now := time.Now()
-	row, err := db.CreateAdminAccessRequest(context.Background(), deviceID, owner.ID, "test", now, now.Add(15*time.Minute))
+	row, err := db.CreateAdminAccessRequest(tenantCtx(), deviceID, owner.ID, "test", now, now.Add(15*time.Minute))
 	if err != nil {
 		t.Fatalf("CreateAdminAccessRequest: %v", err)
 	}

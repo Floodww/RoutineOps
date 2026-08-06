@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -14,7 +13,7 @@ func TestCreateDecommissionTask_TypeAndDefaults(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-decomm-%s", uniq(t)), "windows")
 
-	task, err := db.CreateDecommissionTask(context.Background(), d.ID)
+	task, err := db.CreateDecommissionTask(tenantCtx(), d.ID)
 	if err != nil {
 		t.Fatalf("CreateDecommissionTask: %v", err)
 	}
@@ -25,7 +24,7 @@ func TestCreateDecommissionTask_TypeAndDefaults(t *testing.T) {
 		t.Errorf("status = %q, want pending", task.Status)
 	}
 
-	got, err := db.GetTask(context.Background(), task.ID)
+	got, err := db.GetTask(tenantCtx(), task.ID)
 	if err != nil || got == nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -34,7 +33,7 @@ func TestCreateDecommissionTask_TypeAndDefaults(t *testing.T) {
 	}
 
 	// CompleteTask возвращает task_type — по нему gateway решает флип устройства.
-	prev, tt, err := db.CompleteTask(context.Background(), task.ID, d.ID, "completed", "", "")
+	prev, tt, err := db.CompleteTask(tenantCtx(), task.ID, d.ID, "completed", "", "")
 	if err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
@@ -52,30 +51,30 @@ func TestCreateDecommissionTask_TypeAndDefaults(t *testing.T) {
 func TestMarkDeviceDecommissioned_ResurrectionGuard(t *testing.T) {
 	db := newDB(t)
 	fp := fmt.Sprintf("fp-decomm-%s", uniq(t))
-	if err := db.UpsertDeviceHeartbeat(context.Background(), storageHeartbeatData(fp, "decomm-host", "decomm-host", "192.0.2.5")); err != nil {
+	if err := db.UpsertDeviceHeartbeat(tenantCtx(), storageHeartbeatData(fp, "decomm-host", "decomm-host", "192.0.2.5")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
 	}
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 
-	if err := db.MarkDeviceDecommissioned(context.Background(), devID); err != nil {
+	if err := db.MarkDeviceDecommissioned(tenantCtx(), devID); err != nil {
 		t.Fatalf("MarkDeviceDecommissioned: %v", err)
 	}
-	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Fatalf("status = %q, want decommissioned", st)
 	}
 
 	// Посмертный heartbeat — не должен вернуть в 'active'.
-	if err := db.UpsertDeviceHeartbeat(context.Background(), storageHeartbeatData(fp, "decomm-host", "decomm-host", "192.0.2.5")); err != nil {
+	if err := db.UpsertDeviceHeartbeat(tenantCtx(), storageHeartbeatData(fp, "decomm-host", "decomm-host", "192.0.2.5")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat (посмертный): %v", err)
 	}
-	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Errorf("списанное устройство воскрешено heartbeat'ом: status = %q, want decommissioned", st)
 	}
 }
 
 func TestGetDeviceStatusByID_NotFoundEmpty(t *testing.T) {
 	db := newDB(t)
-	st, err := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
+	st, err := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		t.Fatalf("GetDeviceStatusByID: %v", err)
 	}

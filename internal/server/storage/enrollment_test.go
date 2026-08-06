@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
@@ -16,11 +15,11 @@ func TestCreateEnrollmentToken_And_GetByToken(t *testing.T) {
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-enroll-%s", uniq(t)), "macos")
 	tok := fmt.Sprintf("tok-%s", uniq(t))
 
-	if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
+	if err := db.CreateEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("CreateEnrollmentToken: %v", err)
 	}
 
-	got, err := db.GetEnrollmentToken(context.Background(), tok)
+	got, err := db.GetEnrollmentToken(tenantCtx(), tok)
 	if err != nil {
 		t.Fatalf("GetEnrollmentToken: %v", err)
 	}
@@ -37,7 +36,7 @@ func TestCreateEnrollmentToken_And_GetByToken(t *testing.T) {
 
 func TestGetEnrollmentToken_NotFound_ReturnsNil(t *testing.T) {
 	db := newDB(t)
-	got, err := db.GetEnrollmentToken(context.Background(), "nonexistent-token")
+	got, err := db.GetEnrollmentToken(tenantCtx(), "nonexistent-token")
 	if err != nil {
 		t.Fatalf("GetEnrollmentToken: %v", err)
 	}
@@ -52,11 +51,11 @@ func TestGetActiveEnrollmentToken_AfterExpiry_ReturnsNil(t *testing.T) {
 	tok := fmt.Sprintf("tok-exp-%s", uniq(t))
 
 	// use 25h to be safe against any timezone offset between Go and Postgres
-	if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().UTC().Add(-25*time.Hour)); err != nil {
+	if err := db.CreateEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID, tok, time.Now().UTC().Add(-25*time.Hour)); err != nil {
 		t.Fatalf("CreateEnrollmentToken: %v", err)
 	}
 
-	got, err := db.GetActiveEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID)
+	got, err := db.GetActiveEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID)
 	if err != nil {
 		t.Fatalf("GetActiveEnrollmentToken: %v", err)
 	}
@@ -69,30 +68,30 @@ func TestEnrollDevice_MarksTokenUsedAndDeviceEnrolled(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-enrolldev-%s", uniq(t)), "macos")
 	tok := fmt.Sprintf("tok-enroll-%s", uniq(t))
-	_ = db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour))
+	_ = db.CreateEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour))
 
-	tokenRec, _ := db.GetEnrollmentToken(context.Background(), tok)
+	tokenRec, _ := db.GetEnrollmentToken(tenantCtx(), tok)
 
 	const fp = "abc123fingerprintdeadbeef"
-	if err := db.EnrollDevice(context.Background(), tokenRec.ID, d.ID, "CERT-SERIAL-123", fp); err != nil {
+	if err := db.EnrollDevice(tenantCtx(), tokenRec.ID, d.ID, "CERT-SERIAL-123", fp); err != nil {
 		t.Fatalf("EnrollDevice: %v", err)
 	}
 
 	// token should now be marked used
-	used, _ := db.GetEnrollmentToken(context.Background(), tok)
+	used, _ := db.GetEnrollmentToken(tenantCtx(), tok)
 	if used.UsedAt == nil {
 		t.Error("token used_at should be set after enroll")
 	}
 
 	// device should be enrolled
-	got, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
+	got, _, _ := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, d.ID)
 	if got.Status != "enrolled" {
 		t.Errorf("device status = %q, want enrolled", got.Status)
 	}
 
 	// fingerprint must be persisted so the first heartbeat updates THIS row (БАГ 4):
 	// поиск устройства по отпечатку должен вернуть статус enrolled.
-	st, err := db.GetDeviceStatusByFingerprint(context.Background(), fp)
+	st, err := db.GetDeviceStatusByFingerprint(tenantCtx(), fp)
 	if err != nil {
 		t.Fatalf("GetDeviceStatusByFingerprint: %v", err)
 	}
@@ -110,32 +109,32 @@ func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
 		mark   func(*storage.DB, string) error
 	}{
 		{"decommissioned", func(db *storage.DB, id string) error {
-			return db.MarkDeviceDecommissioned(context.Background(), id)
+			return db.MarkDeviceDecommissioned(tenantCtx(), id)
 		}},
 		{"blocked", func(db *storage.DB, id string) error {
-			return db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "blocked")
+			return db.UpdateDeviceStatus(tenantCtx(), tenancy.DefaultTenantID, id, "blocked")
 		}},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			db := newDB(t)
 			d := mustCreateDevice(t, db, fmt.Sprintf("host-enrollgate-%s", uniq(t)), "linux")
 			tok := fmt.Sprintf("tok-enrollgate-%s", uniq(t))
-			if err := db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
+			if err := db.CreateEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID, tok, time.Now().Add(1*time.Hour)); err != nil {
 				t.Fatalf("CreateEnrollmentToken: %v", err)
 			}
-			tokenRec, _ := db.GetEnrollmentToken(context.Background(), tok)
+			tokenRec, _ := db.GetEnrollmentToken(tenantCtx(), tok)
 			if err := tc.mark(db, d.ID); err != nil {
 				t.Fatalf("перевод в %s: %v", tc.status, err)
 			}
 
-			err := db.EnrollDevice(context.Background(), tokenRec.ID, d.ID, "CERT-SERIAL-GATE", "fpgate")
+			err := db.EnrollDevice(tenantCtx(), tokenRec.ID, d.ID, "CERT-SERIAL-GATE", "fpgate")
 			if !errors.Is(err, storage.ErrDeviceNotEnrollable) {
 				t.Fatalf("EnrollDevice = %v, want ErrDeviceNotEnrollable", err)
 			}
-			if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, d.ID); st != tc.status {
+			if st, _ := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, d.ID); st != tc.status {
 				t.Errorf("устройство воскрешено энроллом: status = %q, want %s", st, tc.status)
 			}
-			if after, _ := db.GetEnrollmentToken(context.Background(), tok); after == nil || after.UsedAt != nil {
+			if after, _ := db.GetEnrollmentToken(tenantCtx(), tok); after == nil || after.UsedAt != nil {
 				t.Error("токен погашен при отказе — транзакция не откатилась")
 			}
 		})
@@ -147,7 +146,7 @@ func TestEnrollDevice_RejectsTerminalStatuses(t *testing.T) {
 // обязан ловить реальный отказ редима, а не запись в колонке.
 func TestRevokeEnrollmentToken_KillsBulkToken(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := fmt.Sprintf("bulk-revoke-%s", uniq(t))
 	if err := db.CreateBulkEnrollmentToken(ctx, tenancy.DefaultTenantID, tok, "", nil, false, time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("CreateBulkEnrollmentToken: %v", err)
@@ -201,31 +200,31 @@ func TestResetDeviceForReenroll_GeneratesNewToken(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-reenroll-%s", uniq(t)), "windows")
 	oldTok := fmt.Sprintf("tok-old-%s", uniq(t))
-	_ = db.CreateEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID, oldTok, time.Now().Add(1*time.Hour))
+	_ = db.CreateEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID, oldTok, time.Now().Add(1*time.Hour))
 
 	newTok := fmt.Sprintf("tok-new-%s", uniq(t))
-	if err := db.ResetDeviceForReenroll(context.Background(), tenancy.DefaultTenantID, d.ID, newTok, time.Now().Add(2*time.Hour)); err != nil {
+	if err := db.ResetDeviceForReenroll(tenantCtx(), tenancy.DefaultTenantID, d.ID, newTok, time.Now().Add(2*time.Hour)); err != nil {
 		t.Fatalf("ResetDeviceForReenroll: %v", err)
 	}
 
 	// old token should be invalidated (marked used)
-	oldRec, _ := db.GetEnrollmentToken(context.Background(), oldTok)
+	oldRec, _ := db.GetEnrollmentToken(tenantCtx(), oldTok)
 	if oldRec == nil || oldRec.UsedAt == nil {
 		t.Error("old token should be marked used after reenroll")
 	}
 
 	// new token must be the active one and resolvable by its plaintext (hash match, N6)
-	active, _ := db.GetActiveEnrollmentToken(context.Background(), tenancy.DefaultTenantID, d.ID)
+	active, _ := db.GetActiveEnrollmentToken(tenantCtx(), tenancy.DefaultTenantID, d.ID)
 	if active == nil {
 		t.Fatal("expected new active token")
 	}
-	newRec, _ := db.GetEnrollmentToken(context.Background(), newTok)
+	newRec, _ := db.GetEnrollmentToken(tenantCtx(), newTok)
 	if newRec == nil || newRec.ID != active.ID {
 		t.Errorf("new token not resolvable by plaintext or does not match active row")
 	}
 
 	// device status should be pending again
-	got, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, d.ID)
+	got, _, _ := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, d.ID)
 	if got.Status != "pending" {
 		t.Errorf("device status = %q, want pending", got.Status)
 	}

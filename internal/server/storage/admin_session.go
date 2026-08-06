@@ -71,7 +71,12 @@ type AdminSessionWindow struct {
 // MarkAdminBaselineCaptured ставит baseline_captured_at при первом отчёте агента
 // о выдаче прав с защёлкнутым сбором. Пустой/повторный вызов — no-op.
 func (db *DB) MarkAdminBaselineCaptured(ctx context.Context, requestID, deviceID string, at time.Time) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE admin_access_requests
 		SET baseline_captured_at = COALESCE(baseline_captured_at, $3)
 		WHERE id = $1 AND device_id = $2
@@ -196,7 +201,12 @@ func (db *DB) AcceptAdminSessionWindow(ctx context.Context, w AdminSessionWindow
 
 // ListAdminSessionChanges отдаёт строки дельты заявки (для карточки в панели).
 func (db *DB) ListAdminSessionChanges(ctx context.Context, requestID string) ([]AdminSessionChange, error) {
-	rows, err := db.Q(ctx).Query(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id::text, request_id::text, device_id::text, window_seq, kind, subject,
 		       display_name, identity_key, old_value, new_value, vendor, scope,
 		       attribution, attribution_reason, observed_at
@@ -234,11 +244,16 @@ type AdminEvidenceGap struct {
 // Сигнал защёлки — baseline_captured_at: старый агент его не ставит, поэтому
 // «агент не умеет» молчит сам, без порога по agent_version.
 func (db *DB) ListAdminEvidenceGaps(ctx context.Context, grace time.Duration) ([]AdminEvidenceGap, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
 	if grace <= 0 {
 		grace = AdminSessionEvidenceGrace
 	}
 	cutoff := time.Now().Add(-grace)
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT r.id::text, r.device_id::text, r.status,
 		       COALESCE(r.revoked_at, r.expires_at, r.decided_at, r.requested_at) AS closed_at,
 		       COALESCE(d.agent_version, '')
@@ -288,7 +303,7 @@ func (db *DB) GetAdminAccessEvidence(ctx context.Context, tenantID, requestID st
 
 	var e AdminAccessEvidence
 	var summary []byte
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT baseline_captured_at, changes_final_at, changes_summary,
 		       changes_completeness, changes_rebooted, changes_truncated,
 		       software_health, services_health, last_window_seq

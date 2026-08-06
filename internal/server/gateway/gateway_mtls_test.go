@@ -177,7 +177,7 @@ func unaryCallers() map[string]func(context.Context, pb.AgentServiceClient) erro
 
 func callCtx(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(tenantCtx(), 5*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -225,7 +225,7 @@ func (e *mtlsEnv) validClient(t *testing.T, db *storage.DB, cn string) (pb.Agent
 	cert, der := issueCert(t, e.caCert, e.caKey, cn, false)
 	fp := fingerprintOf(der)
 	registerDevice(t, db, cn, fp)
-	deviceID, err := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	deviceID, err := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 	if err != nil || deviceID == "" {
 		t.Fatalf("GetDeviceIDByFingerprint: id=%q err=%v", deviceID, err)
 	}
@@ -238,7 +238,7 @@ func TestMTLS_FetchPolicy_HappyPath(t *testing.T) {
 	client, deviceID := env.validClient(t, db, "device-mtls-policy")
 
 	// device-specific правило (не глобальное — чтобы не задеть другие тесты на общей БД)
-	if _, err := db.CreatePolicyRule(context.Background(), tenancy.DefaultTenantID, "BitTorrent", "forbidden", &deviceID, nil); err != nil {
+	if _, err := db.CreatePolicyRule(tenantCtx(), tenancy.DefaultTenantID, "BitTorrent", "forbidden", &deviceID, nil); err != nil {
 		t.Fatalf("CreatePolicyRule: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestMTLS_FetchScriptPolicies_HappyPath(t *testing.T) {
 	db := newDB(t)
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-scripts")
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// скрипт → политика(schedule) → группа → устройство в группе → политика группе
 	script, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "win-script", "Windows", "Write-Host hi")
@@ -331,7 +331,7 @@ func TestMTLS_ReportScriptResult_HappyPathAndDedup(t *testing.T) {
 	db := newDB(t)
 	env := startMTLSServer(t, newGW(t, db))
 	client, deviceID := env.validClient(t, db, "device-mtls-result")
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// нужен валидный policy_id (script_results.policy_id NOT NULL REFERENCES policies)
 	script, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "res-script", "linux", "echo hi")
@@ -399,13 +399,13 @@ func TestMTLS_ReportSecurityEvent_HappyPath(t *testing.T) {
 // публичного API для этого нет).
 func countScriptResults(t *testing.T, runID string) int {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), sharedDSN)
+	pool, err := pgxpool.New(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("countScriptResults pool: %v", err)
 	}
 	defer pool.Close()
 	var n int
-	if err := pool.QueryRow(context.Background(),
+	if err := pool.QueryRow(tenantCtx(),
 		`SELECT count(*) FROM script_results WHERE run_id = $1`, runID).Scan(&n); err != nil {
 		t.Fatalf("countScriptResults: %v", err)
 	}

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -10,7 +9,7 @@ import (
 func TestCreateUser_ReturnsUserWithID(t *testing.T) {
 	db := newDB(t)
 	email := fmt.Sprintf("create-%s@test.com", uniq(t))
-	u, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Alice", email, "hash", "user")
+	u, err := db.CreateUser(tenantCtx(), tenancy.DefaultTenantID, "Alice", email, "hash", "user")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -30,7 +29,7 @@ func TestGetUserByEmail_Found(t *testing.T) {
 	email := fmt.Sprintf("getbyemail-%s@test.com", uniq(t))
 	created := mustCreateUser(t, db, email)
 
-	got, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, email)
+	got, err := db.GetUserByEmailInTenant(tenantCtx(), tenancy.DefaultTenantID, email)
 	if err != nil {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}
@@ -44,7 +43,7 @@ func TestGetUserByEmail_Found(t *testing.T) {
 
 func TestGetUserByEmail_NotFound_ReturnsNil(t *testing.T) {
 	db := newDB(t)
-	got, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, "nobody@nowhere.com")
+	got, err := db.GetUserByEmailInTenant(tenantCtx(), tenancy.DefaultTenantID, "nobody@nowhere.com")
 	if err != nil {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}
@@ -57,11 +56,11 @@ func TestSetAndGetUserTelegramChatID(t *testing.T) {
 	db := newDB(t)
 	u := mustCreateUser(t, db, fmt.Sprintf("tg-%s@test.com", uniq(t)))
 
-	if err := db.SetUserTelegramChatID(context.Background(), u.ID, "chat-123"); err != nil {
+	if err := db.SetUserTelegramChatID(tenantCtx(), u.ID, "chat-123"); err != nil {
 		t.Fatalf("SetUserTelegramChatID: %v", err)
 	}
 
-	chatID, _, err := db.GetUserTelegramStatus(context.Background(), u.ID)
+	chatID, _, err := db.GetUserTelegramStatus(tenantCtx(), u.ID)
 	if err != nil {
 		t.Fatalf("GetUserTelegramStatus: %v", err)
 	}
@@ -76,16 +75,21 @@ func TestSetAndGetUserLinkToken(t *testing.T) {
 
 	// Уникальный токен: telegram_link_token — UNIQUE, общая БД переживает -count.
 	token := "tok-" + uniq(t)
-	if err := db.SetUserLinkToken(context.Background(), u.ID, token); err != nil {
+	if err := db.SetUserLinkToken(tenantCtx(), u.ID, token); err != nil {
 		t.Fatalf("SetUserLinkToken: %v", err)
 	}
 
-	got, err := db.GetUserByLinkToken(context.Background(), token)
+	got, gotTenant, err := db.GetUserByLinkToken(tenantCtx(), token)
 	if err != nil {
 		t.Fatalf("GetUserByLinkToken: %v", err)
 	}
 	if got == nil || got.ID != u.ID {
 		t.Errorf("got %v, want user %s", got, u.ID)
+	}
+	// Тенант возвращается вместе с пользователем: он единственный источник скоупа для
+	// последующих записей — токен приходит из мессенджера, где сессии нет.
+	if gotTenant != tenancy.DefaultTenantID {
+		t.Errorf("tenant = %q, want %q", gotTenant, tenancy.DefaultTenantID)
 	}
 }
 
@@ -93,13 +97,13 @@ func TestSetUserLinkToken_Clear(t *testing.T) {
 	db := newDB(t)
 	u := mustCreateUser(t, db, fmt.Sprintf("linkclear-%s@test.com", uniq(t)))
 
-	_ = db.SetUserLinkToken(context.Background(), u.ID, "tok-clear")
+	_ = db.SetUserLinkToken(tenantCtx(), u.ID, "tok-clear")
 	// clear it
-	if err := db.SetUserLinkToken(context.Background(), u.ID, ""); err != nil {
+	if err := db.SetUserLinkToken(tenantCtx(), u.ID, ""); err != nil {
 		t.Fatalf("SetUserLinkToken (clear): %v", err)
 	}
 
-	got, err := db.GetUserByLinkToken(context.Background(), "tok-clear")
+	got, _, err := db.GetUserByLinkToken(tenantCtx(), "tok-clear")
 	if err != nil {
 		t.Fatalf("GetUserByLinkToken: %v", err)
 	}

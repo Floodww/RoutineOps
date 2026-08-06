@@ -22,7 +22,7 @@ func TestConnect_NoCert(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
 
-	stream := &mockStream{ctx: context.Background()}
+	stream := &mockStream{ctx: tenantCtx()}
 	err := gw.Connect(stream)
 
 	if code := status.Code(err); code != codes.Unauthenticated {
@@ -44,7 +44,7 @@ func TestConnect_HappyPath(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 
-	dbID, err := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	dbID, err := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
 	if err != nil || dbID == "" {
 		t.Fatalf("device not in DB after Connect: id=%q err=%v", dbID, err)
 	}
@@ -66,8 +66,8 @@ func TestConnect_ADR1_HostnameFromCert(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 
-	dbID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	device, _, err := db.GetDevice(context.Background(), tenancy.DefaultTenantID, dbID)
+	dbID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	device, _, err := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, dbID)
 	if err != nil {
 		t.Fatalf("GetDevice: %v", err)
 	}
@@ -83,11 +83,11 @@ func TestConnect_BlockedDevice(t *testing.T) {
 	ctx, fingerprint := makeCertCtx(t, "device-blocked")
 	registerDevice(t, db, "device-blocked", fingerprint)
 
-	dbID, err := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	dbID, err := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
 	if err != nil || dbID == "" {
 		t.Fatalf("registerDevice: id=%q err=%v", dbID, err)
 	}
-	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, dbID, "blocked"); err != nil {
+	if err := db.UpdateDeviceStatus(tenantCtx(), tenancy.DefaultTenantID, dbID, "blocked"); err != nil {
 		t.Fatalf("block device: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestConnect_BlockedMidSession(t *testing.T) {
 	ctx, fingerprint := makeCertCtx(t, "device-blocked-mid")
 	registerDevice(t, db, "device-blocked-mid", fingerprint)
 
-	dbID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	dbID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
 
 	hookCalls := 0
 	stream := &mockStream{
@@ -218,7 +218,7 @@ func TestConnect_BlockedMidSession(t *testing.T) {
 			hookCalls++
 			if hookCalls == 2 {
 				// Block device before processing second message
-				_ = db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, dbID, "blocked")
+				_ = db.UpdateDeviceStatus(tenantCtx(), tenancy.DefaultTenantID, dbID, "blocked")
 			}
 		},
 	}
@@ -238,8 +238,8 @@ func TestAckTaskReceived_Success(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "device-ack")
 	registerDevice(t, db, "device-ack", fingerprint)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	task, err := db.CreateTask(context.Background(), devID, "echo hi", "linux", "normal")
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	task, err := db.CreateTask(tenantCtx(), devID, "echo hi", "linux", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestAckTaskReceived_Success(t *testing.T) {
 		t.Error("expected Acknowledged=true")
 	}
 
-	got, _ := db.GetTask(context.Background(), task.ID)
+	got, _ := db.GetTask(tenantCtx(), task.ID)
 	if got == nil || got.Status != "acked" {
 		t.Errorf("task status = %q, want acked", got.Status)
 	}
@@ -262,7 +262,7 @@ func TestAckTaskReceived_Success(t *testing.T) {
 
 func TestReportInventory_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.ReportInventory(context.Background(), &pb.InventoryReport{})
+	_, err := gw.ReportInventory(tenantCtx(), &pb.InventoryReport{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -316,8 +316,8 @@ func TestReportTaskResult_Completed(t *testing.T) {
 
 	certCtx, fingerprint := makeCertCtx(t, "device-result-ok")
 	registerDevice(t, db, "device-result-ok", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	task, err := db.CreateTask(context.Background(), devID, "echo done", "linux", "normal")
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	task, err := db.CreateTask(tenantCtx(), devID, "echo done", "linux", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestReportTaskResult_Completed(t *testing.T) {
 		t.Error("expected Received=true")
 	}
 
-	got, _ := db.GetTask(context.Background(), task.ID)
+	got, _ := db.GetTask(tenantCtx(), task.ID)
 	if got == nil || got.Status != "completed" {
 		t.Errorf("task status = %q, want completed", got.Status)
 	}
@@ -346,8 +346,8 @@ func TestReportTaskResult_Error(t *testing.T) {
 
 	certCtx, fingerprint := makeCertCtx(t, "device-result-err")
 	registerDevice(t, db, "device-result-err", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	task, err := db.CreateTask(context.Background(), devID, "false", "linux", "normal")
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	task, err := db.CreateTask(tenantCtx(), devID, "false", "linux", "normal")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestReportTaskResult_Error(t *testing.T) {
 		t.Error("expected Received=true")
 	}
 
-	got, _ := db.GetTask(context.Background(), task.ID)
+	got, _ := db.GetTask(tenantCtx(), task.ID)
 	if got == nil || got.Status != "failed" {
 		t.Errorf("task status = %q, want failed", got.Status)
 	}
@@ -374,7 +374,7 @@ func TestReportTaskResult_Error(t *testing.T) {
 
 func TestFetchPolicy_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.FetchPolicy(context.Background(), &pb.FetchPolicyRequest{})
+	_, err := gw.FetchPolicy(tenantCtx(), &pb.FetchPolicyRequest{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -400,7 +400,7 @@ func TestFetchPolicy_NoPolicies(t *testing.T) {
 
 func TestReportSecurityEvent_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.ReportSecurityEvent(context.Background(), &pb.SecurityEvent{})
+	_, err := gw.ReportSecurityEvent(tenantCtx(), &pb.SecurityEvent{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -449,7 +449,7 @@ func TestReportSecurityEvent_Success(t *testing.T) {
 
 func TestRequestAdminAccess_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.RequestAdminAccess(context.Background(), &pb.RequestAdminAccessRequest{})
+	_, err := gw.RequestAdminAccess(tenantCtx(), &pb.RequestAdminAccessRequest{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -513,7 +513,7 @@ func TestRequestAdminAccess_WithOwner(t *testing.T) {
 
 func TestFetchAdminStatus_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.FetchAdminStatus(context.Background(), &pb.FetchAdminStatusRequest{})
+	_, err := gw.FetchAdminStatus(tenantCtx(), &pb.FetchAdminStatusRequest{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -551,7 +551,7 @@ func TestFetchAdminStatus_NoActiveRequest(t *testing.T) {
 
 func TestReportAdminAccess_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.ReportAdminAccess(context.Background(), &pb.ReportAdminAccessRequest{
+	_, err := gw.ReportAdminAccess(tenantCtx(), &pb.ReportAdminAccessRequest{
 		RequestId: "00000000-0000-0000-0000-000000000000",
 		Status:    pb.AdminAccessStatus_ADMIN_ACCESS_STATUS_APPROVED,
 	})
@@ -579,13 +579,13 @@ func TestReportAdminAccess_ApprovedStatus(t *testing.T) {
 	gw := newGW(t, db)
 
 	// create a real request so UpdateAdminAccessReport has a row to touch
-	owner, _ := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Owner2", uniqEmail("owner2_adm"), "hash", "user")
+	owner, _ := db.CreateUser(tenantCtx(), tenancy.DefaultTenantID, "Owner2", uniqEmail("owner2_adm"), "hash", "user")
 	certCtx, fingerprint := makeCertCtx(t, "device-reportadm-ok")
 	registerDevice(t, db, "device-reportadm-ok", fingerprint)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
 
 	now := time.Now()
-	row, err := db.CreateAdminAccessRequest(context.Background(), devID, owner.ID, "test", now, now.Add(15*time.Minute))
+	row, err := db.CreateAdminAccessRequest(tenantCtx(), devID, owner.ID, "test", now, now.Add(15*time.Minute))
 	if err != nil {
 		t.Fatalf("CreateAdminAccessRequest: %v", err)
 	}
@@ -609,7 +609,7 @@ func TestReportAdminAccess_ApprovedStatus(t *testing.T) {
 
 func TestFetchScriptPolicies_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.FetchScriptPolicies(context.Background(), &pb.FetchScriptPoliciesRequest{})
+	_, err := gw.FetchScriptPolicies(tenantCtx(), &pb.FetchScriptPoliciesRequest{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}
@@ -635,7 +635,7 @@ func TestFetchScriptPolicies_NoPolicies(t *testing.T) {
 
 func TestReportScriptResult_NoCert(t *testing.T) {
 	gw := newGW(t, newDB(t))
-	_, err := gw.ReportScriptResult(context.Background(), &pb.ScriptResult{})
+	_, err := gw.ReportScriptResult(tenantCtx(), &pb.ScriptResult{})
 	if code := status.Code(err); code != codes.Unauthenticated {
 		t.Errorf("got %v, want Unauthenticated", code)
 	}

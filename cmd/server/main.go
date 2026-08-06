@@ -371,16 +371,31 @@ func main() {
 					// Ошибка одного тенанта НЕ отменяет рассылку по остальным: TakeEscalations
 					// уже проставил им escalated_at, и выход по continue означал бы алерт,
 					// помеченный отправленным и не отправленный никогда.
-					var due []storage.Alert
+					//
+					// Тенант запоминается ВМЕСТЕ с алертом, а не теряется при склейке: обход
+					// собирает алерты всех тенантов в один список, и без этой пары напоминание
+					// про устройство одного подразделения уходило бы администраторам всех.
+					// Берём его из скоупа обхода, а не резолвим заново по device_id: это тот же
+					// самый тенант, но без лишнего похода в базу — и, в отличие от резолва,
+					// работает и для алерта, устройство которого уже списали.
+					type dueAlert struct {
+						tenantID string
+						alert    storage.Alert
+					}
+					var due []dueAlert
 					if err := db.ForEachTenant(context.Background(), func(tctx context.Context) error {
 						d, err := db.TakeEscalations(tctx,
 							cfg.EscalateMinSeverity, cfg.EscalateAfterMinutes, cfg.EscalateRepeatMinutes)
-						due = append(due, d...)
+						tenantID, _ := storage.TenantIDFrom(tctx)
+						for _, a := range d {
+							due = append(due, dueAlert{tenantID: tenantID, alert: a})
+						}
 						return err
 					}); err != nil {
 						logger.Error("take alert escalations", "err", err)
 					}
-					for _, a := range due {
+					for _, item := range due {
+						a := item.alert
 						waited := int(time.Since(a.CreatedAt).Minutes())
 						sev, ok := alerting.Parse(a.Severity)
 						if !ok {
@@ -397,7 +412,12 @@ func main() {
 						// nil при пустом токене, а не typed-nil внутри интерфейса (см.
 						// комментарий к её объявлению и полевой инцидент 2026-06-29).
 						if tgBot != nil {
-							tgBot.NotifyAlert(context.Background(), sev, text)
+							// Скоуп обхода уже закрыт (транзакция завершилась вместе с fn), и
+							// переиспользовать его нельзя. Переносим ровно тенанта — рассылка
+							// откроет по нему свою транзакцию. Отправка ВНЕ скоупа намеренно:
+							// внутри она держала бы транзакцию открытой на время похода в
+							// api.telegram.org, до десяти секунд на каждого получателя.
+							tgBot.NotifyAlert(storage.WithTenantID(context.Background(), item.tenantID), sev, text)
 						}
 					}
 					if len(due) > 0 {

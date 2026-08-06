@@ -91,7 +91,7 @@ func (db *DB) BuildComplianceReport(ctx context.Context, tenantID string, target
 		defer finish(true)
 	}
 
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT d.id,
 		       COALESCE(d.hostname, ''),
 		       COALESCE(d.os, ''),

@@ -24,7 +24,8 @@
     "compliance": "Compliance",
     "sso": "SSO / OIDC",
     "saml": "SSO / SAML",
-    "siem": "SIEM export"
+    "siem": "SIEM export",
+    "screenAccess": "Screen access"
   },
   "layout": {
     "roleAdmin": "administrator",
@@ -1353,11 +1354,13 @@
   },
   "screenSession": {
     "title": "Device screen",
-    "hint": "Interactive session: the operator sees the employee's screen. No control in this mode. The session is fully recorded, and the request, reason and author go into the audit log.",
+    "hint": "Interactive session: the operator sees the employee's screen and, when explicitly requested, controls it. The session is fully recorded; the request, its reason and its author go to the audit log.",
     "connect": "Connect",
     "reasonPlaceholder": "Reason: why screen access is needed",
     "reasonRequired": "A reason is required",
     "stop": "Stop",
+    "stopConfirmTitle": "Stop the screen session?",
+    "stopConfirmBody": "Started by {{who}}, reason “{{reason}}”. The screen feed ends immediately; the recording is kept.",
     "watching": "Watching",
     "live": "active",
     "ended": "Session ended",
@@ -1371,6 +1374,7 @@
     "recording": "Recording",
     "end": {
       "userTerminated": "employee stopped the session",
+      "operatorStopped": "stopped by the operator",
       "consentDenied": "employee denied access",
       "consentTimeout": "employee did not respond",
       "sessionLocked": "screen locked",
@@ -1393,8 +1397,75 @@
       "operatorRevoked": "operator rights revoked",
       "agentGone": "agent went offline",
       "protocolError": "session protocol violation",
-      "recordingFailed": "could not start session recording"
+      "recordingFailed": "could not start session recording",
+      "consentUnavailable": "could not ask the employee for consent",
+      "noticeUnavailable": "could not show the employee the monitoring notice",
+      "recordingQuota": "no room left for the recording",
+      "inputUnavailable": "control is not available in this agent build",
+      "accessibilityDenied": "Accessibility permission not granted (macOS)"
     },
-    "brokenStream": "Frame stream is corrupted — viewing stopped"
+    "truncated": {
+      "badge": "recording incomplete",
+      "quota": "per-session recording size limit reached",
+      "ioError": "the server could not continue writing (no space or volume unavailable)",
+      "tenantQuota": "tenant recording quota exhausted"
+    },
+    "brokenStream": "Frame stream is corrupted — viewing stopped",
+    "watch": "Watch",
+    "recordingForbidden": "Viewing recordings requires a grant — an administrator issues it on the Screen access page",
+    "consent": {
+      "granted": "employee allowed",
+      "denied": "employee refused",
+      "timeout": "employee did not answer",
+      "unavailable": "could not ask"
+    },
+    "profileFallback": "profile downgraded",
+    "profileFallbackHint": "The agent did not recognise the requested profile and fell back to low — its version is likely older than the server",
+    "controlling": "Controlling",
+    "returnControl": "Return control",
+    "withControl": "With control: the operator can move the mouse and press keys on the employee's behalf. Control cannot be taken later without starting a new session.",
+    "connectControl": "Connect with control",
+    "controlHint": "You are controlling someone else's computer. Everything you do happens under the employee's account and is written to the input log.",
+    "controlBadge": "with control",
+    "canvasControlLabel": "Remote device screen — control active",
+    "inputBacklog": "The agent cannot keep up with input — some keystrokes were not delivered. Wait or end the session.",
+    "agentNoControl": "The agent on this device does not support control — update the agent"
+  },
+  "format": {
+    "bytes": "B",
+    "kb": "KB",
+    "mb": "MB",
+    "gb": "GB",
+    "tb": "TB",
+    "durationSec": "{{n}}s",
+    "durationMin": "{{n}}m {{s}}s",
+    "durationHour": "{{n}}h {{m}}m"
+  },
+  "screenAccess": {
+    "title": "Screen access",
+    "subtitle": "How operators reach employee screens, and who may view session recordings.",
+    "enterpriseOnly": "This capability is part of the Enterprise edition.",
+    "modeTitle": "Access mode",
+    "current": "active",
+    "modeSaved": "Access mode changed",
+    "mode": {
+      "unattended": "Without consent",
+      "unattendedHint": "The operator connects straight away. The employee sees the monitoring notice but cannot refuse.",
+      "consent": "Employee consent required",
+      "consentHint": "The employee is asked before the session. Not a single frame before Allow; one-click revocation."
+    },
+    "noticeAlways": "The \"your screen is being watched\" notice is shown in both modes and cannot be turned off.",
+    "quotaTitle": "Session recordings",
+    "quotaUsed": "{{used}} of {{total}} used ({{pct}}%)",
+    "retention": "Recordings are kept for {{days}} days, then deleted automatically.",
+    "grantsTitle": "Who may view recordings",
+    "grantsHint": "The grant is revocable and separate from the role: every access to a recording is written to the audit log.",
+    "admin": "Administrator",
+    "grant": "Grant",
+    "granted": "granted",
+    "notGranted": "not granted",
+    "give": "Grant",
+    "revoke": "Revoke",
+    "noAdmins": "No administrators in this tenant"
   }
 }

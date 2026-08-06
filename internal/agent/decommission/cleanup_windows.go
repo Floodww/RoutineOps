@@ -40,30 +40,60 @@ var (
 // случае и нет). Берём первый связанный продукт (iProductIndex=0): в норме на
 // устройстве одна установка агента.
 func resolveProductCode(log *slog.Logger) (string, bool) {
-	// Find() вместо прямого Call: LazyProc.Call ПАНИКУЕТ через mustFind, если msi.dll
-	// или экспорт не резолвятся. Паника здесь фатальна — resolveProductCode вызывается
-	// уже ПОСЛЕ удаления файлов/каталогов, до записи bat-делетера, и осиротила бы бинарь
-	// без сноса. msi.dll есть на всех штатных Windows, но самоснос обязан деградировать
-	// мягко: не нашли API — просто пропускаем штатное msiexec.
-	if err := procMsiEnumRelatedProducts.Find(); err != nil {
-		log.Warn("decommission: msi.dll/MsiEnumRelatedProducts недоступны — штатное msiexec /x пропущено",
+	code, _, err := enumRelatedProduct(0)
+	if err != nil {
+		log.Warn("decommission: не удалось опросить базу Windows Installer — штатное msiexec /x пропущено",
 			slog.Any("error", err))
 		return "", false
 	}
-	uc, err := windows.UTF16PtrFromString(upgradeCode)
-	if err != nil {
-		return "", false
-	}
-	// Буфер под GUID вида {8-4-4-4-12}: 38 символов + завершающий null.
-	buf := make([]uint16, 39)
-	r, _, _ := procMsiEnumRelatedProducts.Call(
-		uintptr(unsafe.Pointer(uc)), 0, 0, uintptr(unsafe.Pointer(&buf[0])))
-	if r != 0 { // ERROR_SUCCESS==0; ERROR_NO_MORE_ITEMS(259) и прочее → продукт не найден
+	if code == "" {
 		log.Info("decommission: MSI-продукт по UpgradeCode не найден — штатное msiexec /x пропущено",
 			slog.String("upgrade_code", upgradeCode))
 		return "", false
 	}
-	return windows.UTF16ToString(buf), true
+	return code, true
+}
+
+// errNoMoreItems — база Installer опрошена успешно, связанных продуктов больше нет.
+// Это НЕ отказ: ручная/не-MSI установка либо запись уже снята.
+const errNoMoreItems = 259 // ERROR_NO_MORE_ITEMS
+
+// enumRelatedProduct возвращает ProductCode связанного продукта по индексу.
+//
+// Три исхода РАЗВЕДЕНЫ намеренно: ("", 259, nil) — продуктов больше нет; (code, 0, nil) —
+// нашли; ("", code, err) — опросить базу НЕ УДАЛОСЬ. Прежняя resolveProductCode схлопывала
+// два последних в один `ok=false`, и для самосноса это правильная деградация (шаг
+// best-effort среди других). Но для подкоманды msi-unregister тот же булев результат стал
+// ОТЧЁТОМ ОБ ИСХОДЕ и кодом выхода, который читает оператор: повреждённая база Installer
+// (ERROR_BAD_CONFIGURATION 1610 — ровно состояние машины, которую уже ломали ручным
+// сносом) или отказ в доступе выглядели бы как «регистрации не было», батник печатал бы
+// «Готово», а запись оставалась. Это молчаливый успех того же класса, ради которого вся
+// фича и делается.
+//
+// Find() вместо прямого Call: LazyProc.Call ПАНИКУЕТ через mustFind, если msi.dll или
+// экспорт не резолвятся. Паника фатальна — resolveProductCode вызывается уже ПОСЛЕ
+// удаления файлов, до записи bat-делетера, и осиротила бы бинарь без сноса.
+func enumRelatedProduct(index uint32) (string, uintptr, error) {
+	if err := procMsiEnumRelatedProducts.Find(); err != nil {
+		return "", 0, fmt.Errorf("msi.dll/MsiEnumRelatedProducts недоступны: %w", err)
+	}
+	uc, err := windows.UTF16PtrFromString(upgradeCode)
+	if err != nil {
+		return "", 0, fmt.Errorf("UpgradeCode %q: %w", upgradeCode, err)
+	}
+	// Буфер под GUID вида {8-4-4-4-12}: 38 символов + завершающий null.
+	buf := make([]uint16, 39)
+	r, _, _ := procMsiEnumRelatedProducts.Call(
+		uintptr(unsafe.Pointer(uc)), 0, uintptr(index), uintptr(unsafe.Pointer(&buf[0])))
+	switch r {
+	case 0: // ERROR_SUCCESS
+		return windows.UTF16ToString(buf), 0, nil
+	case errNoMoreItems:
+		return "", errNoMoreItems, nil
+	default:
+		return "", r, fmt.Errorf("MsiEnumRelatedProducts(%s, %d) вернул %d — база Windows Installer "+
+			"недоступна или повреждена; регистрацию продукта проверить нечем", upgradeCode, index, r)
+	}
 }
 
 // killResidualAgentProcesses снимает процессы агента в пользовательских сессиях

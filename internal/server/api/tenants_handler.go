@@ -122,6 +122,16 @@ func (h *Handler) deleteTenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Записи экрана всех устройств тенанта — до удаления самого тенанта: строки уедут
+	// каскадом, файлы не уедут никуда (§6). Отказ отменяет удаление: тенант, удалённый
+	// с оставшимися на диске записями его сотрудников, — это утечка, а не «почти
+	// удалили».
+	if err := h.purgeScreenTenant(r.Context(), id); err != nil {
+		slog.Error("удаление записей экрана тенанта", "tenant_id", id, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	if err := h.db.DeleteTenant(r.Context(), id); err != nil {
 		switch {
 		case errors.Is(err, storage.ErrTenantUndeletable):
@@ -150,6 +160,25 @@ func (h *Handler) moveDeviceToTenant(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant_id required", http.StatusBadRequest)
 		return
 	}
+	// §6: персональные данные не переезжают к другому контролёру. Запись экрана сделана
+	// в рамках согласия и политики ПРЕЖНЕГО подразделения, и после переноса она
+	// оказалась бы доступна операторам нового — тем, кому её никто не показывал.
+	// Поэтому записи удаляются, а не переносятся; журнал сеансов уезжает вместе со
+	// строкой (там нет содержимого экрана, только факт и причина).
+	srcTenant, err := h.db.DeviceTenantID(r.Context(), deviceID)
+	if err != nil {
+		slog.Error("перенос: тенант устройства", "device_id", deviceID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if srcTenant != "" && srcTenant != body.TenantID {
+		if err := h.purgeScreenDevice(r.Context(), srcTenant, deviceID); err != nil {
+			slog.Error("перенос: удаление записей экрана", "device_id", deviceID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	if err := h.db.MoveDeviceToTenant(r.Context(), deviceID, body.TenantID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "not found", http.StatusNotFound)

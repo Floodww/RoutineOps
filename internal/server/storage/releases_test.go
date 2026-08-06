@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -13,7 +12,7 @@ import (
 // (пересобранный бинарь той же версии).
 func TestRegisterAgentRelease_Idempotent(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	osName := "testos" + uniq(t) // уникальный os → GetLatest вернёт только нашу строку
 	arch := "amd64"
 	ver := "v1.0.0"

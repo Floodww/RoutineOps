@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
@@ -11,7 +10,7 @@ import (
 
 func TestCleanupOldData_DeletesOldRecords(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// создать device
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
@@ -49,7 +48,7 @@ func TestCleanupOldData_DeletesOldRecords(t *testing.T) {
 // он служит якорем дедупа agent_unreachable и сигналом, который оператор ещё не видел.
 func TestCleanupOldData_PreservesUnacknowledged(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
 		CertFingerprint: "fp-cleanup-unack", DeviceID: "dev-cleanup-unack",
@@ -74,7 +73,7 @@ func TestCleanupOldData_PreservesUnacknowledged(t *testing.T) {
 
 func TestCleanupOldData_PreservesRecentRecords(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
 		CertFingerprint: "fp-cleanup-recent", DeviceID: "dev-cleanup-recent",
@@ -94,7 +93,7 @@ func TestCleanupOldData_PreservesRecentRecords(t *testing.T) {
 
 func TestCleanupOldData_Disabled(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	n, err := db.CleanupOldData(ctx, 0, 0, t.TempDir())
 	if err != nil || n != 0 {
@@ -106,7 +105,7 @@ func TestCleanupOldData_Disabled(t *testing.T) {
 // alerts/results не должен стирать журнал безопасности.
 func TestCleanupOldData_AuditSeparateRetention(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	marker := "audit-ret-" + uniq(t)
 	// userID пустой (→NULL, как login_failed); уникальный маркер — в user_email.

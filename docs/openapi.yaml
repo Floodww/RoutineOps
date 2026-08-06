@@ -1810,10 +1810,10 @@ paths:
         Enterprise, macOS. Гейт лицензии живой: при истечении ручка перестаёт принимать
         запросы без рестарта, иначе оплаченная кастодия продолжала бы наполняться.
 
-        🔴 Роль НЕ проверяется: ручка смонтирована через `WithRoutes`, то есть доступна
-        любому аутентифицированному субъекту, включая `viewer` и сервисный токен, — в
-        отличие от всех прочих мутаций устройства. Расхождение с моделью авторизации
-        (`docs/rbac-matrix.md`), а не решение.
+        Роль: `it_admin` + `requireHuman` (сервисный токен получает 403). До 04.08 ручка
+        висела в authed-группе и её брал любой аутентифицированный субъект, включая
+        `viewer`. Именно human-admin: provisioning заводит на машине сотрудника
+        локального админа с Secure Token, то есть повышает права на эндпоинте.
 
         Оператор-путь взамен визита к машине: на парке «зайти в терминал каждого мака
         и ввести пароль» раскаткой не является, а без пароля держателя Secure Token
@@ -2245,6 +2245,11 @@ paths:
         (ротация recipient либо подмена строки) = 409, потому что иначе оператор получит
         файл, который нечем открыть, и узнает об этом в момент инцидента.
 
+        **Во время сеанса удалённого стола по этому устройству — 409** (контракт §5):
+        иначе оператор откроет ключ прямо в кадре и тот ляжет в видеозапись, у которой
+        свой режим доступа. Сеансом считается и ещё не принятый (`requested`): согласие
+        может прийти через секунду после того, как ключ окажется на экране.
+
         Выгрузка и каждый отказ пишутся в аудит (`reveal_escrow` / `reveal_escrow_denied`).
       x-requires-human: true
       requestBody:
@@ -2277,7 +2282,7 @@ paths:
         '400': { description: Неизвестный secret_type }
         '403': { description: Нет роли, сервисный токен либо нет гранта can_reveal_escrow }
         '404': { description: Строки эскроу нет (или роут отсутствует — сборка не Enterprise) }
-        '409': { description: 'recipient строки не совпал с запиненным' }
+        '409': { description: 'recipient строки не совпал с запиненным, либо по устройству идёт сеанс удалённого стола (контракт §5)' }
 
   /api/v1/devices/{id}/screen-sessions:
     x-enterprise: true
@@ -2319,6 +2324,21 @@ paths:
                   type: string
                   maxLength: 500
                   description: Повод; уходит в аудит и (в режиме consent_required) показывается сотруднику
+                control:
+                  type: boolean
+                  default: false
+                  description: |
+                    Запросить сеанс С УПРАВЛЕНИЕМ: оператор сможет двигать мышь и нажимать
+                    клавиши от имени сотрудника.
+
+                    Объявляется ЗДЕСЬ и больше нигде. Область сеанса фиксируется
+                    приглашением и на лету не расширяется, поэтому ручки «взять управление
+                    посреди наблюдения» не существует — это всегда новый сеанс с новой
+                    строкой аудита. Обратное (вернуть управление) возможно и необратимо.
+
+                    Порождает отдельную строку аудита `screen_session_control_granted` и
+                    меняет текст, который видит сотрудник: плашка и диалог согласия
+                    говорят про управление, а не про просмотр.
       responses:
         '201':
           description: Сеанс создан, приглашение доставлено агенту
@@ -2328,7 +2348,7 @@ paths:
         '400': { description: Повод не задан }
         '403': { description: Нет роли либо сервисный токен }
         '404': { description: Устройства нет, оно не активно или чужого тенанта (роут отсутствует — сборка не Enterprise) }
-        '409': { description: 'device_offline — агент не на связи; agent_unsupported — агент не умеет удалённый стол' }
+        '409': { description: 'device_offline — агент не на связи; agent_unsupported — агент не умеет удалённый стол; agent_no_control — агент не умеет управление (способность screen_input объявляется отдельно от screen_session, иначе старый агент умер бы с SCOPE_VIOLATION на первой пачке ввода); recording_quota_exhausted — исчерпан объём записей тенанта' }
         '500': { description: Не записался аудит — сеанс не создан (fail-closed) }
     get:
       tags: [Устройства]
@@ -2432,6 +2452,19 @@ paths:
             application/octet-stream:
               schema: { type: string, format: binary }
         '403': { description: Нет роли либо сервисный токен }
+        '202':
+          description: |
+            Сеанс создан, агент ещё не открыл стрим — приглашение доезжает, захватчик
+            поднимается, а в режиме `consent_required` сотрудник ещё отвечает. Это НЕ
+            конец сеанса: клиент обязан продолжать опрос. Отдельный код нужен потому, что
+            общий 410 приходил на первый же запрос и читался панелью как «сеанс завершён».
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [requested] }
+                  waiting: { type: string, enum: [agent] }
         '404': { description: Сеанса нет или он чужого тенанта }
         '410': { description: Сеанс больше не живой — смотреть нечего }
 
@@ -2484,6 +2517,277 @@ paths:
         '403': { description: Нет роли, сервисный токен либо нет гранта }
         '404': { description: Сеанса или записи нет }
         '500': { description: Не записался аудит просмотра (fail-closed) }
+
+  /api/v1/screen-sessions/{sid}/input:
+    x-enterprise: true
+    parameters: [{ $ref: '#/components/parameters/ScreenSessionId' }]
+    post:
+      tags: [Устройства]
+      summary: Ввод оператора в сеансе с управлением
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Кроме того — **только оператор САМОГО сеанса**:
+        другой администратор той же роли вправе сеанс прекратить, но не печатать в него.
+        В журнале ввода стоит оператор сеанса, и чужие действия легли бы в улику под его
+        именем.
+
+        Пачками, а не событием на запрос: мышь порождает до сотни событий в секунду, и
+        запрос на каждое положил бы очередь соединений браузера раньше, чем сервер. Пачка
+        раз в 50 мс добавляет к задержке около 25 мс при врождённых 80–250 мс
+        ретрансляции кадра.
+
+        POST, а не WebSocket, и это осознанное отступление от контракта: WS нужен был
+        потоку ВНИЗ (кадры), а ввод идёт ВВЕРХ. Взамен не тронуты ни зависимости, ни
+        nginx, ни CSP.
+
+        Координаты — пиксели ПОКАЗАННОГО кадра; в координаты рабочего стола их
+        пересчитывает агент, у которого есть и вырезка, и масштаб профиля. Точка вне
+        кадра отвергается, а не зажимается в границы.
+
+        Порядок обработки: журнал ввода пишется ДО отправки. Не записался — ввод НЕ
+        отправлен и ответ `500`: действие под учётной записью сотрудника, о котором не
+        осталось строки, — это ровно та неатрибутируемость, ради которой журнал заведён.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScreenInputBatch' }
+      responses:
+        '204': { description: Пачка принята и отправлена агенту }
+        '400': { description: Незнакомый вид события либо битое тело }
+        '403': { description: Нет роли, сервисный токен либо чужой сеанс }
+        '409':
+          description: |
+            Сеанс без управления (`session has no control`), управление уже возвращено
+            (`control_returned`) либо стрим ещё не открыт/уже закрыт (`session_not_live`).
+        '410': { description: Сеанс завершён }
+        '413': { description: Слишком много событий в пачке либо слишком длинный текст }
+        '500': { description: Журнал ввода не записался — ввод не отправлен }
+        '503':
+          description: |
+            Агент не успевает принимать ввод (`input_backlog`). Отказ, а не тихая потеря:
+            потерянное отпускание клавиши — это залипший модификатор у сотрудника.
+
+  /api/v1/screen-sessions/{sid}/control:
+    x-enterprise: true
+    parameters: [{ $ref: '#/components/parameters/ScreenSessionId' }]
+    delete:
+      tags: [Устройства]
+      summary: Вернуть управление сотруднику
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Наблюдение при этом ПРОДОЛЖАЕТСЯ — прекращается
+        только ввод.
+
+        Необратимо в пределах сеанса: область сеанса умеет только сужаться, и взять
+        управление снова — это НОВЫЙ сеанс с новой строкой аудита. Ручки «взять
+        управление» не существует намеренно: расширение области по управляющему сообщению
+        сводило бы на нет весь смысл того, что область enforce'ит агент.
+
+        Идемпотентна: повторный вызов отдаёт `204` и второй строки аудита не пишет.
+        Агенту при этом уходит `release_all` — иначе сотрудник остался бы с клавишей,
+        зажатой оператором в последний момент.
+      responses:
+        '204': { description: Управление возвращено (или уже было возвращено) }
+        '403': { description: Нет роли либо сервисный токен }
+        '404': { description: Сеанса нет или он чужого тенанта }
+        '409': { description: Сеанс без управления }
+
+  /api/v1/screen-sessions/{sid}/input-events:
+    x-enterprise: true
+    parameters: [{ $ref: '#/components/parameters/ScreenSessionId' }]
+    get:
+      tags: [Устройства]
+      summary: Журнал ввода сеанса
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек.
+
+        Печатные символы здесь ОТСУТСТВУЮТ по построению: для `kind=text` едет только
+        количество символов. Полный keylog — не «выключенная опция», а то, чего в
+        продукте нет: пароль, введённый оператором в чужую машину, не должен лежать в
+        нашей базе открытым текстом.
+
+        Движения мыши не пишутся вовсе: при отправке раз в 50 мс это двадцать строк в
+        секунду на сеанс, а к вопросу «что оператор сделал» траектория курсора не
+        добавляет ничего. Что было на экране, показывает запись сеанса.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000, maximum: 5000 }
+      responses:
+        '200':
+          description: Строки журнала, по возрастанию смещения от начала сеанса
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScreenInputEntry' }
+        '403': { description: Нет роли либо сервисный токен }
+        '404': { description: Сеанса нет или он чужого тенанта }
+
+  /api/v1/screen-control-windows:
+    x-enterprise: true
+    get:
+      tags: [Устройства]
+      summary: Окна неатрибутируемости (интервалы управления)
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Тенант — из claims оператора.
+
+        Отвечает на вопрос кадрового разбора: в какие интервалы за машиной действовал не
+        её владелец. Внутри такого окна всё, что произошло во внешних системах, выглядит
+        как действия сотрудника — его SSO-сессия, его IP, его учётная запись.
+
+        Конец окна — РАНЬШЕЕ из возврата управления и конца сеанса: оператор, вернувший
+        управление на десятой минуте часового сеанса, отвечает за десять минут. Пустой
+        `to` означает «управление идёт прямо сейчас», а не «данные потерялись».
+
+        Смотровые сеансы в выгрузку не попадают: смотреть — не значит действовать.
+      parameters:
+        - in: query
+          name: device_id
+          schema: { type: string, format: uuid }
+          description: Ограничить одним устройством
+        - in: query
+          name: days
+          schema: { type: integer, default: 90, maximum: 400 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 200, maximum: 1000 }
+      responses:
+        '200':
+          description: Окна управления, новые сверху
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScreenControlWindow' }
+        '403': { description: Нет роли либо сервисный токен }
+
+  /api/v1/screen-access-mode:
+    x-enterprise: true
+    get:
+      tags: [Устройства]
+      summary: Режим доступа к экрану и состояние квоты записей
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Тенант берётся из идентичности вызывающего и в
+        пути НЕ передаётся (ADR-6).
+
+        Вместе с режимом отдаётся состояние квоты записей: администратор, у которого
+        сеансы вдруг стали отказывать с `recording_quota_exhausted`, обязан видеть
+        причину там же, где настраивает наблюдение, а не искать её в логах сервера.
+      responses:
+        '200':
+          description: Режим и квота
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string, enum: [unattended, consent_required] }
+                  recording_used: { type: integer, format: int64, description: Занято записями, байт }
+                  recording_quota: { type: integer, format: int64, description: Потолок на тенанта, байт }
+                  recording_retention: { type: integer, description: Срок хранения записей, суток }
+        '403': { description: Нет роли либо сервисный токен }
+    patch:
+      tags: [Устройства]
+      summary: Переключить режим доступа к экрану (§4 контракта)
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Два значения: `unattended` (по умолчанию) и
+        `consent_required` — диалог согласия сотрудника перед сеансом.
+
+        Смена пишется в аудит В ТОЙ ЖЕ ТРАНЗАКЦИИ и fail-closed: не записался аудит —
+        режим не сменился. Причина не формальная: переход на `unattended` снимает у
+        сотрудников право отказать, и изменение, о котором не осталось следа,
+        неотличимо от «так было всегда».
+
+        Резидентная плашка «за вашим экраном наблюдают» показывается в ОБОИХ режимах и
+        флага отключения не имеет — этот запрос на неё не влияет.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [unattended, consent_required] }
+      responses:
+        '200':
+          description: Режим применён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string }
+                  previous_mode: { type: string }
+        '400': { description: Неизвестный режим }
+        '403': { description: Нет роли либо сервисный токен }
+        '500': { description: Не записался аудит смены — режим не изменён (fail-closed) }
+
+  /api/v1/screen-recording-grants:
+    x-enterprise: true
+    get:
+      tags: [Устройства]
+      summary: Кому разрешён просмотр записей сеансов
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Отдаёт администраторов тенанта с состоянием
+        отзываемого гранта `users.can_view_session_recording` (§5).
+      responses:
+        '200':
+          description: Список администраторов и их грантов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    user_id: { type: string, format: uuid }
+                    email: { type: string }
+                    role: { type: string }
+                    can_view_session_recording: { type: boolean }
+        '403': { description: Нет роли либо сервисный токен }
+
+  /api/v1/screen-recording-grants/{uid}:
+    x-enterprise: true
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: Идентификатор администратора
+    put:
+      tags: [Устройства]
+      summary: Выдать или отозвать право смотреть записи сеансов
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Выдача и отзыв пишутся в аудит в той же
+        транзакции и fail-closed: грант открывает доступ к содержимому экрана
+        сотрудника.
+
+        Выдаётся только администраторам (`role = it_admin`): наблюдателю право не нужно
+        — он и сеанс запросить не может, — а грант, лежащий на его строке, пережил бы
+        повышение роли и открыл бы доступ молча.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [can_view_session_recording]
+              properties:
+                can_view_session_recording: { type: boolean }
+      responses:
+        '204': { description: Применено }
+        '403': { description: Нет роли либо сервисный токен }
+        '404': { description: Нет такого администратора в тенанте вызывающего }
+        '500': { description: Не записался аудит — грант не изменён (fail-closed) }
 
   /api/v1/devices/{id}/lock/arm:
     x-enterprise: true
@@ -4108,6 +4412,98 @@ components:
         expires_at: { type: string, format: date-time, nullable: true }
         last_used_at: { type: string, format: date-time, nullable: true }
 
+    ScreenInputBatch:
+      type: object
+      description: |
+        Пачка событий ввода, снятых с ОДНОГО показанного кадра.
+      properties:
+        frame_width:
+          type: integer
+          description: |
+            Геометрия кадра, в котором оператор ЦЕЛИЛСЯ. Без неё пересчитать координаты в
+            рабочий стол нельзя: между ними лежит и вырезка нужного экрана, и даунскейл
+            профиля.
+        frame_height: { type: integer }
+        release_all:
+          type: boolean
+          description: |
+            Отпустить всё зажатое немедленно. Шлётся при возврате управления, при потере
+            фокуса вкладкой и при её закрытии. Не удобство, а часть контракта: потерянное
+            `key_up` оставляет сотруднику залипший модификатор на его собственной машине.
+        events:
+          type: array
+          maxItems: 512
+          items:
+            type: object
+            properties:
+              kind:
+                type: string
+                enum: [mouse_move, mouse_down, mouse_up, wheel, key_down, key_up, text]
+              x: { type: integer, description: Пиксель кадра, не рабочего стола }
+              y: { type: integer }
+              button: { type: integer, description: '0 левая, 1 средняя, 2 правая' }
+              wheel_x: { type: integer, description: '«Клики» колеса, не пиксели' }
+              wheel_y: { type: integer }
+              code:
+                type: string
+                description: |
+                  ФИЗИЧЕСКАЯ клавиша в терминах W3C `KeyboardEvent.code` («KeyA», «Enter»,
+                  «ShiftLeft»). Именно физическая: раскладка у сотрудника своя, и «нажать
+                  ту же кнопку» переносимо, а «нажать букву Ы» — нет.
+              text:
+                type: string
+                description: |
+                  Печатный ввод текстом — минуя раскладку. Отдельно от клавиш, потому что
+                  символ, набранный через IME или мёртвую клавишу, физической клавише не
+                  соответствует вовсе.
+
+    ScreenInputEntry:
+      type: object
+      description: Строка журнала ввода (§9.21 контракта удалённого стола).
+      properties:
+        kind:
+          type: string
+          enum: [control_granted, control_returned, click, key, text, scroll, move]
+        detail:
+          type: string
+          description: |
+            Код клавиши или кнопка. Для `kind=text` ПУСТО: печатные символы не пишутся.
+        events:
+          type: integer
+          description: |
+            Сколько событий свёрнуто в строку. Для `kind=text` — количество введённых
+            символов, и это всё, что о них известно.
+        offset_ms:
+          type: integer
+          format: int64
+          description: |
+            От начала сеанса, а не абсолютное время: журнал смотрят рядом с записью, и «на
+            14-й минуте» полезнее, чем «в 14:37:02».
+        at: { type: string, format: date-time }
+
+    ScreenControlWindow:
+      type: object
+      description: |
+        Интервал, в течение которого машиной управлял оператор.
+      properties:
+        session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        device_name: { type: string }
+        operator_email: { type: string }
+        reason: { type: string }
+        mode: { type: string, enum: [unattended, consent_required] }
+        from: { type: string, format: date-time }
+        to:
+          type: string
+          format: date-time
+          description: |
+            Раньшее из возврата управления и конца сеанса. Отсутствует, когда управление
+            идёт прямо сейчас.
+        input_events:
+          type: integer
+          format: int64
+          description: Сколько строк журнала ввода набралось за окно
+
     ScreenSession:
       type: object
       description: |
@@ -4145,6 +4541,28 @@ components:
         created_at: { type: string, format: date-time }
         started_at: { type: string, format: date-time }
         ended_at: { type: string, format: date-time }
+        control:
+          type: boolean
+          description: |
+            Сеанс запрошен С УПРАВЛЕНИЕМ. Объявляется приглашением ОДИН раз: область
+            сеанса расширить на лету нельзя, поэтому «взять управление» — это всегда
+            новый сеанс.
+        control_returned_at:
+          type: string
+          format: date-time
+          description: |
+            Момент возврата управления сотруднику. Закрывает окно, за которое отвечает
+            оператор, раньше конца сеанса.
+        consent_state:
+          type: string
+          enum: [GRANTED, DENIED, TIMEOUT, UNAVAILABLE]
+          description: |
+            Зафиксированный исход согласия сотрудника. Отсутствует, когда вопрос не
+            задавался (режим unattended) — это НЕ «нет ответа»: сеанс без спрошенного
+            согласия и сеанс, где сотрудник промолчал, разные события.
+            TIMEOUT — промолчал (по контракту отказ, но чаще означает «отошёл»),
+            UNAVAILABLE — спросить было негде.
+        consent_at: { type: string, format: date-time }
 
     ScreenRecordingManifest:
       type: object

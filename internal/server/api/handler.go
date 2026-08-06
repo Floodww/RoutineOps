@@ -125,6 +125,9 @@ type Handler struct {
 	telegramBotUsername func(context.Context) string
 	// trustedProxies — с каких адресов верить заголовку с адресом клиента. См. realip.go.
 	trustedProxies []netip.Prefix
+	// screenPurge — физическое удаление записей экрана. nil в open-core (записей не
+	// бывает); enterprise ставит вместе с ручками экрана. См. screen_purge.go.
+	screenPurge ScreenPurger
 }
 
 func NewRouter(db *storage.DB, asynqClient *asynq.Client, jwtSecret []byte, ca *enroll.CASigner, publicWebURL, releasesDir string, m *mailer.Mailer, cookieSecure bool, opts ...RouterOption) http.Handler {
@@ -924,6 +927,15 @@ func (h *Handler) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	tenantID, ok := h.tenantID(w, r)
 	if !ok {
+		return
+	}
+	// Записи экрана — ПЕРЕД удалением строки: строки screen_sessions уедут каскадом от
+	// devices, и после этого путь к файлу записи узнать будет неоткуда (§6, ADR-8).
+	// Отказ purge отменяет удаление целиком: «устройство удалено, записи остались» —
+	// худший исход, потому что он выглядит как выполненное.
+	if err := h.purgeScreenDevice(r.Context(), tenantID, id); err != nil {
+		slog.Error("удаление записей экрана", "device_id", id, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	found, err := h.db.DeleteDevice(r.Context(), tenantID, id)

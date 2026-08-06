@@ -4,6 +4,7 @@ package service
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,3 +121,10 @@ func quoteToken(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
 }
+
+// StopUserProcesses — no-op вне Windows.
+//
+// Не забывчивость: на macOS трей снимает launchd вместе с LaunchAgent, на Linux
+// пользовательского процесса агента нет вовсе. Проблема «живой процесс держит файл и
+// каталог не удаляется» — свойство Windows, где удалить открытый файл нельзя.
+func StopUserProcesses(_ *slog.Logger) {}

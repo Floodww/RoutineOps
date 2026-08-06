@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 
 func newDB(t *testing.T) *storage.DB {
 	t.Helper()
-	db, err := storage.Connect(context.Background(), sharedDSN)
+	db, err := storage.Connect(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("storage.Connect: %v", err)
 	}
@@ -94,7 +94,7 @@ func uniqEmail(prefix string) string {
 // Валидный токен привязки: chat_id сохраняется, токен инвалидируется, юзер получает подтверждение.
 func TestHandleStart_ValidToken_LinksAccount(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
@@ -120,7 +120,7 @@ func TestHandleStart_ValidToken_LinksAccount(t *testing.T) {
 	}
 
 	// Токен должен быть инвалидирован — повторный lookup не находит юзера.
-	again, err := db.GetUserByLinkToken(ctx, token)
+	again, _, err := db.GetUserByLinkToken(ctx, token)
 	if err != nil {
 		t.Fatalf("GetUserByLinkToken: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestHandleStart_ValidToken_LinksAccount(t *testing.T) {
 // Неизвестный токен: chat_id не сохраняется, юзеру уходит сообщение об ошибке.
 func TestHandleStart_UnknownToken_NoLink(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
@@ -172,7 +172,7 @@ func TestHandleStart_UnknownToken_NoLink(t *testing.T) {
 // NotifyITAdmins рассылает сообщение всем привязанным IT-админам.
 func TestNotifyITAdmins_SendsToLinkedAdmins(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
@@ -202,7 +202,7 @@ func TestNotifyITAdmins_SendsToLinkedAdmins(t *testing.T) {
 // получил» в одиночку зелёный и при полностью сломанной рассылке.
 func TestNotifyAlert_RespectsPerRecipientThreshold(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	cs := newCaptureServer(t)
 	bot := newBot(db, cs.URL)
 
@@ -249,7 +249,7 @@ func TestNotifyAlert_RespectsPerRecipientThreshold(t *testing.T) {
 // по отмене контекста.
 func TestStartPolling_DispatchesStartCommand(t *testing.T) {
 	db := newDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(tenantCtx())
 	defer cancel()
 
 	cs := newCaptureServer(t)
@@ -288,7 +288,7 @@ func TestStartPolling_DispatchesStartCommand(t *testing.T) {
 		t.Fatalf("StartPolling не выполнил привязку, отправлено: %v", cs.messages())
 	}
 	// chat_id сохранён (читаем фоновым ctx — основной уже отменён).
-	ids, err := db.GetITAdminsWithTelegramChatID(context.Background())
+	ids, err := db.GetITAdminsWithTelegramChatID(tenantCtx())
 	if err != nil {
 		t.Fatalf("GetITAdminsWithTelegramChatID: %v", err)
 	}
@@ -328,17 +328,17 @@ func TestUsernameDoesNotHitNetwork(t *testing.T) {
 	b := New("tok", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b.baseURL = srv.URL
 
-	if got := b.Username(context.Background()); got != "" {
+	if got := b.Username(tenantCtx()); got != "" {
 		t.Errorf("до резолва Username = %q, ожидали пусто", got)
 	}
 	if calls != 0 {
 		t.Errorf("Username сходил в сеть %d раз", calls)
 	}
 
-	if err := b.resolveUsername(context.Background()); err != nil {
+	if err := b.resolveUsername(tenantCtx()); err != nil {
 		t.Fatalf("resolveUsername: %v", err)
 	}
-	if got := b.Username(context.Background()); got != "AcmeRoutineOps_bot" {
+	if got := b.Username(tenantCtx()); got != "AcmeRoutineOps_bot" {
 		t.Errorf("после резолва Username = %q", got)
 	}
 	if calls != 1 {
@@ -357,10 +357,10 @@ func TestResolveUsernameRejectsBadResponse(t *testing.T) {
 	b := New("tok", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b.baseURL = srv.URL
 
-	if err := b.resolveUsername(context.Background()); err == nil {
+	if err := b.resolveUsername(tenantCtx()); err == nil {
 		t.Fatal("ожидали ошибку на ok=false")
 	}
-	if got := b.Username(context.Background()); got != "" {
+	if got := b.Username(tenantCtx()); got != "" {
 		t.Errorf("кэш загрязнён: %q", got)
 	}
 }

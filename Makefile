@@ -124,6 +124,39 @@ check-remote-tags: ## Гейт §9.17: удалённого стола нет в
 	[ "$$fail" -eq 0 ] || exit 1; \
 	echo "check-remote-tags: free чист (граф и бинарь), enterprise содержит фичу ✅"
 
+# Гейт: enterprise-агент СОБИРАЕТСЯ под все три ОС.
+#
+# Заведён по факту, а не на всякий случай. `internal/agent/screen` объявлял тип `rect`,
+# и такой же тип (структура RECT из Win32) объявлял соседний capture_windows.go — пакет
+# не компилировался под GOOS=windows ВООБЩЕ, то есть enterprise-агент нельзя было собрать
+# для платформы, которую владелец назвал первой по приоритету. Не заметили этого ровно
+# потому, что все существующие проверки собирают агента под ХОЗЯЙСКУЮ ОС: check-remote-tags
+# и тесты идут на linux, публикуемый windows-бинарь — free (там пакета screen нет вовсе).
+#
+# Отсюда правило: платформенный код проверяется КРОСС-КОМПИЛЯЦИЕЙ, а не тем, что «у меня
+# собралось». darwin проверяется в обеих ипостасях: CGO=0 — то, что уезжает
+# кросс-компиляцией, CGO=1 — нативная сборка с Cocoa (плашка наблюдения и замок).
+check-agent-platforms: ## Гейт: enterprise-агент компилируется под windows/linux/darwin
+	@fail=0; \
+	for os in windows linux darwin; do \
+		if ! GOOS=$$os CGO_ENABLED=0 go build -tags enterprise -o /dev/null ./cmd/agent 2>/tmp/agent-build-$$os.log; then \
+			echo "ОШИБКА: enterprise-агент не собирается под GOOS=$$os:" >&2; \
+			head -20 /tmp/agent-build-$$os.log >&2; \
+			fail=1; \
+		fi; \
+	done; \
+	if [ "$$(go env GOOS)" = "darwin" ]; then \
+		if ! CGO_ENABLED=1 go build -tags enterprise -o /dev/null ./cmd/agent 2>/tmp/agent-build-darwin-cgo.log; then \
+			echo "ОШИБКА: нативная (CGO) enterprise-сборка macOS не собирается:" >&2; \
+			grep -v 'duplicate libraries' /tmp/agent-build-darwin-cgo.log | head -20 >&2; \
+			fail=1; \
+		fi; \
+	else \
+		echo "check-agent-platforms: нативная CGO-сборка macOS пропущена (не на маке)"; \
+	fi; \
+	[ "$$fail" -eq 0 ] || exit 1; \
+	echo "check-agent-platforms: enterprise-агент собирается под все три ОС ✅"
+
 .PHONY: help proto tidy fmt scan-free hooks agent mockserver build certs up down logs run-mock run-agent test clean \
         pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \
         build-win build-win-arm64 build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win \

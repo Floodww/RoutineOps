@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -18,7 +17,7 @@ import (
 // mustVerify — проверка цепочки с падением на ошибке выполнения (не на нарушении).
 func mustVerify(t *testing.T, db *storage.DB) *storage.AuditChainStatus {
 	t.Helper()
-	st, err := db.VerifyAuditChain(context.Background(), tenancy.DefaultTenantID)
+	st, err := db.VerifyAuditChain(tenantCtx(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("VerifyAuditChain: %v", err)
 	}
@@ -29,7 +28,7 @@ func mustVerify(t *testing.T, db *storage.DB) *storage.AuditChainStatus {
 // номера, связываются хешами и проходят проверку.
 func TestAuditChain_BuildsAndVerifies(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	before := mustVerify(t, db)
 	if !before.OK {
@@ -64,7 +63,7 @@ func TestAuditChain_BuildsAndVerifies(t *testing.T) {
 // с её собственным хешем. Это базовое обещание tamper-evident журнала.
 func TestAuditChain_DetectsFieldTamper(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	if err := db.WriteAuditLog(ctx, "", "victim@example.com", "delete_device", "device", "d-1", nil); err != nil {
 		t.Fatalf("WriteAuditLog: %v", err)
@@ -81,7 +80,7 @@ func TestAuditChain_DetectsFieldTamper(t *testing.T) {
 		t.Fatalf("чтение исходного action: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool().Exec(context.Background(),
+		_, _ = db.Pool().Exec(tenantCtx(),
 			`UPDATE audit_log SET action = $1 WHERE seq = $2`, origAction, target)
 	})
 
@@ -107,7 +106,7 @@ func TestAuditChain_DetectsFieldTamper(t *testing.T) {
 // Именно этим оно отличается от легального усечения хвоста retention'ом.
 func TestAuditChain_DetectsMiddleDelete(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	for i := 0; i < 3; i++ {
 		if err := db.WriteAuditLog(ctx, "", "del@example.com", "chain_del", "test", "x", nil); err != nil {
@@ -132,7 +131,7 @@ func TestAuditChain_DetectsMiddleDelete(t *testing.T) {
 		t.Fatalf("снимок строки: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool().Exec(context.Background(), `
+		_, _ = db.Pool().Exec(tenantCtx(), `
 			INSERT INTO audit_log (user_email, action, target_type, target_id, details,
 			                       created_at, seq, prev_hash, hash)
 			VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
@@ -160,7 +159,7 @@ func TestAuditChain_DetectsMiddleDelete(t *testing.T) {
 // о подделке, и проверку целостности отключили бы через неделю.
 func TestAuditChain_PrefixTruncationIsLegal(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	if err := db.WriteAuditLog(ctx, "", "trunc@example.com", "chain_trunc", "test", "x", nil); err != nil {
 		t.Fatalf("WriteAuditLog: %v", err)
@@ -184,7 +183,7 @@ func TestAuditChain_PrefixTruncationIsLegal(t *testing.T) {
 		t.Fatalf("снимок строки: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool().Exec(context.Background(), `
+		_, _ = db.Pool().Exec(tenantCtx(), `
 			INSERT INTO audit_log (user_email, action, target_type, target_id, details,
 			                       created_at, seq, prev_hash, hash)
 			VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
@@ -215,7 +214,7 @@ func TestAuditChain_PrefixTruncationIsLegal(t *testing.T) {
 // перевычисляем всю цепочку от неё и дальше той же функцией audit_row_hash.
 func TestAuditChain_AnchorCatchesFullRecompute(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	for i := 0; i < 2; i++ {
 		if err := db.WriteAuditLog(ctx, "", "anchor@example.com", "chain_anchor", "test", "x", nil); err != nil {
@@ -237,7 +236,7 @@ func TestAuditChain_AnchorCatchesFullRecompute(t *testing.T) {
 		t.Fatal("якорь не записан")
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool().Exec(context.Background(), `DELETE FROM audit_anchors WHERE seq = $1`, anchorSeq)
+		_, _ = db.Pool().Exec(tenantCtx(), `DELETE FROM audit_anchors WHERE seq = $1`, anchorSeq)
 	})
 
 	// Снимок затрагиваемого участка для восстановления.
@@ -262,7 +261,7 @@ func TestAuditChain_AnchorCatchesFullRecompute(t *testing.T) {
 	rows.Close()
 	t.Cleanup(func() {
 		for _, r := range snapshot {
-			_, _ = db.Pool().Exec(context.Background(),
+			_, _ = db.Pool().Exec(tenantCtx(),
 				`UPDATE audit_log SET action = $1, prev_hash = $2, hash = $3 WHERE seq = $4`,
 				r.action, r.prevHash, r.hash, r.seq)
 		}
@@ -310,7 +309,7 @@ func TestAuditChain_AnchorCatchesFullRecompute(t *testing.T) {
 // стала бы деревом, а не цепью.
 func TestAuditChain_ConcurrentWrites(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	before := mustVerify(t, db)
 	if !before.OK {
@@ -360,7 +359,7 @@ func TestAuditChain_ConcurrentWrites(t *testing.T) {
 // пишут тривиальный details и разницы не заметят.
 func TestAuditChain_SurvivesJSONBNormalization(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Ключи подобраны так, чтобы алфавитный порядок (Go) отличался от порядка JSONB
 	// (сначала по длине): алфавит — a, bbb, zz; JSONB — a, zz, bbb.
@@ -391,8 +390,8 @@ func TestWriteAuditAnchor_Idempotent(t *testing.T) {
 	db := newDB(t)
 
 	// Якорь берёт тенанта из привязанного скоупа (цепочка аудита тенантская),
-	// поэтому голый context.Background() ему больше не годится.
-	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	// поэтому голый tenantCtx() ему больше не годится.
+	ctx, finish, err := db.BindTenant(tenantCtx(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("BindTenant: %v", err)
 	}
@@ -406,7 +405,7 @@ func TestWriteAuditAnchor_Idempotent(t *testing.T) {
 		t.Fatalf("первый якорь: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool().Exec(context.Background(), `DELETE FROM audit_anchors WHERE seq = $1`, seq1)
+		_, _ = db.Pool().Exec(tenantCtx(), `DELETE FROM audit_anchors WHERE seq = $1`, seq1)
 	})
 
 	seq2, hash2, err := db.WriteAuditAnchor(ctx)
@@ -423,7 +422,7 @@ func TestWriteAuditAnchor_Idempotent(t *testing.T) {
 	}
 
 	var count int
-	if err := db.Pool().QueryRow(context.Background(),
+	if err := db.Pool().QueryRow(tenantCtx(),
 		`SELECT COUNT(*) FROM audit_anchors WHERE seq = $1`, seq1).Scan(&count); err != nil {
 		t.Fatalf("подсчёт якорей: %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -128,7 +127,7 @@ func TestTenantSupervisionRoutes_RejectNonSupervisor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	svcSecret := "rops_" + strings.Repeat("c", 40)
+	svcSecret := serviceTokenSecret(t)
 	if _, err := db.CreateAPIToken(ctx, tenancy.DefaultTenantID,
 		"tenants", "it_admin", "", svcUser.ID, svcSecret, nil); err != nil {
 		t.Fatalf("CreateAPIToken: %v", err)
@@ -205,7 +204,7 @@ func deviceTenant(t *testing.T, db *storage.DB, tenantID, deviceID string) strin
 	defer finish(true)
 
 	var got string
-	err = db.Q(scoped).QueryRow(scoped,
+	err = db.Scoped(scoped).QueryRow(scoped,
 		`SELECT tenant_id::text FROM devices WHERE id = $1`, deviceID).Scan(&got)
 	if err != nil {
 		return ""
@@ -223,7 +222,7 @@ func auditCount(t *testing.T, db *storage.DB, tenantID, action string) int {
 	defer finish(true)
 
 	var n int
-	if err := db.Q(scoped).QueryRow(scoped,
+	if err := db.Scoped(scoped).QueryRow(scoped,
 		`SELECT count(*) FROM audit_log WHERE action = $1`, action).Scan(&n); err != nil {
 		t.Fatalf("чтение журнала тенанта %s: %v", tenantID, err)
 	}
@@ -320,7 +319,7 @@ func invitationRole(t *testing.T, db *storage.DB, tenantID, email string) string
 	defer finish(true)
 
 	var role string
-	if err := db.Q(scoped).QueryRow(scoped,
+	if err := db.Scoped(scoped).QueryRow(scoped,
 		`SELECT role FROM invitation_tokens WHERE email = $1`, email).Scan(&role); err != nil {
 		t.Fatalf("приглашение не найдено в скоупе целевого тенанта %s: %v", tenantID, err)
 	}

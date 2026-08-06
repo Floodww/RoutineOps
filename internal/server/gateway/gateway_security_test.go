@@ -22,7 +22,7 @@ import (
 func TestAckTaskReceived_ForeignDeviceCannotAck(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-ack")
 	registerDevice(t, db, "device-attacker-ack", aFP)
@@ -53,7 +53,7 @@ func TestAckTaskReceived_ForeignDeviceCannotAck(t *testing.T) {
 func TestReportTaskResult_ForeignDeviceCannotComplete(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-res")
 	registerDevice(t, db, "device-attacker-res", aFP)
@@ -85,7 +85,7 @@ func TestReportTaskResult_ForeignDeviceCannotComplete(t *testing.T) {
 func TestReportAdminAccess_ForeignDeviceIgnored(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	owner, _ := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_idor"), "hash", "user")
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-adm")
@@ -132,7 +132,7 @@ func TestReportAdminAccess_ForeignDeviceIgnored(t *testing.T) {
 func TestReportSecurityEvent_ForeignAdminRequestCannotPinVictim(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	owner, _ := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_secidor"), "hash", "user")
 	attackerCtx, aFP := makeCertCtx(t, "device-attacker-sec")
@@ -171,7 +171,7 @@ func TestReportSecurityEvent_ForeignAdminRequestCannotPinVictim(t *testing.T) {
 // хендлера; после разблокировки — пропускает.
 func TestBlockedInterceptor_RejectsBlockedDevice(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	certCtx, fp := makeCertCtx(t, "device-blocked-intr")

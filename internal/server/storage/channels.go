@@ -23,7 +23,7 @@ func (db *DB) ResolveDeviceUpdateChannel(ctx context.Context, deviceID string) (
 	defer finish(true)
 
 	var beta bool
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM device_group_members m
@@ -85,7 +85,7 @@ func (db *DB) UpdateRollout(ctx context.Context, tenantID string) ([]ChannelRoll
 	// в EXISTS выше) осознанно — панель считает его на весь парк одним проходом, а
 	// gRPC-путь по одному устройству; тест TestUpdateRollout_MatchesResolver держит их
 	// в согласии.
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		WITH dev AS (
 			SELECT d.id,
 			       COALESCE(d.agent_version, '') AS version,
@@ -126,7 +126,7 @@ func (db *DB) UpdateRollout(ctx context.Context, tenantID string) ([]ChannelRoll
 		return nil, err
 	}
 
-	groups, err := db.Q(ctx).Query(ctx,
+	groups, err := db.Scoped(ctx).Query(ctx,
 		`SELECT update_channel, COUNT(*) FROM device_groups WHERE tenant_id = $1 GROUP BY 1`, tenantID)
 	if err != nil {
 		return nil, err
@@ -149,7 +149,7 @@ func (db *DB) UpdateRollout(ctx context.Context, tenantID string) ([]ChannelRoll
 	// Целевые версии. Считаются в Go, а не в SQL, ровно потому, что видимость каналов
 	// (beta = stable ∪ beta) — правило кода, а не схемы: дублировать его в SQL значило
 	// бы завести второе место, где оно может разойтись.
-	platforms, err := db.Q(ctx).Query(ctx, `SELECT DISTINCT os, arch FROM agent_releases ORDER BY 1, 2`)
+	platforms, err := db.Scoped(ctx).Query(ctx, `SELECT DISTINCT os, arch FROM agent_releases ORDER BY 1, 2`)
 	if err != nil {
 		return nil, err
 	}

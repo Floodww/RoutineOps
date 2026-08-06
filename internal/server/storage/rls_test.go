@@ -26,7 +26,7 @@ func TestRLS_BindTenantIsolatesDevices(t *testing.T) {
 	}
 	defer finishB(true)
 	var dBID string
-	if err := db.Q(ctxB).QueryRow(ctxB, `
+	if err := db.Scoped(ctxB).QueryRow(ctxB, `
 		INSERT INTO devices (tenant_id, hostname, os, status)
 		VALUES ($1, $2, 'linux', 'active')
 		RETURNING id::text`, tenantB, "rls-b-"+uniq(t),

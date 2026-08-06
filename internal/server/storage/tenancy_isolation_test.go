@@ -26,7 +26,7 @@ func TestCrossTenant_ListAndGetHideForeignRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind other tenant: %v", err)
 	}
-	if err := db.Q(otherCtx).QueryRow(otherCtx, `
+	if err := db.Scoped(otherCtx).QueryRow(otherCtx, `
 		INSERT INTO devices (hostname, os, status, tenant_id)
 		VALUES ($1, 'linux', 'active', $2)
 		RETURNING id::text`, "host-b-"+uniq(t), other,
@@ -119,7 +119,7 @@ func TestListDevicesAcrossTenants_SeesBoth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind other tenant: %v", err)
 	}
-	if err := db.Q(otherCtx).QueryRow(otherCtx, `
+	if err := db.Scoped(otherCtx).QueryRow(otherCtx, `
 		INSERT INTO devices (hostname, os, status, tenant_id)
 		VALUES ($1, 'linux', 'active', $2)
 		RETURNING id::text`, "cross-b-"+uniq(t), other,

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -17,10 +16,10 @@ func TestAcceptAdminSessionWindow_AppendOnlyAndFinal(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("asc-%s@test.com", uniq(t)))
 	req := mustCreateAdminRequest(t, db, d.ID, u.ID)
 	expires := time.Now().Add(time.Hour)
-	if err := db.RespondToAdminRequest(context.Background(), req.ID, "approved", u.ID, &expires); err != nil {
+	if err := db.RespondToAdminRequest(tenantCtx(), req.ID, "approved", u.ID, &expires); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if err := db.MarkAdminBaselineCaptured(context.Background(), req.ID, d.ID, time.Now()); err != nil {
+	if err := db.MarkAdminBaselineCaptured(tenantCtx(), req.ID, d.ID, time.Now()); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
 
@@ -34,15 +33,15 @@ func TestAcceptAdminSessionWindow_AppendOnlyAndFinal(t *testing.T) {
 		}},
 		TotalChanges: 1, Completeness: "complete", SoftwareHealth: "ok", ServicesHealth: "ok",
 	}
-	if err := db.AcceptAdminSessionWindow(context.Background(), win); err != nil {
+	if err := db.AcceptAdminSessionWindow(tenantCtx(), win); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 	win.Changes = nil
 	win.TotalChanges = 0
-	if err := db.AcceptAdminSessionWindow(context.Background(), win); err != nil {
+	if err := db.AcceptAdminSessionWindow(tenantCtx(), win); err != nil {
 		t.Fatalf("accept empty: %v", err)
 	}
-	rows, err := db.ListAdminSessionChanges(context.Background(), req.ID)
+	rows, err := db.ListAdminSessionChanges(tenantCtx(), req.ID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -58,10 +57,10 @@ func TestAcceptAdminSessionWindow_AppendOnlyAndFinal(t *testing.T) {
 		ObservedAt: time.Now(),
 	}}
 	win.TotalChanges = 1
-	if err := db.AcceptAdminSessionWindow(context.Background(), win); err != nil {
+	if err := db.AcceptAdminSessionWindow(tenantCtx(), win); err != nil {
 		t.Fatalf("final: %v", err)
 	}
-	ev, err := db.GetAdminAccessEvidence(context.Background(), tenancy.DefaultTenantID, req.ID)
+	ev, err := db.GetAdminAccessEvidence(tenantCtx(), tenancy.DefaultTenantID, req.ID)
 	if err != nil || ev == nil {
 		t.Fatalf("evidence: %v %#v", err, ev)
 	}
@@ -79,7 +78,7 @@ func TestAcceptAdminSessionWindow_SeqJumpRejected(t *testing.T) {
 		RequestID: req.ID, DeviceID: d.ID, WindowSeq: storage.MaxAdminSessionSeqJump + 1,
 		WindowEnd: time.Now(), Completeness: "complete",
 	}
-	err := db.AcceptAdminSessionWindow(context.Background(), win)
+	err := db.AcceptAdminSessionWindow(tenantCtx(), win)
 	if !errors.Is(err, storage.ErrAdminSessionSeqJump) {
 		t.Fatalf("got %v, want ErrAdminSessionSeqJump", err)
 	}
@@ -95,7 +94,7 @@ func TestAcceptAdminSessionWindow_WrongDevice(t *testing.T) {
 		RequestID: req.ID, DeviceID: d2.ID, WindowSeq: 1,
 		WindowEnd: time.Now(), Completeness: "complete",
 	}
-	err := db.AcceptAdminSessionWindow(context.Background(), win)
+	err := db.AcceptAdminSessionWindow(tenantCtx(), win)
 	if !errors.Is(err, storage.ErrAdminRequestNotFound) {
 		t.Fatalf("got %v, want ErrAdminRequestNotFound", err)
 	}
@@ -107,20 +106,20 @@ func TestListAdminEvidenceGaps_NeedsBaselineAndClosed(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("gap-%s@test.com", uniq(t)))
 	req := mustCreateAdminRequest(t, db, d.ID, u.ID)
 	expires := time.Now().Add(time.Hour)
-	if err := db.RespondToAdminRequest(context.Background(), req.ID, "approved", u.ID, &expires); err != nil {
+	if err := db.RespondToAdminRequest(tenantCtx(), req.ID, "approved", u.ID, &expires); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if err := db.MarkAdminBaselineCaptured(context.Background(), req.ID, d.ID, time.Now().Add(-3*time.Hour)); err != nil {
+	if err := db.MarkAdminBaselineCaptured(tenantCtx(), req.ID, d.ID, time.Now().Add(-3*time.Hour)); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
-	if err := db.RevokeAdminAccessRequest(context.Background(), tenancy.DefaultTenantID, req.ID); err != nil {
+	if err := db.RevokeAdminAccessRequest(tenantCtx(), tenancy.DefaultTenantID, req.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := db.Pool().Exec(context.Background(),
+	if _, err := db.Pool().Exec(tenantCtx(),
 		`UPDATE admin_access_requests SET revoked_at = now() - interval '3 hours' WHERE id = $1`, req.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	gaps, err := db.ListAdminEvidenceGaps(context.Background(), time.Hour)
+	gaps, err := db.ListAdminEvidenceGaps(tenantCtx(), time.Hour)
 	if err != nil {
 		t.Fatalf("gaps: %v", err)
 	}

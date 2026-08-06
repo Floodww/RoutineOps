@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
@@ -14,7 +13,7 @@ import (
 
 func seedAdmin(t *testing.T, db *storage.DB, prefix string) string {
 	t.Helper()
-	u, err := db.CreateUser(context.Background(), tenancy.DefaultTenantID, "Test", fmt.Sprintf("%s-%s@example.com", prefix, uniq(t)), "hash", "it_admin")
+	u, err := db.CreateUser(tenantCtx(), tenancy.DefaultTenantID, "Test", fmt.Sprintf("%s-%s@example.com", prefix, uniq(t)), "hash", "it_admin")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -23,7 +22,7 @@ func seedAdmin(t *testing.T, db *storage.DB, prefix string) string {
 
 func adminIDs(t *testing.T, db *storage.DB) []string {
 	t.Helper()
-	users, err := db.ListUsers(context.Background(), tenancy.DefaultTenantID)
+	users, err := db.ListUsers(tenantCtx(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
@@ -47,7 +46,7 @@ func adminIDs(t *testing.T, db *storage.DB) []string {
 // способного что-либо изменить. Чинится только доступом к БД.
 func TestDeleteUser_LastAdminGuard(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Приводим базу к одному администратору: тест обязан быть независимым от того,
 	// что оставили соседи по пакету.
@@ -124,7 +123,7 @@ func TestDeleteUser_LastAdminGuard(t *testing.T) {
 // бы, что удаление аккаунта чистит журнал запросов на повышение прав.
 func TestDeleteUser_AdminAccessRequestSurvivesAsNull(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	seedAdmin(t, db, "keeper") // чтобы удаляемый не оказался последним
 	victim := seedAdmin(t, db, "leaving")
 
@@ -159,7 +158,7 @@ func TestDeleteUser_UnknownIDIsNotAnError(t *testing.T) {
 	// Несуществующий и заведомо кривой UUID: оба обязаны дать «не найдено», а не 500.
 	// id::text в запросе именно для второго случая — голое сравнение с uuid даёт 22P02.
 	for _, id := range []string{"00000000-0000-0000-0000-000000000000", "не-uuid"} {
-		deleted, err := db.DeleteUser(context.Background(), tenancy.DefaultTenantID, id)
+		deleted, err := db.DeleteUser(tenantCtx(), tenancy.DefaultTenantID, id)
 		if err != nil || deleted {
 			t.Errorf("id=%q: deleted=%v err=%v, ожидалось (false, nil)", id, deleted, err)
 		}

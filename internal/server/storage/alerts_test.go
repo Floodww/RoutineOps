@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -11,7 +10,7 @@ func TestCreateAlert_NoError(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-alert-%s", uniq(t)), "macos")
 
-	_, err := db.CreateAlert(context.Background(), d.ID, "FORBIDDEN_SOFTWARE", `{"process":"bad.exe"}`, "")
+	_, err := db.CreateAlert(tenantCtx(), d.ID, "FORBIDDEN_SOFTWARE", `{"process":"bad.exe"}`, "")
 	if err != nil {
 		t.Fatalf("CreateAlert: %v", err)
 	}
@@ -22,7 +21,7 @@ func TestCreateAlert_NoError(t *testing.T) {
 func TestCreateAlert_DedupsUnacknowledged(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-alertdedup-%s", uniq(t)), "macos")
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	created, err := db.CreateAlert(ctx, d.ID, "FORBIDDEN_SOFTWARE", `{"process":"bad.exe"}`, "")
 	if err != nil || !created {
@@ -57,9 +56,9 @@ func TestCreateAlert_DedupsUnacknowledged(t *testing.T) {
 func TestListAlerts_ContainsCreated(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-alertlist-%s", uniq(t)), "windows")
-	_, _ = db.CreateAlert(context.Background(), d.ID, "UNAUTHORIZED_INSTALL", `{}`, "")
+	_, _ = db.CreateAlert(tenantCtx(), d.ID, "UNAUTHORIZED_INSTALL", `{}`, "")
 
-	alerts, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 50)
+	alerts, err := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, d.ID, 50)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -76,10 +75,10 @@ func TestListAlerts_FilterByDevice_Isolates(t *testing.T) {
 	d1 := mustCreateDevice(t, db, fmt.Sprintf("host-af1-%s", uniq(t)), "macos")
 	d2 := mustCreateDevice(t, db, fmt.Sprintf("host-af2-%s", uniq(t)), "windows")
 
-	_, _ = db.CreateAlert(context.Background(), d1.ID, "TYPE_A", `{}`, "")
-	_, _ = db.CreateAlert(context.Background(), d2.ID, "TYPE_B", `{}`, "")
+	_, _ = db.CreateAlert(tenantCtx(), d1.ID, "TYPE_A", `{}`, "")
+	_, _ = db.CreateAlert(tenantCtx(), d2.ID, "TYPE_B", `{}`, "")
 
-	alerts, err := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d1.ID, 50)
+	alerts, err := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, d1.ID, 50)
 	if err != nil {
 		t.Fatalf("ListAlerts: %v", err)
 	}
@@ -93,20 +92,20 @@ func TestListAlerts_FilterByDevice_Isolates(t *testing.T) {
 func TestAcknowledgeAlert_SetsTimestamp(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-ack-alert-%s", uniq(t)), "macos")
-	_, _ = db.CreateAlert(context.Background(), d.ID, "FORBIDDEN_SOFTWARE", `{}`, "")
+	_, _ = db.CreateAlert(tenantCtx(), d.ID, "FORBIDDEN_SOFTWARE", `{}`, "")
 
-	alerts, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
+	alerts, _ := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, d.ID, 1)
 	if len(alerts) == 0 {
 		t.Fatal("no alert to acknowledge")
 	}
 	alertID := alerts[0].ID
 
-	if err := db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID); err != nil {
+	if err := db.AcknowledgeAlert(tenantCtx(), tenancy.DefaultTenantID, alertID); err != nil {
 		t.Fatalf("AcknowledgeAlert: %v", err)
 	}
 
 	// re-fetch and verify acknowledged_at is set
-	refreshed, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
+	refreshed, _ := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, d.ID, 1)
 	if refreshed[0].AcknowledgedAt == nil {
 		t.Error("acknowledged_at should be set after acknowledge")
 	}
@@ -115,13 +114,13 @@ func TestAcknowledgeAlert_SetsTimestamp(t *testing.T) {
 func TestAcknowledgeAlert_AlreadyAcknowledged_ReturnsError(t *testing.T) {
 	db := newDB(t)
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-doubleack-%s", uniq(t)), "windows")
-	_, _ = db.CreateAlert(context.Background(), d.ID, "TYPE_X", `{}`, "")
+	_, _ = db.CreateAlert(tenantCtx(), d.ID, "TYPE_X", `{}`, "")
 
-	alerts, _ := db.ListAlerts(context.Background(), tenancy.DefaultTenantID, d.ID, 1)
+	alerts, _ := db.ListAlerts(tenantCtx(), tenancy.DefaultTenantID, d.ID, 1)
 	alertID := alerts[0].ID
 
-	_ = db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID)
-	err := db.AcknowledgeAlert(context.Background(), tenancy.DefaultTenantID, alertID)
+	_ = db.AcknowledgeAlert(tenantCtx(), tenancy.DefaultTenantID, alertID)
+	err := db.AcknowledgeAlert(tenantCtx(), tenancy.DefaultTenantID, alertID)
 	if err == nil {
 		t.Error("expected error on double-acknowledge, got nil")
 	}

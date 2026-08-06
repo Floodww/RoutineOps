@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "doctor": "npx react-doctor@latest"
+    "doctor": "npx react-doctor@latest",
+    "test:ui": "playwright test e2e/select.spec.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.17",

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -14,7 +13,7 @@ import (
 // strings.ToLower от имени proto-энума, но исторические вызовы шлют верхний.
 func TestCreateAlert_AssignsSeverity(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	cases := []struct {
 		alertType string
@@ -49,7 +48,7 @@ func TestCreateAlert_AssignsSeverity(t *testing.T) {
 // иначе он лёг бы с DEFAULT 'medium' и оказался важнее реальных нарушений политики.
 func TestDetectUnreachableDevices_AssignsSeverity(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-unreach-%s", uniq(t)), "macos")
 
 	if _, err := db.Pool().Exec(ctx,
@@ -77,7 +76,7 @@ func TestDetectUnreachableDevices_AssignsSeverity(t *testing.T) {
 // вернулся бы ровно тот баг, ради которого появилась сортировка по acknowledged_at.
 func TestListAlerts_OrdersUnackedThenSeverity(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-order-%s", uniq(t)), "macos")
 
 	// critical, который СРАЗУ принимают.
@@ -122,7 +121,7 @@ func TestListAlerts_OrdersUnackedThenSeverity(t *testing.T) {
 // это отличает эскалацию от бесконечной рассылки одного и того же алерта.
 func TestTakeEscalations(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-escal-%s", uniq(t)), "macos")
 
 	if _, err := db.CreateAlert(ctx, d.ID, "lock_tamper", `{"n":1}`, ""); err != nil {
@@ -174,7 +173,7 @@ func TestTakeEscalations(t *testing.T) {
 // TestTakeEscalations_RespectsAge: свежий алерт не эскалируется, даже критичный.
 func TestTakeEscalations_RespectsAge(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-escfresh-%s", uniq(t)), "macos")
 
 	if _, err := db.CreateAlert(ctx, d.ID, "lock_tamper", `{}`, ""); err != nil {
@@ -195,7 +194,7 @@ func TestTakeEscalations_RespectsAge(t *testing.T) {
 // иначе разобранный инцидент продолжал бы будить дежурного.
 func TestTakeEscalations_SkipsAcknowledged(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	d := mustCreateDevice(t, db, fmt.Sprintf("host-escack-%s", uniq(t)), "macos")
 
 	if _, err := db.CreateAlert(ctx, d.ID, "lock_tamper", `{}`, ""); err != nil {
@@ -227,7 +226,7 @@ func TestTakeEscalations_SkipsAcknowledged(t *testing.T) {
 // превратилась бы в рассылку напоминаний по всему парку.
 func TestTakeEscalations_RejectsUnknownSeverity(t *testing.T) {
 	db := newDB(t)
-	if _, err := db.TakeEscalations(context.Background(), "sev1", 30, 0); err == nil {
+	if _, err := db.TakeEscalations(tenantCtx(), "sev1", 30, 0); err == nil {
 		t.Fatal("неизвестный уровень принят без ошибки")
 	}
 }
@@ -235,7 +234,7 @@ func TestTakeEscalations_RejectsUnknownSeverity(t *testing.T) {
 // TestTakeEscalations_DisabledByZero: afterMinutes<=0 выключает эскалацию целиком.
 func TestTakeEscalations_DisabledByZero(t *testing.T) {
 	db := newDB(t)
-	due, err := db.TakeEscalations(context.Background(), "critical", 0, 0)
+	due, err := db.TakeEscalations(tenantCtx(), "critical", 0, 0)
 	if err != nil {
 		t.Fatalf("TakeEscalations: %v", err)
 	}
@@ -248,7 +247,7 @@ func TestTakeEscalations_DisabledByZero(t *testing.T) {
 // прошедшая миграцию, читается как 'low' («всё как раньше»), а не как тишина.
 func TestNotifyMinSeverity_RoundTrip(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := mustCreateUser(t, db, fmt.Sprintf("sev-%s@example.com", uniq(t)))
 
 	got, err := db.GetUserNotifyMinSeverity(ctx, u.ID)
@@ -275,7 +274,7 @@ func TestNotifyMinSeverity_RoundTrip(t *testing.T) {
 // chat_id одним запросом — иначе на каждый алерт был бы поход в БД за каждым админом.
 func TestGetTelegramRecipients_CarriesThreshold(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := mustCreateUser(t, db, fmt.Sprintf("recip-%s@example.com", uniq(t)))
 
 	if _, err := db.Pool().Exec(ctx,

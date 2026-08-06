@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
 	"testing"
@@ -18,12 +17,12 @@ import (
 // an approved row directly.
 func updateAdminRequestStatus(t *testing.T, requestID, newStatus string) {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), sharedDSN)
+	pool, err := pgxpool.New(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("updateAdminRequestStatus pool: %v", err)
 	}
 	defer pool.Close()
-	_, err = pool.Exec(context.Background(),
+	_, err = pool.Exec(tenantCtx(),
 		`UPDATE admin_access_requests SET status = $2 WHERE id = $1`, requestID, newStatus)
 	if err != nil {
 		t.Fatalf("updateAdminRequestStatus: %v", err)
@@ -35,7 +34,7 @@ func updateAdminRequestStatus(t *testing.T, requestID, newStatus string) {
 func TestFetchAdminStatus_PendingRequest(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	owner, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_pending"), "hash", "user")
 	if err != nil {
@@ -66,7 +65,7 @@ func TestFetchAdminStatus_PendingRequest(t *testing.T) {
 func TestFetchAdminStatus_ApprovedRequest(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	owner, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_approved"), "hash", "user")
 	if err != nil {
@@ -97,7 +96,7 @@ func TestFetchAdminStatus_ApprovedRequest(t *testing.T) {
 func TestFetchAdminStatus_ApprovedWithTimestamps(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	admin, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Admin", uniqEmail("admin_ts"), "hash", "it_admin")
 	if err != nil {
@@ -171,7 +170,7 @@ func TestRequestAdminAccess_CustomRequestedAt(t *testing.T) {
 func TestReportAdminAccess_Revoked(t *testing.T) {
 	db := newDB(t)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	owner, err := db.CreateUser(ctx, tenancy.DefaultTenantID, "Owner", uniqEmail("owner_revoke"), "hash", "user")
 	if err != nil {
@@ -330,8 +329,8 @@ func TestReportLockStatus_Locked(t *testing.T) {
 	registerDevice(t, db, "lock-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", gwLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", gwLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
 		t.Fatalf("seed desired lock: %v", err)
 	}
 
@@ -346,7 +345,7 @@ func TestReportLockStatus_Locked(t *testing.T) {
 		t.Error("expected Received=true")
 	}
 
-	dev, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, devID)
+	dev, _, _ := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, devID)
 	if dev.LockStatus != "locked" {
 		t.Errorf("LockStatus = %q, want locked", dev.LockStatus)
 	}
@@ -364,8 +363,8 @@ func TestReportLockStatus_StaleLockedAfterUnlock_DesiredUntouched(t *testing.T) 
 	registerDevice(t, db, "stale-lock-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	ctx := context.Background()
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	ctx := tenantCtx()
 	if err := db.SetDeviceLockState(ctx, tenancy.DefaultTenantID, devID, "locked", gwLockHash, "test", storage.LockModeOverlay, "lock-task-1"); err != nil {
 		t.Fatalf("seed desired lock: %v", err)
 	}
@@ -405,7 +404,7 @@ func TestReportLockStatus_StaleUnlockedAfterRelock_DesiredKept(t *testing.T) {
 	certCtx, fingerprint := makeCertCtx(t, "stale-unlock-agent")
 	registerDevice(t, db, "stale-unlock-agent", fingerprint)
 	gw := newGW(t, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	devID, _ := db.GetDeviceIDByFingerprint(ctx, fingerprint)
 
 	report := func(reqID string) {
@@ -479,8 +478,8 @@ func TestReportLockStatus_Unlocked(t *testing.T) {
 		t.Error("expected Received=true")
 	}
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	dev, _, _ := db.GetDevice(context.Background(), tenancy.DefaultTenantID, devID)
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	dev, _, _ := db.GetDevice(tenantCtx(), tenancy.DefaultTenantID, devID)
 	if dev.LockStatus != "unlocked" {
 		t.Errorf("LockStatus = %q, want unlocked", dev.LockStatus)
 	}
@@ -490,13 +489,13 @@ func TestReportLockStatus_Unlocked(t *testing.T) {
 // нет намеренно — UI-wiring это отдельный отложенный кусок).
 func readLockActual(t *testing.T, deviceID string) (state string, atSet bool) {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), sharedDSN)
+	pool, err := pgxpool.New(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("readLockActual pool: %v", err)
 	}
 	defer pool.Close()
 	var at *time.Time
-	if err := pool.QueryRow(context.Background(),
+	if err := pool.QueryRow(tenantCtx(),
 		`SELECT lock_actual_state, lock_actual_at FROM devices WHERE id = $1`, deviceID).
 		Scan(&state, &at); err != nil {
 		t.Fatalf("readLockActual: %v", err)
@@ -514,8 +513,8 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 	bot := newMockNotifier()
 	gw := newGWWithBot(t, db, bot)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-fv"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-fv"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -533,7 +532,7 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 	}
 
 	// desired ЦЕЛ: статус/хеш/причина не тронуты.
-	lockStatus, lockHash, lockReason, _, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, lockReason, _, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -546,7 +545,7 @@ func TestReportLockStatus_FilevaultRevoked_ActualOnly(t *testing.T) {
 		t.Errorf("actual = (%q, at set=%v), want (filevault_revoked, true)", state, atSet)
 	}
 	// Аудит есть (общая БД — фильтруем по target_id).
-	entries, _, err := db.ListAuditLog(context.Background(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "filevault_revoked"}, 100, 0)
+	entries, _, err := db.ListAuditLog(tenantCtx(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "filevault_revoked"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -576,8 +575,8 @@ func TestReportLockStatus_Unspecified_Dropped(t *testing.T) {
 	registerDevice(t, db, "unspec-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-u", "лок", "overlay", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-u", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -591,7 +590,7 @@ func TestReportLockStatus_Unspecified_Dropped(t *testing.T) {
 	if !resp.Received {
 		t.Error("expected Received=true (accept-and-drop)")
 	}
-	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -614,8 +613,8 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	registerDevice(t, db, "unknown-state-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-x", "лок", "overlay", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-x", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -631,7 +630,7 @@ func TestReportLockStatus_UnknownState_Dropped(t *testing.T) {
 	if !resp.Received {
 		t.Error("expected Received=true (accept-and-drop)")
 	}
-	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, _, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -653,8 +652,8 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 	bot := newMockNotifier()
 	gw := newGWWithBot(t, db, bot)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря устройства", "filevault", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -672,7 +671,7 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 	}
 
 	// desired ЦЕЛ (как и для FILEVAULT_REVOKED) — иначе агент самоотменил бы лок.
-	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -685,7 +684,7 @@ func TestReportLockStatus_FilevaultRevokeFailed_AuditedAndAlerted(t *testing.T) 
 		t.Errorf("actual = (%q, at set=%v), want (filevault_revoke_failed, true)", state, atSet)
 	}
 	// Аудит есть.
-	entries, _, err := db.ListAuditLog(context.Background(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "filevault_revoke_failed"}, 100, 0)
+	entries, _, err := db.ListAuditLog(tenantCtx(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "filevault_revoke_failed"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -718,8 +717,8 @@ func TestReportLockStatus_LockFailed_AuditedAndAlerted(t *testing.T) {
 	bot := newMockNotifier()
 	gw := newGWWithBot(t, db, bot)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-ov", "утеря устройства", "overlay", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-ov", "утеря устройства", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -737,7 +736,7 @@ func TestReportLockStatus_LockFailed_AuditedAndAlerted(t *testing.T) {
 	}
 
 	// desired ЦЕЛ: временный локальный сбой на устройстве НЕ снимает выданный лок.
-	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, lockReason, lockMode, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -748,7 +747,7 @@ func TestReportLockStatus_LockFailed_AuditedAndAlerted(t *testing.T) {
 	if state != "lock_failed" || !atSet {
 		t.Errorf("actual = (%q, at set=%v), want (lock_failed, true)", state, atSet)
 	}
-	entries, _, err := db.ListAuditLog(context.Background(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "lock_failed"}, 100, 0)
+	entries, _, err := db.ListAuditLog(tenantCtx(), tenancy.DefaultTenantID, storage.AuditFilter{Action: "lock_failed"}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -779,8 +778,8 @@ func TestReportLockStatus_Unlocked_IgnoredWhenFilevaultDesired(t *testing.T) {
 	registerDevice(t, db, "fv-unlock-guard-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "увольнение", "filevault", "lock-task-fv"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "увольнение", "filevault", "lock-task-fv"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 
@@ -798,7 +797,7 @@ func TestReportLockStatus_Unlocked_IgnoredWhenFilevaultDesired(t *testing.T) {
 	}
 
 	// desired FILEVAULT-лок ЦЕЛ: не понижен в unlocked/overlay.
-	lockStatus, lockHash, _, lockMode, _, err := db.GetDesiredLockState(context.Background(), devID)
+	lockStatus, lockHash, _, lockMode, _, err := db.GetDesiredLockState(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("GetDesiredLockState: %v", err)
 	}
@@ -815,8 +814,8 @@ func TestFetchLockStatus_FileVaultMode(t *testing.T) {
 	registerDevice(t, db, "fv-fetch-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря", "filevault", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-fv", "утеря", "filevault", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 	resp, err := gw.FetchLockStatus(certCtx, &pb.FetchLockStatusRequest{})
@@ -839,8 +838,8 @@ func TestFetchLockStatus_OverlayDefault(t *testing.T) {
 	registerDevice(t, db, "ov-fetch-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockState(context.Background(), tenancy.DefaultTenantID, devID, "locked", "hash-ov", "лок", "overlay", "lock-task-seed"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockState(tenantCtx(), tenancy.DefaultTenantID, devID, "locked", "hash-ov", "лок", "overlay", "lock-task-seed"); err != nil {
 		t.Fatalf("seed desired: %v", err)
 	}
 	resp, err := gw.FetchLockStatus(certCtx, &pb.FetchLockStatusRequest{})
@@ -860,8 +859,8 @@ func TestReportLockStatus_Locked_MirrorsActual(t *testing.T) {
 	registerDevice(t, db, "lock-actual-agent", fingerprint)
 	gw := newGW(t, db)
 
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fingerprint)
-	if err := db.SetDeviceLockActualState(context.Background(), devID, "filevault_revoked"); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fingerprint)
+	if err := db.SetDeviceLockActualState(tenantCtx(), devID, "filevault_revoked"); err != nil {
 		t.Fatalf("seed actual: %v", err)
 	}
 

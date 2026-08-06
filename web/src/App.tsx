@@ -29,6 +29,7 @@ import OIDC from "@/pages/OIDC"
 import SAML from "@/pages/SAML"
 import SIEM from "@/pages/SIEM"
 import Rollout from "@/pages/Rollout"
+import ScreenAccess from "@/pages/ScreenAccess"
 import Profile from "@/pages/Profile"
 import Tenants from "@/pages/Tenants"
 import AcrossTenants from "@/pages/AcrossTenants"
@@ -91,6 +92,7 @@ export default function App() {
           <Route path="sso" element={<AdminRoute><OIDC /></AdminRoute>} />
           <Route path="saml" element={<AdminRoute><SAML /></AdminRoute>} />
           <Route path="siem" element={<AdminRoute><SIEM /></AdminRoute>} />
+          <Route path="screen-access" element={<AdminRoute><ScreenAccess /></AdminRoute>} />
           <Route path="rollout" element={<Rollout />} />
           <Route path="profile" element={<Profile />} />
           <Route path="tenants" element={<ProviderRoute><Tenants /></ProviderRoute>} />

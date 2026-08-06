@@ -116,6 +116,22 @@ jobs:
       - name: install.sh — реконсиляция адресов и секретов
         run: bash scripts/test-install-readdress.sh
 
+      # Свежесть ТРЕКНУТЫХ установщиков. Отдельная поверхность от самообновления парка:
+      # install.sh/update.sh копируют эти файлы в releases/ безусловно, оттуда их отдаёт
+      # кнопка «Скачать MSI/PKG», и они же уезжают в публичный срез байт-в-байт. Парк при
+      # этом здоров и про них не знает — поэтому отставание ничем себя не проявляло.
+      # Поймано 05.08.2026: PKG был 2.6.0, MSI 2.5.9.0 с 03.08.
+      #
+      # Зависимости объявлены ЯВНО, как PyYAML у гарда доков выше: скрипт fail-closed и
+      # без инструментов отказывает, а не печатает «пропуск» с кодом 0. msitools читает
+      # ProductVersion из MSI, libarchive-tools (bsdtar) распаковывает xar-архив .pkg —
+      # GNU tar в образе xar не умеет.
+      - name: версии установщиков в репозитории == AGENT_VERSION
+        run: |
+          command -v msiinfo >/dev/null 2>&1 && command -v bsdtar >/dev/null 2>&1 \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq msitools libarchive-tools; }
+          bash scripts/check-installer-versions.sh
+
       - name: build
         run: go build ./...
 
@@ -125,64 +141,11 @@ jobs:
         run: |
           # -coverpkg=./... инструментирует все пакеты модуля при каждом тест-бинаре,
           # поэтому интеграционные тесты (gateway→storage и т.п.) считаются в агрегате.
-          # Из-за -coverpkg один и тот же файл/строка попадает в coverage.out НЕСКОЛЬКО
-          # раз (по разу на каждый тест-бинарь, который его инструментирует) — ниже
-          # блоки мержатся по (file:range) суммированием count ДО подсчёта процентов,
-          # иначе total задваивается/затраивается и проценты становятся бессмысленными.
           go test -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... ./...
-
-          # ── Aggregate 70% + per-package floor 55% (единый проход) ─────────
-          # Пакеты, где ветки физически недостижимы на linux CI, и инфра-пакеты
-          # без бизнес-логики исключаются из ОБОИХ гейтов (раньше исключения были
-          # только в per-package и не применялись к агрегату):
-          #   status   — windows DefaultPath + fs-error ветки Write
-          #   service  — launchd/SCM install paths
-          #   keystore — CGO Security.framework / Windows NCrypt
-          #   mailer   — SMTP без внешнего сервиса не тестируется
-          #   lockui   — X11-оверлей: захват клавиатуры и указателя, переподнятие
-          #              окна и выключение хранителя экрана требуют живого дисплея с
-          #              оконным менеджером, на раннере этих ветвей не существует
-          #   cmd/*, scripts/internal/* — main-пакеты утилит (bcrypthash — обёртка
-          #              вокруг bcrypt.GenerateFromPassword для стенда замка)
-          #   proto, testutil, node_modules — инфра/генерённый код
-          LC_ALL=C awk '
-            NR == 1 { next }
-            {
-              key = $1
-              stmt[key] = $2 + 0
-              cnt[key] += $3 + 0
-            }
-            END {
-              for (key in stmt) {
-                split(key, a, ":"); file = a[1]
-                n = split(file, p, "/"); pkg = ""
-                for (i = 1; i < n; i++) pkg = (pkg == "") ? p[i] : pkg "/" p[i]
-                total[pkg] += stmt[key]
-                if (cnt[key] > 0) covered[pkg] += stmt[key]
-              }
-              fail = 0
-              grand_total = 0; grand_covered = 0
-              for (pkg in total) {
-                if (total[pkg] == 0) continue
-                if (pkg ~ /\/(status|service|keystore|mailer|lockui)$/) continue
-                if (pkg ~ /\/(testutil|proto)$/) continue
-                if (pkg ~ /\/cmd\//) continue
-                if (pkg ~ /\/scripts\/internal\//) continue
-                if (pkg ~ /node_modules/) continue
-                grand_total += total[pkg]
-                grand_covered += covered[pkg]
-                pct = covered[pkg] / total[pkg] * 100
-                if (pct < 55) {
-                  printf "FAIL: %s %.1f%% < 55%% floor\n", pkg, pct
-                  fail = 1
-                }
-              }
-              agg = grand_covered / grand_total * 100
-              printf "Coverage aggregate (excl. platform/infra pkgs): %.1f%%\n", agg
-              if (agg < 70) { printf "FAIL: aggregate %.1f%% < 70%%\n", agg; fail = 1 }
-              else print "OK: aggregate gate passed"
-              exit fail
-            }' coverage.out
+          # Сам гейт — в scripts/coverage-gate.sh: джоб теперь два (open-core и
+          # enterprise), и держать двадцать строк awk в двух местах значит получить
+          # два РАЗНЫХ гейта при первой же правке исключений.
+          bash scripts/coverage-gate.sh coverage.out 70 55 "open-core"
 
   lint:
     name: golangci-lint
@@ -242,7 +205,11 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build -o installer/windows/agent.exe ./cmd/agent
+        # -H windowsgui — та же подсистема, что у боевого бинаря (Makefile build-win).
+        # Без неё exe получается консольным, cmd.exe его ДОЖИДАЕТСЯ, и шаг с uninstall.bat
+        # проверял бы поведение, которого в поле нет: там GUI-subsystem, и без start /wait
+        # батник уехал бы вперёд живого msiexec. Гейт обязан стоять на той же границе.
+        run: go build -ldflags "-H windowsgui" -o installer/windows/agent.exe ./cmd/agent
 
       - name: stub ca.crt для упаковки
         shell: pwsh
@@ -255,31 +222,43 @@ jobs:
 
       - name: wix build agent.msi
         # -arch x64: иначе пакет x86 и ProgramFiles64Folder уезжает в Program Files (x86).
-        run: wix build installer/windows/agent.wxs -arch x64 -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -d CaCert=installer/windows/ca.crt -o agent.msi
+        # UninstallBat — тот же файл, что кладёт боевой авторинг. Скрипт ручного снятия
+        # обязан приезжать НА ДИСК: пока его там не было, администратор искал его в
+        # исходниках и копировал из браузера, а копипаст ломает переносы строк.
+        run: wix build installer/windows/agent.wxs -arch x64 -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -d CaCert=installer/windows/ca.crt -d UninstallBat=build/msi/uninstall.bat -o agent.msi
 
       # До сих пор CI собирал ТОЛЬКО валидатор — файл, который никуда не едет.
       # Боевой авторинг (build/msi/mdm-agent.wxs, его собирает build-msi.ps1) не
       # проверялся ничем, хотя именно он уходит на парк: опечатка в нём всплывала
       # бы на релизной сборке, а не в PR. Нужен util-extension: боевой источник
       # зовёт WixQuietExec для enroll/uninstall.
-      # В публичном срезе боевого бинаря нет: build/msi/mdm-agent.exe — прод-артефакт,
-      # экспорт его не берёт. Собрать боевой авторинг там нечем, и шаг падал WIX0103
-      # на здоровом коде. Пропуск явный, с заметкой в логе.
       #
-      # 🔴 В ПОЛНОМ дереве этот шаг тоже красный, и это отдельный дефект (зона агента):
-      # wix резолвит пути из .wxs относительно текущего каталога, а icon.ico и
-      # mdm-agent.exe лежат в build/msi — нужен -bindpath. Здесь НЕ чиню вслепую:
-      # проверить можно только на windows-раннере.
+      # Шаг был красным с рождения (WIX0103), потом «позеленел» гардом
+      # `Test-Path build/msi/mdm-agent.exe` — и это была маскировка, а не починка:
+      # mdm-agent.exe нигде не трекается (его кладёт build-msi.ps1 локально), поэтому
+      # гард не срабатывал НИКОГДА, ни в срезе, ни в полном дереве. Зелёная джоба
+      # означала «шаг не выполнялся», а боевой авторинг по-прежнему не проверял никто.
+      #
+      # Чинится двумя вещами, обе обязательны:
+      #   -bindpath build/msi — wix резолвит SourceFile/Source из .wxs относительно
+      #     ТЕКУЩЕГО каталога, а icon.ico лежит рядом с .wxs;
+      #   Copy-Item — боевой .wxs берёт бинарь ЗАХАРДКОЖЕННЫМ именем
+      #     (`Source="mdm-agent.exe"`), а не через переменную, в отличие от валидатора
+      #     (`Source="$(var.AgentExe)"`). Поэтому -d AgentExe здесь ничего не значил и
+      #     убран как мёртвый: подставлять его в этом авторинге просто некуда.
+      # Расхождение «валидатор через переменную, боевой хардкодом» осталось; убирать
+      # его надо отдельно и осознанно, а не попутно с починкой CI.
+      #
+      # Гард убран целиком: после копирования бинарь есть в ЛЮБОМ репозитории, .wxs и
+      # icon.ico доезжают в срез вместе с остальным build/msi. То есть боевой авторинг
+      # теперь проверяется и в публичном репозитории тоже — раньше не проверялся нигде.
       - name: wix build боевого MSI (то, что реально едет в поле)
         shell: pwsh
         run: |
-          if (-not (Test-Path build/msi/mdm-agent.exe)) {
-            Write-Host "::notice::build/msi/mdm-agent.exe отсутствует (Free-срез) — боевой авторинг не собирается"
-            exit 0
-          }
+          Copy-Item installer/windows/agent.exe build/msi/mdm-agent.exe -Force
           wix extension add -g WixToolset.Util.wixext/4.0.5
           wix build build/msi/mdm-agent.wxs -arch x64 -ext WixToolset.Util.wixext `
-            -d Version=0.0.0 -d AgentExe=installer/windows/agent.exe -o prod-authoring.msi
+            -bindpath build/msi -d Version=0.0.0 -o prod-authoring.msi
 
       # UpgradeCode валидатора и боевого MSI обязаны РАЗЛИЧАТЬСЯ. Это не
       # придирка к стилю: совпади они — MSI, собранный в CI (другой профиль
@@ -340,6 +319,83 @@ jobs:
           if (Test-Path $exe) { throw "agent.exe остался после удаления: $exe" }
           Write-Host "OK: MSI удалён, файлы убраны"
 
+      # 🔴 Гейт полевого бага: ручное снятие обязано снимать РЕГИСТРАЦИЮ продукта, а
+      # установщик — не отдавать молча 0, когда ставить он ничего не будет.
+      #
+      # Почему здесь и почему на БОЕВОМ авторинге. Шаги выше гоняют валидатор
+      # (installer/windows/agent.wxs) с намеренно ДРУГИМ UpgradeCode — а подкоманда
+      # msi-unregister ищет продукт по боевому коду и валидатор не нашла бы вовсе. Кроме
+      # того, валидатор не кладёт uninstall.bat в тот же профиль и не имеет Launch-условий.
+      # То есть проверить это можно только на том авторинге, который реально едет в поле.
+      #
+      # Прогон идёт ПОСЛЕ снятия валидатора: оба ставят файлы в %ProgramFiles%\RoutineOps.
+      #
+      # Обе половины гейта красные на коде до этой правки:
+      #   - без вызова msi-unregister в батнике продукт остаётся в ARP (шаг 4);
+      #   - без второго Launch-условия повторный /i отдаёт 0 (шаг 3).
+      - name: гейт ручного снятия и повторной установки (боевой MSI)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rx = 'UpgradeCode="([0-9a-fA-F-]{36})"'
+          $uc = '{' + (Select-String -Path build/msi/mdm-agent.wxs -Pattern $rx).Matches[0].Groups[1].Value + '}'
+          function Get-RoProducts {
+            $inst = New-Object -ComObject WindowsInstaller.Installer
+            try { return @($inst.GetType().InvokeMember('RelatedProducts','GetProperty',$null,$inst,@($uc))) }
+            catch { return @() }
+          }
+          # Сервера нет: enroll упадёт, но EnrollExec помечен Return="ignore" — файлы лягут.
+          $props = @(
+            'ENROLL_URL="https://127.0.0.1:1/api/v1/enroll"','ENROLL_TOKEN="ci-token"',
+            'CA_URL="https://127.0.0.1:1/ca.crt"','CA_SHA256="00"','SERVER_ADDR="127.0.0.1:50051"')
+
+          # 1. чистая установка боевого пакета
+          $p = Start-Process msiexec -ArgumentList (@('/i','prod-authoring.msi','/qn','/l*v','prod-install.log') + $props) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content prod-install.log -Tail 40; throw "чистая установка боевого MSI: exit $($p.ExitCode)" }
+          $bat = Join-Path $Env:ProgramFiles 'RoutineOps\uninstall.bat'
+          if (-not (Test-Path $bat)) { throw "MSI не положил uninstall.bat: $bat" }
+
+          # 2. продукт зарегистрирован
+          if ((Get-RoProducts).Count -eq 0) { throw "продукт не зарегистрирован по UpgradeCode $uc — проверять нечего" }
+          Write-Host "OK: продукт зарегистрирован"
+
+          # 3. повтор /i с теми же свойствами обязан ОТКАЗАТЬ, а не отдать 0
+          $p = Start-Process msiexec -ArgumentList (@('/i','prod-authoring.msi','/qn','/l*v','repeat.log') + $props) -Wait -PassThru
+          if ($p.ExitCode -eq 0) {
+            throw "повторная установка поверх уже зарегистрированного продукта вернула 0: установщик снова молчит при нулевом результате"
+          }
+          if (-not (Select-String -Path repeat.log -Pattern 'REINSTALL=ALL REINSTALLMODE=vomus' -Quiet)) {
+            throw "отказ не содержит подсказки REINSTALL=ALL REINSTALLMODE=vomus — оператор получит голый код"
+          }
+          Write-Host "OK: повторная установка отклонена с внятным текстом (exit $($p.ExitCode))"
+
+          # 4. ручное снятие штатной процедурой обязано снять и регистрацию.
+          #    Пустая строка в stdin: в батнике есть pause, без неё шаг повис бы.
+          #    Вызов через `&`, а не `cmd /c "..."`: cmd срезает внешние кавычки, и путь
+          #    с пробелом («Program Files») развалился бы на два аргумента.
+          '' | & $bat
+          $batRC = $LASTEXITCODE
+          Write-Host "uninstall.bat завершился с кодом $batRC"
+          # Код возврата проверяем, а не печатаем: батник для того и переписан, чтобы
+          # «Готово» не печаталось при неполном снятии. 0 — готово; всё остальное здесь
+          # означает, что он сам сообщил о проблеме.
+          if ($batRC -ne 0) { throw "uninstall.bat отчитался о неполном снятии (код $batRC)" }
+          $left = Get-RoProducts
+          if ($left.Count -ne 0) {
+            throw "после uninstall.bat продукт всё ещё зарегистрирован ($($left -join ',')): следующая установка того же пакета уйдёт в режим обслуживания и молча ничего не сделает"
+          }
+          Write-Host "OK: регистрация снята вместе с файлами"
+
+          # 5. и теперь тот же пакет ставится как на чистую машину
+          $p = Start-Process msiexec -ArgumentList (@('/i','prod-authoring.msi','/qn','/l*v','again.log') + $props) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content again.log -Tail 40; throw "повторная установка после снятия: exit $($p.ExitCode)" }
+          $exe = Join-Path $Env:ProgramFiles 'RoutineOps\RoutineOps-agent.exe'
+          if (-not (Test-Path $exe)) { throw "после снятия и повторной установки бинаря нет: $exe" }
+          Write-Host "OK: после ручного снятия пакет ставится заново"
+
+          # 6. за собой убрать
+          Start-Process msiexec -ArgumentList '/x','prod-authoring.msi','/qn','/norestart' -Wait -PassThru | Out-Null
+
   # 🔴 ОТДЕЛЬНАЯ джоба, а не флаг к предыдущей. Enterprise-код и его тесты живут под
   # `//go:build enterprise`, и обычный `go test`/`golangci-lint` их НЕ КОМПИЛИРУЕТ.
   # То есть весь платный набор — SAML, SCIM, SIEM, эскроу, лицензия, FileVault, CVE,
@@ -396,11 +452,21 @@ jobs:
 
       # -p 1: пакеты по одному. Параллельные пакеты дерутся за общую тестовую БД и
       # дают «connection refused» на ровном месте, а мигающий гейт хуже медленного.
-      - name: test (enterprise)
+      - name: test (enterprise) + coverage gate
         if: steps.detect.outputs.present == 'true'
         env:
           TEST_POSTGRES_DSN: postgres://mdm:mdm@localhost:5432/mdm_test?sslmode=disable
-        run: go test -p 1 -tags enterprise ./internal/...
+        run: |
+          # 🔴 Покрытие ENTERPRISE-сборки не мерил никогда ни один гейт: он жил только в
+          # open-core джобе, где половины пакетов не существует вовсе. Менее
+          # протестированной оказывалась ровно та часть, за которую платят —
+          # internal/server/uninstall был на 0%, то есть не проверялся ничем.
+          #
+          # ./... , а не ./internal/... : -coverpkg считает по всему модулю, и урезанный
+          # набор пакетов дал бы агрегат, посчитанный по другому знаменателю, чем в
+          # open-core джобе. Пороги те же — расходиться им не с чего.
+          go test -p 1 -tags enterprise -coverprofile=coverage-ent.out -covermode=atomic -coverpkg=./... ./...
+          bash scripts/coverage-gate.sh coverage-ent.out 70 55 "enterprise"
 
       - name: golangci-lint (enterprise)
         if: steps.detect.outputs.present == 'true'
@@ -518,3 +584,18 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -o /dev/null ./cmd/agent
+
+      # То же самое, но с тегом enterprise. Без этого шага целый пласт платформенного
+      # кода не собирался НИ РАЗУ: удалённый стол лежит под `//go:build enterprise`,
+      # публикуемый windows-бинарь — free, а все остальные проверки собирают агента под
+      # хозяйскую ОС раннера (linux). Так и уехало столкновение имён `rect` с Win32-RECT,
+      # из-за которого enterprise-агент под Windows не компилировался вообще.
+      #
+      # В публичном репозитории enterprise-исходников нет, и шаг там просто собирает то
+      # же самое — он не требует их наличия и не падает от их отсутствия.
+      - name: build agent (enterprise) ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -tags enterprise -o /dev/null ./cmd/agent

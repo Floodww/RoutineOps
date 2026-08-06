@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,29 @@ import (
 	"github.com/Floodww/RoutineOps/internal/agent/service"
 	"github.com/Floodww/RoutineOps/internal/agent/tamper"
 )
+
+// runMSIUnregister снимает MSI-регистрацию агента (подкоманда msi-unregister) и
+// возвращает код выхода. Зовётся из build/msi/uninstall.bat ПОСЛЕ снятия службы и
+// процессов, но ДО сноса каталога установки — иначе звать уже нечего.
+//
+// Коды выхода — контракт с батником (decommission.UnregisterExit*): 0 — снято либо
+// снимать было нечего; 3 — снято, часть файлов уйдёт после перезагрузки; 1 — не
+// удалось, запись в «Установка и удаление программ» останется. Батник печатает исход
+// по коду и НЕ прерывает снос: остановиться на полпути хуже, чем доснести.
+func runMSIUnregister(log *slog.Logger) int {
+	res, err := decommission.UnregisterMSI(context.Background(), log)
+	if err != nil {
+		log.Error("снятие MSI-регистрации", slog.Any("error", err))
+		return decommission.UnregisterExitFailed
+	}
+	if !res.Found {
+		return decommission.UnregisterExitOK
+	}
+	if res.RebootNeeded {
+		return decommission.UnregisterExitReboot
+	}
+	return decommission.UnregisterExitOK
+}
 
 // runDecommission сносит агента с устройства по команде сервера. Вызывается из
 // runAgent уже после graceful-остановки рабочего цикла (executor подтвердил

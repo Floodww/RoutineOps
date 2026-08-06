@@ -79,7 +79,7 @@ func (db *DB) CreateAPIToken(ctx context.Context, tenantID, name, role, scope, c
 		defer finish(true)
 	}
 	var t APIToken
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO api_tokens (tenant_id, name, token_hash, role, scope, created_by, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, name, role, scope, created_by::text, created_at, expires_at, last_used_at
@@ -135,7 +135,7 @@ func (db *DB) ListAPITokens(ctx context.Context, tenantID string) ([]APIToken, e
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, name, role, scope, created_by::text, created_at, expires_at, last_used_at
 		FROM api_tokens WHERE tenant_id = $1 ORDER BY created_at DESC
 	`, tenantID)
@@ -172,7 +172,7 @@ func (db *DB) DeleteAPIToken(ctx context.Context, tenantID, id string) (bool, er
 		}
 		defer finish(true)
 	}
-	tag, err := db.Q(ctx).Exec(ctx, `DELETE FROM api_tokens WHERE tenant_id = $1 AND id::text = $2`, tenantID, id)
+	tag, err := db.Scoped(ctx).Exec(ctx, `DELETE FROM api_tokens WHERE tenant_id = $1 AND id::text = $2`, tenantID, id)
 	if err != nil {
 		return false, err
 	}

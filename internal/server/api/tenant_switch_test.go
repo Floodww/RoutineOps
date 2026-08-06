@@ -42,7 +42,7 @@ func addMembership(t *testing.T, db *storage.DB, email, tenantID, role string) {
 	if err != nil {
 		t.Fatalf("bind %s: %v", tenantID, err)
 	}
-	if _, err := db.Q(scoped).Exec(scoped, `
+	if _, err := db.Scoped(scoped).Exec(scoped, `
 		INSERT INTO users (name, email, role, tenant_id, identity_id)
 		VALUES ('Test User', $1, $2, $3, $4)`, email, role, tenantID, identity.ID); err != nil {
 		finish(false)

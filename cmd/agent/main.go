@@ -41,6 +41,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/agent/collector"
 	"github.com/Floodww/RoutineOps/internal/agent/command"
 	"github.com/Floodww/RoutineOps/internal/agent/config"
+	"github.com/Floodww/RoutineOps/internal/agent/decommission"
 	"github.com/Floodww/RoutineOps/internal/agent/enroll"
 	"github.com/Floodww/RoutineOps/internal/agent/heartbeat"
 	"github.com/Floodww/RoutineOps/internal/agent/inventory"
@@ -118,6 +119,18 @@ func main() {
 		os.Exit(runScreenWorker(os.Stderr, rest))
 	}
 
+	// msi-unregister разбирается ДО config.Load намеренно, и это не оптимизация.
+	// Её код возврата — единственный канал связи с uninstall.bat, и 2 там документирован
+	// как «старый exe не знает команды» (диспетчер ниже отвечает так на неизвестную
+	// команду). Но config.Load тоже выходит с 2 — на любой битой переменной окружения,
+	// например машинной ROUTINEOPS_*, оставшейся от прежней настройки. Свежий бинарь,
+	// прекрасно знающий команду, отдал бы 2, и батник посоветовал бы администратору
+	// снимать регистрацию вручную, назвав причиной несуществующую старую версию.
+	// Конфиг этой команде не нужен вовсе: продукт ищется по вшитому UpgradeCode.
+	if cmd == decommission.UnregisterSubcommand {
+		os.Exit(runMSIUnregister(log))
+	}
+
 	cfg, err := config.Load(flag.NewFlagSet("agent", flag.ContinueOnError), rest)
 	if err != nil {
 		log.Error("конфигурация", slog.Any("error", err))
@@ -191,6 +204,12 @@ func main() {
 			log.Error("удаление службы", slog.Any("error", err))
 			os.Exit(1)
 		}
+		// 🔴 Снять трей и оверлей ПОСЛЕ снятия службы и ДО того, как MSI пойдёт удалять
+		// файлы. Трей живёт в сессии пользователя, службой не является и после sc delete
+		// продолжает держать RoutineOps-agent.exe — а занятый файл Windows удалить не
+		// даёт. В поле это выглядело как «удалил агента, а каталог остался»: и у MSI, и
+		// у ручного rmdir. Вне Windows — no-op.
+		service.StopUserProcesses(log)
 		// Заодно подчистить следы прежних ручных установок (C:\mdm-extract) — best-effort.
 		service.RemoveLegacyArtifacts(log)
 		log.Info("служба удалена", slog.String("name", service.Name))
@@ -287,6 +306,9 @@ func printUsage(w io.Writer) {
   install         зарегистрировать и запустить системную службу (нужны root/админ)
   uninstall       снять службу
   cleanup-legacy  удалить следы прежних ручных установок (Windows: C:\mdm-extract)
+  msi-unregister  снять регистрацию установщика (Windows: msiexec /x по найденному
+                  продукту; на других ОС — no-op). Зовётся из uninstall.bat: без неё
+                  продукт остаётся числиться установленным при пустом диске
   request-admin   запросить временные права администратора
   diag            диагностика: конфиг, сертификат, (опц.) проба связи
   tray            иконка статуса в трее (Windows и macOS, per-user)

@@ -64,7 +64,7 @@ func (db *DB) CreatePendingDevice(ctx context.Context, tenantID, hostname, os st
 		defer finish(true)
 	}
 	var d Device
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO devices (tenant_id, hostname, os, status)
 		VALUES ($1, $2, $3, 'pending')
 		RETURNING id, hostname, os, COALESCE(os_version, ''), COALESCE(ip_address, ''),
@@ -87,7 +87,7 @@ func (db *DB) CreateEnrollmentToken(ctx context.Context, tenantID, deviceID, tok
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO enrollment_tokens (tenant_id, device_id, token_hash, expires_at)
 		SELECT $1, d.id, $3, $4 FROM devices d WHERE d.id = $2 AND d.tenant_id = $1
 	`, tenantID, deviceID, hashEnrollToken(token), expiresAt)
@@ -132,7 +132,7 @@ func (db *DB) CreateBulkEnrollmentToken(ctx context.Context, tenantID, token, gr
 	if groupID != "" {
 		gid = &groupID
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO enrollment_tokens (tenant_id, device_id, group_id, token_hash, max_uses, require_approval, expires_at)
 		VALUES ($1, NULL, $2, $3, $4, $5, $6)
 	`, tenantID, gid, hashEnrollToken(token), maxUses, requireApproval, expiresAt)
@@ -170,7 +170,7 @@ func (db *DB) ListBulkEnrollmentTokens(ctx context.Context, tenantID string) ([]
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT t.id::text, COALESCE(t.group_id::text, ''), COALESCE(g.name, ''),
 		       t.max_uses, t.uses, t.require_approval, t.expires_at, t.created_at
 		FROM enrollment_tokens t
@@ -217,7 +217,7 @@ func (db *DB) RevokeEnrollmentToken(ctx context.Context, tenantID, id string) (b
 		}
 		defer finish(true)
 	}
-	ct, err := db.Q(ctx).Exec(ctx,
+	ct, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE enrollment_tokens SET expires_at = now()
 		 WHERE id = $1 AND tenant_id = $2 AND expires_at > now()`, id, tenantID)
 	if err != nil {
@@ -261,7 +261,7 @@ func (db *DB) BeginBulkEnroll(ctx context.Context, tenantID, tokenID, hostname, 
 	}
 
 	var groupID *string
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		UPDATE enrollment_tokens SET uses = uses + 1
 		WHERE id = $1 AND tenant_id = $2 AND device_id IS NULL
 		  AND (max_uses IS NULL OR uses < max_uses)
@@ -275,14 +275,14 @@ func (db *DB) BeginBulkEnroll(ctx context.Context, tenantID, tokenID, hostname, 
 		return "", false, err
 	}
 
-	if err = db.Q(ctx).QueryRow(ctx,
+	if err = db.Scoped(ctx).QueryRow(ctx,
 		`INSERT INTO devices (tenant_id, hostname, os, status) VALUES ($1, $2, $3, 'pending') RETURNING id`,
 		tenantID, hostname, os).Scan(&deviceID); err != nil {
 		return "", false, err
 	}
 
 	if groupID != nil && *groupID != "" {
-		if _, err = db.Q(ctx).Exec(ctx,
+		if _, err = db.Scoped(ctx).Exec(ctx,
 			`INSERT INTO device_group_members (tenant_id, device_id, group_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
 			tenantID, deviceID, *groupID); err != nil {
 			return "", false, err
@@ -312,7 +312,7 @@ func (db *DB) FinalizeBulkEnroll(ctx context.Context, tenantID, deviceID, certSe
 	if requireApproval {
 		status = "pending_approval"
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		UPDATE devices SET status = $2, cert_serial = $3, enrolled_at = now(),
 		    certificate_fingerprint = COALESCE(NULLIF($4, ''), certificate_fingerprint)
 		WHERE id = $1 AND tenant_id = $5
@@ -335,7 +335,7 @@ func (db *DB) ApproveDevice(ctx context.Context, tenantID, deviceID string) (boo
 		}
 		defer finish(true)
 	}
-	ct, err := db.Q(ctx).Exec(ctx,
+	ct, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET status = 'active'
 		 WHERE id = $1 AND tenant_id = $2 AND status = 'pending_approval'`, deviceID, tenantID)
 	if err != nil {
@@ -359,7 +359,7 @@ func (db *DB) RejectDevice(ctx context.Context, tenantID, deviceID string) (bool
 		}
 		defer finish(true)
 	}
-	ct, err := db.Q(ctx).Exec(ctx,
+	ct, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET status = 'rejected'
 		 WHERE id = $1 AND tenant_id = $2 AND status = 'pending_approval'`, deviceID, tenantID)
 	if err != nil {
@@ -383,7 +383,7 @@ func (db *DB) ApprovePendingDevices(ctx context.Context, tenantID, groupID strin
 		}
 		defer finish(true)
 	}
-	ct, err := db.Q(ctx).Exec(ctx, `
+	ct, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE devices SET status = 'active'
 		WHERE tenant_id = $1 AND status = 'pending_approval'
 		  AND ($2 = '' OR id IN (
@@ -410,7 +410,7 @@ func (db *DB) RejectPendingDevices(ctx context.Context, tenantID, groupID string
 		}
 		defer finish(true)
 	}
-	ct, err := db.Q(ctx).Exec(ctx, `
+	ct, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE devices SET status = 'rejected'
 		WHERE tenant_id = $1 AND status = 'pending_approval'
 		  AND ($2 = '' OR id IN (
@@ -431,7 +431,7 @@ func (db *DB) GetActiveEnrollmentToken(ctx context.Context, tenantID, deviceID s
 	defer finish(false)
 
 	var t EnrollmentToken
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT id, device_id, expires_at, used_at, created_at
 		FROM enrollment_tokens
 		WHERE device_id = $1 AND used_at IS NULL AND expires_at > now()
@@ -491,7 +491,12 @@ func (db *DB) EnrollDevice(ctx context.Context, tokenID, deviceID, certSerial, c
 }
 
 func (db *DB) UpdatePendingDeviceInfo(ctx context.Context, deviceID, hostname, os string) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE devices SET
 		  hostname = CASE WHEN $2 != '' THEN $2 ELSE hostname END,
 		  os       = CASE WHEN $3 != '' THEN $3 ELSE os END

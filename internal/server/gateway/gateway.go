@@ -111,6 +111,17 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 	// возвращает её, фреймворк закрывает стрим и разблокирует зависший Recv.
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
+	// Тенант кладём ЗНАЧЕНИЕМ, а не транзакцией: стрим живёт часами, и BindTenant
+	// удерживал бы соединение из пула всё это время (см. scopeByFingerprint). Значения
+	// достаточно — storage открывает короткий скоуп на каждый запрос сам. Без него
+	// heartbeat, разбор pending-тасок и алерты уходили бы мимо тенанта: под FORCE RLS
+	// это ноль строк без ошибки, то есть «устройство на связи, но ничего не происходит».
+	tenantID, terr := g.tenantForFingerprint(ctx, fingerprint)
+	if terr != nil {
+		g.logger.Error("connect: lookup tenant", "device_id", deviceID, "err", terr)
+		return status.Errorf(codes.Internal, "lookup tenant: %v", terr)
+	}
+	ctx = storage.WithTenantID(ctx, tenantID)
 	done := make(chan error, 2)
 
 	go func() {
@@ -256,7 +267,10 @@ func (g *Gateway) reportOutboxHealth(ctx context.Context, fingerprint, deviceID 
 		sev := alerting.DefaultFor("outbox_unavailable")
 		text := notifier.HTMLf("%s <b>Агент ослеп: очередь отчётов недоступна</b>\nКритичность: %s\nУстройство: <code>%s</code>\nОтчёты, статусы лока и security-события с него НЕ доходят — тишина больше не значит «всё спокойно».\nПричина: %s",
 			alerting.Emoji(sev), alerting.Label(sev), hostname, detail)
-		go g.bot.NotifyAlert(context.Background(), sev, text)
+		// DetachTenant, а не context.Background(): отправка переживает запрос (ходит в
+		// сеть), но обязана остаться в тенанте устройства. Голый Background увёл бы
+		// уведомление про эту машину администраторам всех подразделений сразу.
+		go g.bot.NotifyAlert(storage.DetachTenant(ctx), sev, text)
 	}
 }
 
@@ -301,6 +315,9 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
 	}
+	// Тенант — в контекст, а не только в переменную: методы storage, которые его
+	// параметром не принимают, берут скоуп отсюда.
+	ctx = storage.WithTenantID(ctx, tenantID)
 	ctx = storage.WithTenantID(ctx, tenantID)
 
 	if req.DeviceInfo == nil {
@@ -343,6 +360,7 @@ func (g *Gateway) ReportInventory(ctx context.Context, req *pb.InventoryReport) 
 		DomainJoined:    req.DeviceInfo.DomainJoined,
 		TPM:             req.DeviceInfo.Tpm,
 		SecureBoot:      req.DeviceInfo.SecureBoot,
+		Capabilities:    req.DeviceInfo.Capabilities,
 		Software:        software,
 	}); err != nil {
 		g.logger.Error("upsert inventory", "device_id", deviceID, "err", err)
@@ -606,7 +624,7 @@ func (g *Gateway) ReportSecurityEvent(ctx context.Context, req *pb.SecurityEvent
 		severity := alerting.DefaultFor(alertType)
 		text := notifier.HTMLf("%s <b>Алерт безопасности</b>\nТип: %s\nКритичность: %s\nУстройство: <code>%s</code>\nДетали: %s",
 			alerting.Emoji(severity), alertLabel, alerting.Label(severity), hostname, req.Details)
-		go g.bot.NotifyAlert(context.Background(), severity, text)
+		go g.bot.NotifyAlert(storage.DetachTenant(ctx), severity, text)
 	}
 	return &pb.SecurityEventAck{Received: true}, nil
 }
@@ -657,6 +675,9 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
 	}
+	// Тенант — в контекст, а не только в переменную: методы storage, которые его
+	// параметром не принимают, берут скоуп отсюда.
+	ctx = storage.WithTenantID(ctx, tenantID)
 	// requested_by пустой ВСЕГДА: с миграции 038 владелец устройства — карточка человека
 	// (directory_persons), а не аккаунт панели, и ссылаться этому полю (FK→users) стало
 	// не на что. Заявка от этого не ломается — она и раньше оформлялась без владельца:
@@ -684,7 +705,7 @@ func (g *Gateway) RequestAdminAccess(ctx context.Context, req *pb.RequestAdminAc
 		}
 		text := notifier.HTMLf("🔐 <b>Заявка на права администратора</b>\nУстройство: <code>%s</code>\nПричина: %s\n\nОткройте панель MDM для рассмотрения заявки.",
 			hostname, reason)
-		go g.bot.NotifyITAdmins(context.Background(), text)
+		go g.bot.NotifyITAdmins(storage.DetachTenant(ctx), text)
 	}
 	return &pb.RequestAdminAccessResponse{
 		RequestId: row.ID,
@@ -708,6 +729,9 @@ func (g *Gateway) FetchAdminStatus(ctx context.Context, _ *pb.FetchAdminStatusRe
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup tenant: %v", err)
 	}
+	// Тенант — в контекст, а не только в переменную: методы storage, которые его
+	// параметром не принимают, берут скоуп отсюда.
+	ctx = storage.WithTenantID(ctx, tenantID)
 
 	collect, intervalSec := g.adminCollectFlags(ctx, tenantID)
 
@@ -895,6 +919,10 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 	if err != nil {
 		return nil, err
 	}
+	// Тенант в контекст: дальше идут SetDeviceLockActualState/UpdateDeviceLockStatus по
+	// таблице под RLS. Без этого отчёт агента о состоянии замка трогал бы ноль строк и
+	// возвращал бы «принято» — сервер считал бы устройство запертым, когда оно уже нет.
+	ctx = storage.WithTenantID(ctx, tenantID)
 	deviceID, err := g.db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil {
 		g.logger.Error("lock status: lookup device", "err", err)
@@ -933,7 +961,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🔐 <b>FileVault-лок: токен снят</b>\nУстройство: <code>%s</code>\nРебут ещё НЕ сделан — лок пока не эффективен.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyITAdmins(context.Background(), text)
+			go g.bot.NotifyITAdmins(storage.DetachTenant(ctx), text)
 		}
 		g.logger.Info("lock actual state updated", "device_id", deviceID, "state", "filevault_revoked", "details", req.Details)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
@@ -970,7 +998,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🛑 <b>FileVault-лок: revoke НЕ завершён</b>\nУстройство: <code>%s</code>\nДеструктив мог примениться ЧАСТИЧНО — требуется ручной разбор IT.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyAlert(context.Background(), alerting.DefaultFor("filevault_revoke_failed"), text)
+			go g.bot.NotifyAlert(storage.DetachTenant(ctx), alerting.DefaultFor("filevault_revoke_failed"), text)
 		}
 		g.logger.Warn("filevault revoke FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
@@ -997,7 +1025,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("⚠️ <b>Блокировка НЕ применена</b>\nУстройство: <code>%s</code>\nАгент не смог поднять лок и продолжает попытки — машина пока РАБОЧАЯ, хотя в панели помечена как заблокированная.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyITAdmins(context.Background(), text)
+			go g.bot.NotifyITAdmins(storage.DetachTenant(ctx), text)
 		}
 		g.logger.Warn("lock apply FAILED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
@@ -1036,7 +1064,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🔑 <b>FileVault-лок ждёт вооружения</b>\nУстройство: <code>%s</code>\nМашина НЕ тронута, лок НЕ применён: агенту нечем снять токен.\nДействие: выгрузите ключ из эскроу и вооружите лок (POST /devices/{id}/lock/arm).\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyITAdmins(context.Background(), text)
+			go g.bot.NotifyITAdmins(storage.DetachTenant(ctx), text)
 		}
 		g.logger.Warn("filevault lock NOT ARMED reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil
@@ -1078,7 +1106,7 @@ func (g *Gateway) ReportLockStatus(ctx context.Context, req *pb.ReportLockStatus
 			hostname, _ := g.db.GetDeviceHostname(ctx, deviceID)
 			text := notifier.HTMLf("🛑 <b>FileVault-лок: секрет не тот</b>\nУстройство: <code>%s</code>\nМашина НЕ тронута — расхождение поймано ДО деструктива.\nВооружили не тем секретом либо эскроу разъехалось.\nДействие: выгрузите АКТУАЛЬНУЮ строку эскроу и вооружите заново.\nДетали: %s",
 				hostname, req.Details)
-			go g.bot.NotifyAlert(context.Background(), alerting.DefaultFor("filevault_secret_mismatch"), text)
+			go g.bot.NotifyAlert(storage.DetachTenant(ctx), alerting.DefaultFor("filevault_secret_mismatch"), text)
 		}
 		g.logger.Warn("filevault SECRET MISMATCH reported", "device_id", deviceID, "details", req.Details, "request_id", req.RequestId)
 		return &pb.ReportLockStatusResponse{Received: true}, nil

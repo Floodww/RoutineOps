@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -15,7 +14,7 @@ import (
 // считаем внутри своей группы — иначе устройства соседних тестов ломают арифметику.
 func TestListEnrolledDevices_Pagination(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-page-"+suffix, "", "")
@@ -74,7 +73,7 @@ func TestListEnrolledDevices_Pagination(t *testing.T) {
 // страницы, интерфейс показывал бы совпадения только в пределах последних N записей.
 func TestListAuditLog_ServerSideFilters(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 	action := "PAGE_ACTION_" + suffix
 	alice := fmt.Sprintf("alice-%s@test.com", suffix)

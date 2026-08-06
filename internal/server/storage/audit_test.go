@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
@@ -13,7 +12,7 @@ func TestWriteAuditLog_NoError(t *testing.T) {
 	db := newDB(t)
 	u := mustCreateUser(t, db, fmt.Sprintf("audit-%s@test.com", uniq(t)))
 
-	err := db.WriteAuditLog(context.Background(),
+	err := db.WriteAuditLog(tenantCtx(),
 		u.ID, u.Email, "LOGIN", "user", u.ID,
 		map[string]string{"ip": "127.0.0.1"})
 	if err != nil {
@@ -23,7 +22,7 @@ func TestWriteAuditLog_NoError(t *testing.T) {
 
 func TestWriteAuditLog_NoUserID_NoError(t *testing.T) {
 	db := newDB(t)
-	err := db.WriteAuditLog(context.Background(),
+	err := db.WriteAuditLog(tenantCtx(),
 		"", "system", "STARTUP", "system", "", nil)
 	if err != nil {
 		t.Fatalf("WriteAuditLog (no user): %v", err)
@@ -35,9 +34,9 @@ func TestListAuditLog_ContainsWritten(t *testing.T) {
 	u := mustCreateUser(t, db, fmt.Sprintf("audit2-%s@test.com", uniq(t)))
 	action := fmt.Sprintf("TEST_ACTION_%s", uniq(t))
 
-	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, action, "device", "dev-1", nil)
+	_ = db.WriteAuditLog(tenantCtx(), u.ID, u.Email, action, "device", "dev-1", nil)
 
-	entries, _, err := db.ListAuditLog(context.Background(), tenancy.DefaultTenantID, storage.AuditFilter{Action: action}, 10, 0)
+	entries, _, err := db.ListAuditLog(tenantCtx(), tenancy.DefaultTenantID, storage.AuditFilter{Action: action}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}
@@ -58,10 +57,10 @@ func TestListAuditLog_FilterByAction_Isolates(t *testing.T) {
 	actionA := fmt.Sprintf("ACTION_A_%s", uniq(t))
 	actionB := fmt.Sprintf("ACTION_B_%s", uniq(t))
 
-	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, actionA, "x", "1", nil)
-	_ = db.WriteAuditLog(context.Background(), u.ID, u.Email, actionB, "x", "2", nil)
+	_ = db.WriteAuditLog(tenantCtx(), u.ID, u.Email, actionA, "x", "1", nil)
+	_ = db.WriteAuditLog(tenantCtx(), u.ID, u.Email, actionB, "x", "2", nil)
 
-	entries, _, err := db.ListAuditLog(context.Background(), tenancy.DefaultTenantID, storage.AuditFilter{Action: actionA}, 10, 0)
+	entries, _, err := db.ListAuditLog(tenantCtx(), tenancy.DefaultTenantID, storage.AuditFilter{Action: actionA}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditLog: %v", err)
 	}

@@ -39,7 +39,7 @@ func (db *DB) CreateOIDCProvider(ctx context.Context, tenantID, name, clientID, 
 		defer finish(true)
 	}
 	var id string
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO oidc_providers (tenant_id, name, client_id, client_secret, issuer_url, redirect_uri)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`,
@@ -63,7 +63,7 @@ func (db *DB) GetOIDCProvider(ctx context.Context, tenantID, id string) (*OIDCPr
 		defer finish(true)
 	}
 	p := &OIDCProvider{}
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT id, tenant_id, name, client_id, client_secret, issuer_url, redirect_uri, enabled, created_at
 		FROM oidc_providers
 		WHERE tenant_id = $1 AND id = $2`, tenantID, id,
@@ -103,7 +103,7 @@ func (db *DB) ListOIDCProviders(ctx context.Context, tenantID string) ([]OIDCPro
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, tenant_id, name, client_id, client_secret, issuer_url, redirect_uri, enabled, created_at
 		FROM oidc_providers
 		WHERE tenant_id = $1
@@ -145,13 +145,13 @@ func (db *DB) UpdateOIDCProvider(ctx context.Context, tenantID, id, name, client
 	}
 	var tag pgconn.CommandTag
 	if clientSecretEnc != "" {
-		tag, err = db.Q(ctx).Exec(ctx, `
+		tag, err = db.Scoped(ctx).Exec(ctx, `
 			UPDATE oidc_providers
 			SET name=$3, client_id=$4, client_secret=$5, issuer_url=$6, redirect_uri=$7, enabled=$8
 			WHERE tenant_id=$1 AND id=$2`,
 			tenantID, id, name, clientID, clientSecretEnc, issuerURL, redirectURI, enabled)
 	} else {
-		tag, err = db.Q(ctx).Exec(ctx, `
+		tag, err = db.Scoped(ctx).Exec(ctx, `
 			UPDATE oidc_providers
 			SET name=$3, client_id=$4, issuer_url=$5, redirect_uri=$6, enabled=$7
 			WHERE tenant_id=$1 AND id=$2`,
@@ -182,7 +182,7 @@ func (db *DB) DeleteOIDCProvider(ctx context.Context, tenantID, id string) error
 		}
 		defer finish(true)
 	}
-	tag, err := db.Q(ctx).Exec(ctx, `DELETE FROM oidc_providers WHERE tenant_id=$1 AND id=$2`, tenantID, id)
+	tag, err := db.Scoped(ctx).Exec(ctx, `DELETE FROM oidc_providers WHERE tenant_id=$1 AND id=$2`, tenantID, id)
 	if err != nil {
 		return err
 	}

@@ -70,7 +70,7 @@ func TestTenantBackfill_DefaultCoversExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind other: %v", err)
 	}
-	if _, err := db.Q(otherCtx).Exec(otherCtx, `
+	if _, err := db.Scoped(otherCtx).Exec(otherCtx, `
 		INSERT INTO users (name, email, role, tenant_id, identity_id)
 		VALUES ('B', $1, 'viewer', $2, $3)`, email, other, identityID); err != nil {
 		finish(false)

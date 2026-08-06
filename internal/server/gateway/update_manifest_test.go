@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func publishPair(t *testing.T, db *storage.DB, stableVer, betaVer string) (osNam
 	t.Helper()
 	osName = fmt.Sprintf("testos%d", time.Now().UnixNano())
 	arch = "amd64"
-	ctx := context.Background()
+	ctx := tenantCtx()
 	if err := db.RegisterAgentRelease(ctx, osName, arch, stableVer, "agent_stable", "sha-stable",
 		"sig", "msig", storage.ChannelStable); err != nil {
 		t.Fatalf("публикация stable: %v", err)
@@ -42,7 +41,7 @@ func publishPair(t *testing.T, db *storage.DB, stableVer, betaVer string) (osNam
 // putInChannel заводит группу нужного канала и кладёт в неё устройство.
 func putInChannel(t *testing.T, db *storage.DB, fingerprint, channel string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, err := db.GetDeviceIDByFingerprint(ctx, fingerprint)
 	if err != nil || deviceID == "" {
 		t.Fatalf("резолв устройства: id=%q err=%v", deviceID, err)

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
@@ -13,7 +12,7 @@ import (
 
 func bulkToken(t *testing.T, db *storage.DB, groupID string, maxUses *int, requireApproval bool, ttl time.Duration) *storage.EnrollmentToken {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	token := "bulk-" + uniq(t)
 	if err := db.CreateBulkEnrollmentToken(ctx, tenancy.DefaultTenantID, token, groupID, maxUses, requireApproval, time.Now().Add(ttl)); err != nil {
 		t.Fatalf("CreateBulkEnrollmentToken: %v", err)
@@ -27,7 +26,7 @@ func bulkToken(t *testing.T, db *storage.DB, groupID string, maxUses *int, requi
 
 func TestBulkEnroll_FullFlow_PendingApproval(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	tok := bulkToken(t, db, "", nil, true, time.Hour)
 	if tok.DeviceID != "" {
@@ -55,7 +54,7 @@ func TestBulkEnroll_FullFlow_PendingApproval(t *testing.T) {
 
 func TestBulkEnroll_NoApproval_GoesEnrolled(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := bulkToken(t, db, "", nil, false, time.Hour)
 
 	devID, requireApproval, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, tok.ID, "auto-host", "linux")
@@ -75,7 +74,7 @@ func TestBulkEnroll_NoApproval_GoesEnrolled(t *testing.T) {
 
 func TestBulkEnroll_MaxUsesLimit(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	max := 2
 	tok := bulkToken(t, db, "", &max, true, time.Hour)
 
@@ -92,7 +91,7 @@ func TestBulkEnroll_MaxUsesLimit(t *testing.T) {
 
 func TestBulkEnroll_Expired(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := bulkToken(t, db, "", nil, true, -time.Hour) // истёк
 
 	if _, _, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, tok.ID, "exp-h", "linux"); !errors.Is(err, storage.ErrEnrollTokenAlreadyUsed) {
@@ -102,7 +101,7 @@ func TestBulkEnroll_Expired(t *testing.T) {
 
 func TestBulkEnroll_GroupAssignment(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "bulk-grp-"+uniq(t), "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
@@ -133,7 +132,7 @@ func TestBulkEnroll_GroupAssignment(t *testing.T) {
 
 func TestApproveRejectDevice(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := bulkToken(t, db, "", nil, true, time.Hour)
 	mk := func(h string) string {
 		id, _, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, tok.ID, h, "linux")
@@ -173,7 +172,7 @@ func TestApproveRejectDevice(t *testing.T) {
 // эту дверь закрывал, а реенролл её не проверял вовсе и вдобавок не под requireHuman.
 func TestResetDeviceForReenroll_BlockedForTerminalStatuses(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := bulkToken(t, db, "", nil, true, time.Hour)
 
 	mk := func(h string) string {
@@ -233,7 +232,7 @@ func TestResetDeviceForReenroll_BlockedForTerminalStatuses(t *testing.T) {
 
 func TestApprovePendingDevices_BatchByGroup(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "batch-grp-"+uniq(t), "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
@@ -265,7 +264,7 @@ func TestApprovePendingDevices_BatchByGroup(t *testing.T) {
 // неодобренной машине через рутинный групповой скрипт.
 func TestScriptPush_GatedForPendingApproval(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "push-gate-grp-"+uniq(t), "", "")
 	if err != nil {
 		t.Fatalf("CreateDeviceGroup: %v", err)
@@ -312,7 +311,7 @@ func TestScriptPush_GatedForPendingApproval(t *testing.T) {
 // (group_id::text = $1, без каста ВХОДА в ::uuid) — иначе pg 22P02 → HTTP 500.
 func TestBatchApprove_GarbageGroupID_NoError(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	if n, err := db.RejectPendingDevices(ctx, tenancy.DefaultTenantID, "not-a-uuid"); err != nil || n != 0 {
 		t.Errorf("RejectPendingDevices(garbage): n=%d err=%v, want 0,nil", n, err)
 	}
@@ -325,7 +324,7 @@ func TestBatchApprove_GarbageGroupID_NoError(t *testing.T) {
 // decommissioned): устройство в очереди остаётся гейтнутым до явного одобрения.
 func TestBulkEnroll_HeartbeatDoesNotLiftPendingApproval(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tok := bulkToken(t, db, "", nil, true, time.Hour)
 	fp := "fp-hb-" + uniq(t)
 	devID, _, err := db.BeginBulkEnroll(ctx, tenancy.DefaultTenantID, tok.ID, "hb-host", "linux")
@@ -345,7 +344,7 @@ func TestBulkEnroll_HeartbeatDoesNotLiftPendingApproval(t *testing.T) {
 
 func TestBulkEnroll_TenantScopeFromToken(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	tenantB := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	if _, err := db.Pool().Exec(ctx,
 		`INSERT INTO tenants (id, name) VALUES ($1, 'B') ON CONFLICT DO NOTHING`, tenantB,

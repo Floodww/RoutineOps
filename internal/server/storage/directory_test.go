@@ -1,17 +1,17 @@
 package storage_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // Матч консольного юзера с каталогом: SID точный (rename-proof), логин — fallback,
 // disabled не матчится; перематч задним числом через ListDevicesForDirectoryMatch.
 func TestDirectory_MatchUpsertOwner(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	u := uniq(t)
 	guid := "guid-" + u
 	sid := "S-1-5-21-" + u
@@ -19,42 +19,42 @@ func TestDirectory_MatchUpsertOwner(t *testing.T) {
 	newSam := "ipetrov" + u
 
 	p := storage.DirectoryPerson{ObjectGUID: guid, ObjectSID: sid, SAMAccount: oldSam, DisplayName: "Иван Иванов", Email: "i@corp"}
-	if err := db.UpsertDirectoryPerson(ctx, p); err != nil {
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, p); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	// Идемпотентность + переименование: тот же object_guid, новый логин — не дубль, не падение.
 	p.SAMAccount = newSam
-	if err := db.UpsertDirectoryPerson(ctx, p); err != nil {
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, p); err != nil {
 		t.Fatalf("upsert (rename): %v", err)
 	}
 
-	pid, err := db.FindDirectoryPersonForMatch(ctx, sid, "")
+	pid, err := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, sid, "")
 	if err != nil || pid == "" {
 		t.Fatalf("match by SID: id=%q err=%v", pid, err)
 	}
 	// SID пуст → fallback по НОВОМУ логину.
-	if id, _ := db.FindDirectoryPersonForMatch(ctx, "", newSam); id != pid {
+	if id, _ := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, "", newSam); id != pid {
 		t.Errorf("match by renamed login: got %q want %q", id, pid)
 	}
 	// Старый логин уже не матчится (upsert по guid перезаписал sam) — это и есть rename-proof.
-	if id, _ := db.FindDirectoryPersonForMatch(ctx, "", oldSam); id != "" {
+	if id, _ := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, "", oldSam); id != "" {
 		t.Errorf("stale login matched: %q", id)
 	}
 	// Нет совпадений.
-	if id, _ := db.FindDirectoryPersonForMatch(ctx, "S-1-none-"+u, "nobody"+u); id != "" {
+	if id, _ := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, "S-1-none-"+u, "nobody"+u); id != "" {
 		t.Errorf("no match should be empty: %q", id)
 	}
 
 	// Disabled-персона не матчится ни по SID, ни по логину.
 	p.Disabled = true
-	if err := db.UpsertDirectoryPerson(ctx, p); err != nil {
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, p); err != nil {
 		t.Fatalf("upsert disabled: %v", err)
 	}
-	if id, _ := db.FindDirectoryPersonForMatch(ctx, sid, newSam); id != "" {
+	if id, _ := db.FindDirectoryPersonForMatch(ctx, tenancy.DefaultTenantID, sid, newSam); id != "" {
 		t.Errorf("disabled person matched: %q", id)
 	}
 	p.Disabled = false
-	if err := db.UpsertDirectoryPerson(ctx, p); err != nil {
+	if err := db.UpsertDirectoryPerson(ctx, tenancy.DefaultTenantID, p); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestDirectory_MatchUpsertOwner(t *testing.T) {
 	}
 
 	inList := func() bool {
-		list, err := db.ListDevicesForDirectoryMatch(ctx)
+		list, err := db.ListDevicesForDirectoryMatch(ctx, tenancy.DefaultTenantID)
 		if err != nil {
 			t.Fatalf("list for match: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestDirectory_MatchUpsertOwner(t *testing.T) {
 	}
 
 	// Проставили авто-владельца → устройство ушло из списка на перематч.
-	if err := db.SetDeviceOwnerDirectory(ctx, devID, pid); err != nil {
+	if err := db.SetDeviceOwnerDirectory(ctx, tenancy.DefaultTenantID, devID, pid); err != nil {
 		t.Fatalf("set owner: %v", err)
 	}
 	if inList() {

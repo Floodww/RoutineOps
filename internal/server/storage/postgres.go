@@ -70,7 +70,7 @@ func (db *DB) GetUserByEmailInTenant(ctx context.Context, tenantID, email string
 		defer finish(true)
 	}
 	var u User
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT id, identity_id, name, email, role, created_at
 		FROM users WHERE tenant_id = $1 AND email = $2
 	`, tenantID, email).Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
@@ -84,7 +84,12 @@ func (db *DB) GetUserByEmailInTenant(ctx context.Context, tenantID, email string
 }
 
 func (db *DB) GetITAdminsWithTelegramChatID(ctx context.Context) ([]string, error) {
-	rows, err := db.Q(ctx).Query(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT telegram_chat_id FROM users
 		WHERE role = 'it_admin' AND telegram_chat_id IS NOT NULL AND telegram_chat_id != ''`)
 	if err != nil {
@@ -118,7 +123,12 @@ type TelegramRecipient struct {
 // фильтр по severity было бы неверно — заявку нельзя «отфильтровать по важности»,
 // она либо рассматривается, либо истекает.
 func (db *DB) GetTelegramRecipients(ctx context.Context) ([]TelegramRecipient, error) {
-	rows, err := db.Q(ctx).Query(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT telegram_chat_id, COALESCE(notify_min_severity, '')
 		FROM users
 		WHERE role = 'it_admin' AND telegram_chat_id IS NOT NULL AND telegram_chat_id != ''`)
@@ -147,7 +157,7 @@ func (db *DB) GetUserNotifyMinSeverity(ctx context.Context, userID string) (stri
 	}
 	defer finish(true)
 	var s string
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT COALESCE(notify_min_severity, '') FROM users WHERE id = $1`, userID).Scan(&s)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -169,7 +179,7 @@ func (db *DB) SetUserNotifyMinSeverity(ctx context.Context, userID, minSeverity 
 		return err
 	}
 	defer finish(true)
-	tag, err := db.Q(ctx).Exec(ctx,
+	tag, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE users SET notify_min_severity = $1 WHERE id = $2`, minSeverity, userID)
 	if err != nil {
 		return err
@@ -181,24 +191,37 @@ func (db *DB) SetUserNotifyMinSeverity(ctx context.Context, userID, minSeverity 
 }
 
 func (db *DB) SetUserTelegramChatID(ctx context.Context, userID, chatID string) error {
-	_, err := db.Q(ctx).Exec(ctx,
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE users SET telegram_chat_id = $1 WHERE id = $2`, chatID, userID)
 	return err
 }
 
-func (db *DB) GetUserByLinkToken(ctx context.Context, token string) (*User, error) {
+// GetUserByLinkToken резолвит пользователя по токену привязки Telegram — ДО того, как
+// тенант известен. Токен приходит от Bot API, где нашей сессии нет вовсе, поэтому это
+// такой же pre-auth-резолв, как приглашение или сброс пароля: SECURITY DEFINER
+// auth_user_by_link_token (миграция 069), прямо через пул.
+//
+// Возвращает тенанта отдельным значением: вызывающий обязан выставить его в контекст
+// перед всеми последующими запросами (см. notifier.handleStart).
+func (db *DB) GetUserByLinkToken(ctx context.Context, token string) (*User, string, error) {
 	var u User
-	err := db.Q(ctx).QueryRow(ctx, `
-		SELECT id, identity_id, name, email, role, created_at
-		FROM users WHERE telegram_link_token = $1`, token).
-		Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
+	var tenantID string
+	err := db.pool.QueryRow(ctx, `
+		SELECT id, tenant_id::text, identity_id, name, email, role, created_at
+		FROM auth_user_by_link_token($1)`, token).
+		Scan(&u.ID, &tenantID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, "", nil
 		}
-		return nil, err
+		return nil, "", err
 	}
-	return &u, nil
+	return &u, tenantID, nil
 }
 
 // SetUserLinkToken ставит или снимает link-токен привязки Telegram.
@@ -215,9 +238,9 @@ func (db *DB) SetUserLinkToken(ctx context.Context, userID, token string) error 
 	defer finish(true)
 
 	if token == "" {
-		_, err = db.Q(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = NULL WHERE id = $1`, userID)
+		_, err = db.Scoped(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = NULL WHERE id = $1`, userID)
 	} else {
-		_, err = db.Q(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = $1 WHERE id = $2`, token, userID)
+		_, err = db.Scoped(ctx).Exec(ctx, `UPDATE users SET telegram_link_token = $1 WHERE id = $2`, token, userID)
 	}
 	return err
 }
@@ -229,7 +252,7 @@ func (db *DB) GetUserTelegramStatus(ctx context.Context, userID string) (chatID 
 	}
 	defer finish(true)
 
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT telegram_chat_id, telegram_link_token FROM users WHERE id = $1`, userID).
 		Scan(&chatID, &linkToken)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -252,7 +275,7 @@ func (db *DB) UpdateUser(ctx context.Context, tenantID, id, name, email string) 
 		defer finish(true)
 	}
 
-	res, err := db.Q(ctx).Exec(ctx, `
+	res, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE users
 		SET name = $1, email = $2
 		WHERE id = $3 AND tenant_id = $4
@@ -276,7 +299,7 @@ func (db *DB) GetDeviceHostname(ctx context.Context, deviceID string) (string, e
 	}
 	defer finish(true)
 	var hostname string
-	err = db.Q(ctx).QueryRow(ctx, `SELECT hostname FROM devices WHERE id = $1`, deviceID).Scan(&hostname)
+	err = db.Scoped(ctx).QueryRow(ctx, `SELECT hostname FROM devices WHERE id = $1`, deviceID).Scan(&hostname)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if len(deviceID) >= 8 {
 			return deviceID[:8], nil
@@ -308,7 +331,7 @@ func (db *DB) CreateUser(ctx context.Context, tenantID, name, email, passwordHas
 		return nil, err
 	}
 	var u User
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO users (tenant_id, identity_id, name, email, role)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, name, email, role, created_at
@@ -440,7 +463,7 @@ func (db *DB) UpsertDeviceHeartbeat(ctx context.Context, d HeartbeatData) error 
 	if tid, ok := TenantIDFrom(ctx); ok && tid != "" {
 		tenantID = tid
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO devices (hostname, os, ip_address, public_ip, status, certificate_fingerprint, cert_cn, last_seen_at,
 		                     outbox_unavailable, degraded_detail, degraded_since, tenant_id)
         VALUES ($1, 'unknown', $2, NULLIF($5,''), 'active', $3, $4, now(),
@@ -503,6 +526,21 @@ type InventoryData struct {
 	DomainJoined   string
 	TPM            string
 	SecureBoot     string
+
+	// Capabilities — что УМЕЕТ бинарь на устройстве сверх своей версии (миграция 067).
+	//
+	// Единственное поле инвентаря, которое пишется НЕ по sticky-паттерну, и это
+	// намеренно. Способности обязаны уметь СЖИМАТЬСЯ: агента могут понизить с
+	// enterprise-сборки на free той же версии, и тогда удалённого стола в нём физически
+	// нет (файлы вырезаны тегом сборки). Sticky-запись оставила бы `screen_session`
+	// навсегда, и сервер продолжил бы ставить сеансы агенту, который их не умеет, —
+	// то есть ровно тот исход, ради предотвращения которого гейт способностей и заведён
+	// (§9.17 контракта удалённого стола).
+	//
+	// Обратная сторона названа честно: агент старее поля не присылает ничего, и его
+	// список станет пустым. Это верный ответ — такой агент действительно не умеет
+	// ничего из перечисляемого здесь.
+	Capabilities []string
 }
 
 type HeartbeatData struct {
@@ -555,11 +593,13 @@ func (db *DB) UpsertInventory(ctx context.Context, d InventoryData) error {
 		    domain_joined = COALESCE(NULLIF($18,''), devices.domain_joined),
 		    tpm = COALESCE(NULLIF($19,''), devices.tpm),
 		    secure_boot = COALESCE(NULLIF($20,''), devices.secure_boot),
+		    capabilities = $22,
 		    last_seen_at = now()
 		WHERE certificate_fingerprint = $8
 		RETURNING id
 	`, d.Hostname, d.OS, d.OSVersion, d.CPU, d.RAM, d.Disk, d.IPAddress, d.CertFingerprint, d.MACAddress, d.SerialNumber, d.AgentVersion,
-		d.Arch, d.ConsoleUser, d.DiskEncryption, d.OSPatchDate, d.BootTime, d.DiskFree, d.DomainJoined, d.TPM, d.SecureBoot, d.ConsoleUserSid).
+		d.Arch, d.ConsoleUser, d.DiskEncryption, d.OSPatchDate, d.BootTime, d.DiskFree, d.DomainJoined, d.TPM, d.SecureBoot, d.ConsoleUserSid,
+		d.Capabilities).
 		Scan(&deviceID)
 	if err != nil {
 		return fmt.Errorf("update device: %w", err)
@@ -611,7 +651,7 @@ func (db *DB) GetDevice(ctx context.Context, tenantID, id string) (*Device, []So
 		defer finish(true)
 	}
 	var d Device
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   SELECT id, hostname, os, COALESCE(os_version, ''), COALESCE(ip_address, ''),
          status, COALESCE(lock_status, 'unlocked'), last_seen_at, created_at,
          COALESCE(cert_cn, ''), enrolled_at,
@@ -645,7 +685,7 @@ func (db *DB) GetDevice(ctx context.Context, tenantID, id string) (*Device, []So
 	}
 
 	d.Groups = []DeviceGroupRef{}
-	groups, err := db.Q(ctx).Query(ctx, `
+	groups, err := db.Scoped(ctx).Query(ctx, `
   SELECT g.id, g.name, g.color
   FROM device_group_members m
   JOIN device_groups g ON g.id = m.group_id
@@ -668,7 +708,7 @@ func (db *DB) GetDevice(ctx context.Context, tenantID, id string) (*Device, []So
 		return nil, nil, err
 	}
 
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
   SELECT software_name, COALESCE(version, ''), vendor, install_location, arch,
          uninstall_id, uninstall_method, scope
   FROM device_software WHERE device_id = $1
@@ -712,7 +752,7 @@ func (db *DB) SetDeviceOwnerPerson(ctx context.Context, tenantID, deviceID, pers
 	defer finish(true)
 	if personID != "" {
 		var personTenant string
-		err = db.Q(ctx).QueryRow(ctx, `SELECT tenant_id::text FROM directory_persons WHERE id = $1`, personID).Scan(&personTenant)
+		err = db.Scoped(ctx).QueryRow(ctx, `SELECT tenant_id::text FROM directory_persons WHERE id = $1`, personID).Scan(&personTenant)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return false, fmt.Errorf("person not found")
@@ -725,10 +765,10 @@ func (db *DB) SetDeviceOwnerPerson(ctx context.Context, tenantID, deviceID, pers
 	}
 	var tag pgconn.CommandTag
 	if personID == "" {
-		tag, err = db.Q(ctx).Exec(ctx,
+		tag, err = db.Scoped(ctx).Exec(ctx,
 			`UPDATE devices SET owner_directory_id = NULL WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID)
 	} else {
-		tag, err = db.Q(ctx).Exec(ctx,
+		tag, err = db.Scoped(ctx).Exec(ctx,
 			`UPDATE devices SET owner_directory_id = $3 WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID, personID)
 	}
 	if err != nil {
@@ -801,7 +841,7 @@ func (db *DB) CreateTask(ctx context.Context, deviceID, scriptContent, platform,
 		return nil, err
 	}
 	var t Task
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, tenant_id)
   SELECT $1, $2, $3, $4, 'pending', d.tenant_id FROM devices d WHERE d.id = $1 AND d.status = 'active'
   RETURNING id, device_id, script_content, platform, priority, status, created_at
@@ -825,7 +865,7 @@ func (db *DB) AckTask(ctx context.Context, taskID, deviceID string) error {
 		return err
 	}
 	defer finish(true)
-	tag, err := db.Q(ctx).Exec(ctx,
+	tag, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE tasks SET status = 'acked', acked_at = now() WHERE id = $1 AND device_id = $2`,
 		taskID, deviceID)
 	if err != nil {
@@ -863,7 +903,7 @@ func (db *DB) CompleteTask(ctx context.Context, taskID, deviceID, status, output
 		return "", "", err
 	}
 	defer finish(true)
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   UPDATE tasks t
   SET status = $3, output = $4, error_log = $5, completed_at = now()
   FROM tasks old
@@ -900,7 +940,12 @@ const StaleAckedTimeoutMinutes = 15
 // Порог считается в SQL (now() на стороне БД), чтобы не зависеть от часов и таймзоны
 // процесса: acked_at пишется тем же серверным now().
 func (db *DB) FailStaleAckedTasks(ctx context.Context, timeoutMinutes int) (int64, error) {
-	res, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return 0, scopeErr
+	}
+	defer finish(true)
+	res, err := db.Scoped(ctx).Exec(ctx, `
   UPDATE tasks
   SET status = 'failed',
       error_log = 'агент подтвердил получение, но не прислал результат (таймаут)',
@@ -916,8 +961,13 @@ func (db *DB) FailStaleAckedTasks(ctx context.Context, timeoutMinutes int) (int6
 }
 
 func (db *DB) GetDeviceCN(ctx context.Context, deviceID string) (string, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return "", scopeErr
+	}
+	defer finish(true)
 	var cn string
-	err := db.Q(ctx).QueryRow(ctx,
+	err := db.Scoped(ctx).QueryRow(ctx,
 		`SELECT COALESCE(cert_cn, '') FROM devices WHERE id = $1`, deviceID).Scan(&cn)
 	return cn, err
 }
@@ -935,7 +985,7 @@ func (db *DB) CreateLockTask(ctx context.Context, deviceID, lockHash, lockReason
 		return nil, err
 	}
 	var t Task
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, lock_hash, lock_reason, lock_unlock, lock_mode, tenant_id)
   SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'lock', $2, $3, $4, $5, d.tenant_id
   FROM devices d WHERE d.id = $1
@@ -965,7 +1015,12 @@ var ErrNoDesiredLock = errors.New("desired lock absent (lock_hash empty)")
 // придёт на несуществующее устройство — вызывающий (gateway) резолвит deviceID по
 // сертификату до вызова, так что различать эти случаи здесь незачем.
 func (db *DB) UpdateDeviceLockStatus(ctx context.Context, deviceID, lockStatus string) error {
-	tag, err := db.Q(ctx).Exec(ctx,
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	tag, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET lock_status = $2
 		 WHERE id = $1 AND ($2 <> 'locked' OR COALESCE(lock_hash, '') <> '')`, deviceID, lockStatus)
 	if err != nil {
@@ -996,7 +1051,7 @@ func (db *DB) CreateDecommissionTask(ctx context.Context, deviceID string) (*Tas
 		return nil, err
 	}
 	var t Task
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, tenant_id)
   SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'decommission', d.tenant_id
   FROM devices d WHERE d.id = $1
@@ -1042,7 +1097,7 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	}
 
 	var t Task
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds, tenant_id)
   SELECT $1, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'reboot', $2, $3, d.tenant_id
   FROM devices d WHERE d.id = $1
@@ -1056,7 +1111,7 @@ func (db *DB) CreateRebootTask(ctx context.Context, deviceID, reason string, del
 	}
 	// ON CONFLICT DO NOTHING → строк не вернулось: недоставленная заявка уже есть.
 	// Отдаём её, чтобы вызывающий не создал вторую перезагрузку под новым id.
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   SELECT `+cols+` FROM tasks
   WHERE device_id = $1 AND task_type = 'reboot' AND status = 'pending'`, deviceID), &t)
 	if err != nil {
@@ -1119,7 +1174,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	// списанной машины никуда не делся, и без этой проверки снос уехал бы на устройство,
 	// которое мы намеренно отрезали. Тот же гейт, что у скрипт-канала.
 	var active bool
-	if err := db.Q(ctx).QueryRow(ctx,
+	if err := db.Scoped(ctx).QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM devices WHERE id::text = $1 AND status = 'active')`, deviceID).Scan(&active); err != nil {
 		return nil, err
 	}
@@ -1131,7 +1186,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	// разных версий одного продукта в инвентаре может быть несколько. Пустой
 	// uninstall_id (macOS) сверяется как есть — там ключом служит install_location.
 	var tgt UninstallTarget
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   SELECT software_name, COALESCE(version, ''), uninstall_id, install_location, uninstall_method, scope
   FROM device_software
   WHERE device_id::text = $1 AND software_name = $2 AND uninstall_id = $3
@@ -1148,7 +1203,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 	}
 
 	var t Task
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type,
                      uninstall_software_name, uninstall_version, uninstall_uninstall_id,
                      uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason, tenant_id)
@@ -1166,7 +1221,7 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 		return nil, err
 	}
 	// ON CONFLICT DO NOTHING → строк нет: недоставленная заявка на эту цель уже есть.
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   SELECT `+cols+` FROM tasks
   WHERE device_id::text = $1 AND task_type = 'uninstall' AND status = 'pending'
     AND uninstall_software_name = $2 AND uninstall_uninstall_id = $3`,
@@ -1182,7 +1237,12 @@ func (db *DB) CreateUninstallTask(ctx context.Context, deviceID, softwareName, u
 // Незнакомое значение сохраняется как есть: сервер, не понимающий новый исход агента,
 // обязан его показать, а не отвергнуть.
 func (db *DB) SetTaskUninstallOutcome(ctx context.Context, taskID, deviceID, outcome string) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx, `
   UPDATE tasks SET uninstall_outcome = $3
   WHERE id::text = $1 AND device_id::text = $2 AND task_type = 'uninstall'`, taskID, deviceID, outcome)
 	return err
@@ -1194,10 +1254,15 @@ func (db *DB) SetTaskUninstallOutcome(ctx context.Context, taskID, deviceID, out
 // пропускаются (ON CONFLICT DO NOTHING) — повторный клик по группе не создаёт
 // вторую перезагрузку тем, кто ещё не получил первую.
 func (db *DB) FanOutRebootToGroup(ctx context.Context, groupID, reason string, delaySeconds int32) ([]Task, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
 	if delaySeconds < 0 {
 		delaySeconds = 0
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, reboot_delay_seconds)
   SELECT m.device_id, '', COALESCE(d.os, 'unknown'), 'high', 'pending', 'reboot', $2, $3
   FROM device_group_members m
@@ -1226,8 +1291,13 @@ func (db *DB) FanOutRebootToGroup(ctx context.Context, groupID, reason string, d
 // Нужен ДО веера: массовая перезагрузка требует потолка и подтверждения по
 // фактическому числу, а не по размеру группы вместе со списанными.
 func (db *DB) CountActiveDevicesInGroup(ctx context.Context, groupID string) (int, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return 0, scopeErr
+	}
+	defer finish(true)
 	var n int
-	err := db.Q(ctx).QueryRow(ctx, `
+	err := db.Scoped(ctx).QueryRow(ctx, `
   SELECT COUNT(*) FROM device_group_members m
   JOIN devices d ON d.id = m.device_id
   WHERE m.group_id = $1 AND d.status = 'active'`, groupID).Scan(&n)
@@ -1242,7 +1312,12 @@ func (db *DB) CountActiveDevicesInGroup(ctx context.Context, groupID string) (in
 // enrolled/pending) — списанная машина не оживает своим же прощальным heartbeat'ом.
 // Безусловный UPDATE: из любого статуса (active/blocked) → decommissioned терминален.
 func (db *DB) MarkDeviceDecommissioned(ctx context.Context, deviceID string) error {
-	_, err := db.Q(ctx).Exec(ctx,
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET status = 'decommissioned' WHERE id = $1`, deviceID)
 	return err
 }
@@ -1263,7 +1338,7 @@ func (db *DB) GetDeviceStatusByID(ctx context.Context, tenantID, id string) (str
 		defer finish(true)
 	}
 	var s string
-	err = db.Q(ctx).QueryRow(ctx, `SELECT status FROM devices WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&s)
+	err = db.Scoped(ctx).QueryRow(ctx, `SELECT status FROM devices WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&s)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -1278,7 +1353,7 @@ func (db *DB) GetDeviceLockStatus(ctx context.Context, deviceID string) (string,
 	defer finish(true)
 
 	var s string
-	err = db.Q(ctx).QueryRow(ctx, `SELECT lock_status FROM devices WHERE id = $1`, deviceID).Scan(&s)
+	err = db.Scoped(ctx).QueryRow(ctx, `SELECT lock_status FROM devices WHERE id = $1`, deviceID).Scan(&s)
 	return s, err
 }
 
@@ -1302,7 +1377,7 @@ func (db *DB) SetDeviceLockState(ctx context.Context, tenantID, deviceID, lockSt
 		return err
 	}
 	defer finish(true)
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET lock_status = $2, lock_hash = $3, lock_reason = $4, lock_mode = $5, lock_request_id = $6 WHERE id = $1`,
 		deviceID, lockStatus, lockHash, lockReason, lockMode, lockRequestID)
 	return err
@@ -1314,7 +1389,12 @@ func (db *DB) SetDeviceLockState(ctx context.Context, tenantID, deviceID, lockSt
 // сделан) не портил desired — иначе реконсайлер отменил бы/повторил бы деструктив
 // (класс полевого re-lock-бага).
 func (db *DB) SetDeviceLockActualState(ctx context.Context, deviceID, state string) error {
-	_, err := db.Q(ctx).Exec(ctx,
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET lock_actual_state = $2, lock_actual_at = now() WHERE id = $1`,
 		deviceID, state)
 	return err
@@ -1344,7 +1424,12 @@ const LockActualStateStarted = "filevault_revoke_failed"
 // сеттером. Если под тем же устройством выдали НОВЫЙ лок, полу-ревокнутость от
 // предыдущего никуда не делась и остаётся более важной правдой.
 func (db *DB) SetDeviceLockActualStateNoDowngrade(ctx context.Context, deviceID, state string) (bool, error) {
-	tag, err := db.Q(ctx).Exec(ctx,
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return false, scopeErr
+	}
+	defer finish(true)
+	tag, err := db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET lock_actual_state = $2, lock_actual_at = now()
 		 WHERE id = $1 AND COALESCE(lock_actual_state, '') <> $3`,
 		deviceID, state, LockActualStateStarted)
@@ -1365,7 +1450,7 @@ func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockSta
 	}
 	defer finish(true)
 
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT COALESCE(lock_status,''), COALESCE(lock_hash,''), COALESCE(lock_reason,''), COALESCE(NULLIF(lock_mode,''),'overlay'), COALESCE(lock_request_id,'') FROM devices WHERE id = $1`,
 		deviceID).Scan(&lockStatus, &lockHash, &lockReason, &lockMode, &lockRequestID)
 	return lockStatus, lockHash, lockReason, lockMode, lockRequestID, err
@@ -1376,8 +1461,13 @@ func (db *DB) GetDesiredLockState(ctx context.Context, deviceID string) (lockSta
 // его не содержит. Enterprise делает свой INSERT в recovery_key_escrow через DB.Pool().
 
 func (db *DB) GetTask(ctx context.Context, taskID string) (*Task, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
 	var t Task
-	err := db.Q(ctx).QueryRow(ctx, `
+	err := db.Scoped(ctx).QueryRow(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
          task_type, lock_hash, lock_reason, lock_unlock, lock_mode, reboot_reason, reboot_delay_seconds,
          uninstall_software_name, uninstall_version, uninstall_uninstall_id,
@@ -1427,7 +1517,7 @@ func (db *DB) ListPendingTasksWithDeviceCN(ctx context.Context, limit int) ([]Pe
 			return nil, err
 		}
 		remaining := limit - len(refs)
-		rows, err := db.Q(tctx).Query(tctx, `
+		rows, err := db.Scoped(tctx).Query(tctx, `
 		SELECT t.id, d.cert_cn
 		FROM tasks t
 		JOIN devices d ON d.id = t.device_id
@@ -1569,7 +1659,7 @@ func (db *DB) FetchPolicyRules(ctx context.Context, fingerprint string) (*Policy
 	}
 	defer finish(true)
 	if deviceID != nil {
-		if err := db.Q(ctx).QueryRow(ctx,
+		if err := db.Scoped(ctx).QueryRow(ctx,
 			`SELECT COALESCE(os, '') FROM devices WHERE id = $1`, id,
 		).Scan(&deviceOS); err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -1599,7 +1689,7 @@ func (db *DB) FetchPolicyRules(ctx context.Context, fingerprint string) (*Policy
 		args = append(args, *deviceID)
 	}
 
-	rows, err := db.Q(ctx).Query(ctx, query, args...)
+	rows, err := db.Scoped(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1669,7 +1759,7 @@ func (db *DB) UpdateDeviceStatus(ctx context.Context, tenantID, deviceID, status
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`UPDATE devices SET status = $3 WHERE id = $1 AND tenant_id = $2`, deviceID, tenantID, status)
 	return err
 }
@@ -1698,7 +1788,7 @@ func (db *DB) DeleteDevice(ctx context.Context, tenantID, id string) (found bool
 		}
 		defer finish(true)
 	}
-	q := db.Q(ctx)
+	q := db.Scoped(ctx)
 
 	// Тумбстоун серта ДО удаления, в ОДНОЙ транзакции с ним. Серт на машине остаётся
 	// валидным; без отзыва агент по нему переподключится и Connect заведёт устройство
@@ -1755,7 +1845,7 @@ func (db *DB) detectUnreachableDevicesForTenant(ctx context.Context, tenantID st
 		return 0, err
 	}
 	defer finish(true)
-	res, err := db.Q(ctx).Exec(ctx, `
+	res, err := db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO alerts (device_id, alert_type, details, severity, tenant_id)
 		SELECT d.id, 'agent_unreachable',
 		       'Не выходит на связь с ' || to_char(d.last_seen_at, 'YYYY-MM-DD HH24:MI'),
@@ -1840,7 +1930,7 @@ func (db *DB) CreateAlert(ctx context.Context, deviceID, alertType, details, adm
 	// переписывать критичность уже разобранных инцидентов задним числом.
 	severity := string(alerting.DefaultFor(alertType))
 	alertTenantID, _ := TenantIDFrom(ctx)
-	tag, err := db.Q(ctx).Exec(ctx, `
+	tag, err := db.Scoped(ctx).Exec(ctx, `
   INSERT INTO alerts (device_id, alert_type, details, admin_access_request_id, severity, tenant_id)
   SELECT $1::uuid, $2::text, $3::text,
     (SELECT r.id FROM admin_access_requests r WHERE r.id = $4::uuid AND r.device_id = $1::uuid),
@@ -1920,7 +2010,7 @@ func (db *DB) ListAlerts(ctx context.Context, tenantID, deviceID string, limit i
 		query += ` WHERE a.tenant_id = $1` + order + ` LIMIT $2`
 		args = append(args, limit)
 	}
-	rows, err := db.Q(ctx).Query(ctx, query, args...)
+	rows, err := db.Scoped(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1951,6 +2041,11 @@ func (db *DB) ListAlerts(ctx context.Context, tenantID, deviceID string, limit i
 //
 // afterMinutes<=0 выключает эскалацию. repeatMinutes<=0 = напомнить ровно один раз.
 func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinutes, repeatMinutes int) ([]Alert, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
 	if afterMinutes <= 0 {
 		return nil, nil
 	}
@@ -1960,7 +2055,7 @@ func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinu
 		// ниже пропустил бы вообще каждый алерт, включая agent_unreachable.
 		return nil, fmt.Errorf("escalation: unknown min severity %q", minSeverity)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		UPDATE alerts a SET escalated_at = now()
 		WHERE a.id IN (
 		  SELECT a2.id FROM alerts a2
@@ -1993,7 +2088,7 @@ func (db *DB) TakeEscalations(ctx context.Context, minSeverity string, afterMinu
 	// машины бесполезно — оператор не поймёт, куда идти.
 	for i := range out {
 		var hostname string
-		if err := db.Q(ctx).QueryRow(ctx,
+		if err := db.Scoped(ctx).QueryRow(ctx,
 			`SELECT COALESCE(hostname, '') FROM devices WHERE id = $1`, out[i].DeviceID).Scan(&hostname); err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return nil, err
@@ -2014,7 +2109,7 @@ func (db *DB) AcknowledgeAlert(ctx context.Context, tenantID, alertID string) er
 	}
 	defer finish(true)
 
-	tag, err := db.Q(ctx).Exec(ctx, `
+	tag, err := db.Scoped(ctx).Exec(ctx, `
     UPDATE alerts SET acknowledged_at = now()
     WHERE id = $1 AND acknowledged_at IS NULL`, alertID)
 	if err != nil {
@@ -2049,7 +2144,7 @@ func (db *DB) ListPolicyRules(ctx context.Context, tenantID string) ([]PolicyRul
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
   SELECT id, software_name, rule_type, device_id, group_id, platforms, updated_at
   FROM software_policy_rules WHERE tenant_id = $1 ORDER BY updated_at DESC
  `, tenantID)
@@ -2086,7 +2181,7 @@ func (db *DB) CreatePolicyRule(ctx context.Context, tenantID, softwareName, rule
 	if len(platforms) > 0 {
 		plat = platforms
 	}
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO software_policy_rules (tenant_id, software_name, rule_type, device_id, platforms)
   VALUES ($1, $2, $3, $4, $5)
   RETURNING id, software_name, rule_type, device_id, group_id, platforms, updated_at
@@ -2136,7 +2231,7 @@ func (db *DB) DeletePolicyRule(ctx context.Context, tenantID, id string) error {
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM software_policy_rules WHERE tenant_id = $1 AND id = $2`, tenantID, id)
+	_, err = db.Scoped(ctx).Exec(ctx, `DELETE FROM software_policy_rules WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	return err
 }
 
@@ -2178,7 +2273,7 @@ func (db *DB) ListSoftwarePolicyCompliance(ctx context.Context, tenantID string)
 	// Явный tenant_id в JOIN: под суперюзером (локальные/прод-тесты на роли mdm)
 	// FORCE RLS не режет строки, а ListEnrolledDevices уже фильтрует по tenant —
 	// без этого in_scope раздувается чужими тенантами (см. TestListSoftwarePolicyCompliance).
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		WITH scope AS (
 			SELECT r.id AS rule_id, r.rule_type, d.id AS device_id,
 			       EXISTS (
@@ -2270,7 +2365,7 @@ func (db *DB) ListSoftwarePolicyDeviceCompliance(ctx context.Context, tenantID, 
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT d.id, d.hostname, COALESCE(d.os, ''), d.status,
 		       m.software_name IS NOT NULL AS installed,
 		       COALESCE(m.software_name, ''), COALESCE(m.version, ''), COALESCE(m.scope, '')
@@ -2359,7 +2454,7 @@ func (db *DB) ListScriptPolicyCompliance(ctx context.Context, tenantID string) (
 		defer finish(true)
 	}
 	// Явный tenant_id: под суперюзером mdm FORCE RLS не режет (см. software compliance).
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		WITH latest AS (
 			SELECT DISTINCT ON (sr.device_id, sr.policy_id) sr.policy_id, sr.device_id, sr.exit_code
 			FROM script_results sr
@@ -2448,7 +2543,7 @@ func (db *DB) GetSystemSetting(ctx context.Context, tenantID, key string) (strin
 		defer finish(true)
 	}
 	var value string
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT value FROM system_settings
 		WHERE key = $1 AND tenant_id IN ($2::uuid, $3::uuid)
 		ORDER BY (tenant_id = $2::uuid) DESC
@@ -2476,7 +2571,7 @@ func (db *DB) SetSystemSetting(ctx context.Context, tenantID, key, value string)
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO system_settings (key, tenant_id, value)
 		VALUES ($1, $2::uuid, $3)
 		ON CONFLICT (key, tenant_id) DO UPDATE SET value = EXCLUDED.value
@@ -2484,11 +2579,38 @@ func (db *DB) SetSystemSetting(ctx context.Context, tenantID, key, value string)
 	return err
 }
 
+// CreateAdminAccessRequest заводит заявку сотрудника на временные права администратора.
+//
+// 🔴 Тенант биндится ЗДЕСЬ и tenant_id проставляется ЯВНО. До 04.08 не делалось ни
+// того, ни другого, и заявка сотрудника из трея не доезжала вовсе:
+//
+//   - скоупа вызывающий не открывал (шлюз только РЕЗОЛВИЛ тенанта по отпечатку, в
+//     отличие от соседнего ReportAdminAccess, который открывает скоуп), поэтому запрос
+//     уходил на соединение из пула без routineops.tenant_id;
+//   - tenant_id в INSERT не передавался и брался из DEFAULT миграции 045 — то есть
+//     ДЕФОЛТНЫЙ тенант, а не тенант устройства.
+//
+// На проде это два разных отказа. Мультитенантная установка: заявка ложится в чужой
+// тенант — своему администратору не видна, чужому видна. Обычная установка: у свежего
+// соединения GUC пуст, `WITH CHECK (tenant_id = current_setting(...)::uuid)` не
+// проходит, вставка отбивается — шлюз отдаёт агенту Internal, агент считает Internal
+// транзиентом и ретраит каждые 5 секунд ВЕЧНО, а сотруднику трей уже показал
+// «Запрос отправлен ✓».
+//
+// Соседняя FetchActiveAdminRequest всегда биндила тенанта сама — расхождение было
+// остатком, а не решением.
 func (db *DB) CreateAdminAccessRequest(ctx context.Context, deviceID, requestedBy, reason string, requestedAt, pendingExpiresAt time.Time) (*AdminAccessRequest, error) {
+	ctx, finish, err := db.BindTenantForDevice(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish(true)
+
 	var r AdminAccessRequest
-	err := db.Q(ctx).QueryRow(ctx, `
-		INSERT INTO admin_access_requests (device_id, requested_by, reason, requested_at, pending_expires_at)
-		VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5)
+	err = db.Scoped(ctx).QueryRow(ctx, `
+		INSERT INTO admin_access_requests (device_id, requested_by, reason, requested_at, pending_expires_at, tenant_id)
+		VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5,
+		        (SELECT tenant_id FROM devices WHERE id = $1))
 		RETURNING id, device_id, COALESCE(requested_by::text, ''), status, COALESCE(reason,''),
 		          requested_at, pending_expires_at, decided_by, decided_at, granted_at, expires_at, revoked_at
 	`, deviceID, requestedBy, reason, requestedAt, pendingExpiresAt).
@@ -2510,7 +2632,7 @@ func (db *DB) FetchActiveAdminRequest(ctx context.Context, deviceID string) (*Ad
 	defer finish(true)
 
 	var r AdminAccessRequest
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT id, device_id, COALESCE(requested_by::text, ''), status, COALESCE(reason,''),
 		       requested_at, pending_expires_at, decided_by, decided_at, granted_at, expires_at, revoked_at
 		FROM admin_access_requests
@@ -2538,14 +2660,30 @@ var ErrAdminRequestNotFound = errors.New("admin access request not found or alre
 // Возвращает ErrAdminRequestNotFound, если заявка не найдена / уже закрыта.
 // UpdateAdminAccessReport скоупит по device_id: без `AND device_id` любое устройство,
 // зная чужой request_id, могло отозвать выданный грант другого устройства (IDOR).
+//
+// 🔴 Q(ctx), а НЕ db.pool: admin_access_requests под FORCE RLS (миграция 046). Через
+// пул запрос уходил на СОСЕДНЕЕ соединение, где routineops.tenant_id не выставлен, и
+// предикат политики не совпадал ни с одной строкой — UPDATE трогал 0 строк, функция
+// возвращала ErrAdminRequestNotFound, а вызывающий по этой ошибке делает accept-and-drop.
+// То есть отчёт агента «локальный админ выдан / отозван» ТИХО терялся: в панели грант
+// оставался в прежнем состоянии, и разбирать инцидент было бы не по чему. На отравленном
+// соединении (GUC == ” после транзакционного set_config) тот же запрос падал бы в 22P02.
+// Вызывающий скоуп открывает сам (gateway.ReportAdminAccess → scopeByFingerprint), так
+// что достаточно перестать его игнорировать. Соседняя MarkAdminBaselineCaptured в этом
+// же потоке всегда ходила через Q(ctx) — расхождение было остатком, а не решением.
 func (db *DB) UpdateAdminAccessReport(ctx context.Context, requestID, deviceID, status string, occurredAt time.Time) error {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
 	var q string
 	if status == "approved" {
 		q = `UPDATE admin_access_requests SET granted_at = $2 WHERE id = $1 AND device_id = $3 AND granted_at IS NULL`
 	} else {
 		q = `UPDATE admin_access_requests SET status = 'revoked', revoked_at = $2 WHERE id = $1 AND device_id = $3`
 	}
-	tag, err := db.pool.Exec(ctx, q, requestID, occurredAt, deviceID)
+	tag, err := db.Scoped(ctx).Exec(ctx, q, requestID, occurredAt, deviceID)
 	if err != nil {
 		return err
 	}
@@ -2558,7 +2696,12 @@ func (db *DB) UpdateAdminAccessReport(ctx context.Context, requestID, deviceID, 
 // RespondToAdminRequest sets the IT admin's decision on a PENDING request.
 // expiresAt is only relevant for "approved" decisions.
 func (db *DB) RespondToAdminRequest(ctx context.Context, requestID, decision, decidedByUserID string, expiresAt *time.Time) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE admin_access_requests
 		SET status = $2, decided_by = $3, decided_at = now(), expires_at = $4
 		WHERE id = $1 AND status = 'pending'
@@ -2573,7 +2716,7 @@ func (db *DB) RevokeAdminAccessRequest(ctx context.Context, tenantID, requestID 
 	}
 	defer finish(true)
 
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`UPDATE admin_access_requests SET status = 'revoked', revoked_at = NOW()
    WHERE id = $1 AND status = 'approved'`,
 		requestID)
@@ -2583,7 +2726,12 @@ func (db *DB) RevokeAdminAccessRequest(ctx context.Context, tenantID, requestID 
 // ExpireStaleAdminRequests marks PENDING requests past their pending_expires_at
 // and APPROVED requests past their expires_at as EXPIRED.
 func (db *DB) ExpireStaleAdminRequests(ctx context.Context) (int64, error) {
-	result, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return 0, scopeErr
+	}
+	defer finish(true)
+	result, err := db.Scoped(ctx).Exec(ctx, `
 		UPDATE admin_access_requests
 		SET status = 'expired'
 		WHERE (status = 'pending' AND pending_expires_at < now())
@@ -2633,7 +2781,7 @@ func (db *DB) ListAdminAccessRequests(ctx context.Context, tenantID, statusFilte
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT r.id, r.device_id, COALESCE(d.hostname, ''), COALESCE(r.requested_by::text, ''), COALESCE(u.email, ''),
 		       r.status, COALESCE(r.reason, ''), r.requested_at, r.pending_expires_at,
 		       r.decided_at, r.granted_at, r.expires_at, r.revoked_at,
@@ -2692,7 +2840,7 @@ func (db *DB) ListScripts(ctx context.Context, tenantID string) ([]Script, error
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx,
+	rows, err := db.Scoped(ctx).Query(ctx,
 		`SELECT id, name, platform, content, created_at, updated_at FROM scripts
 		 WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
@@ -2739,7 +2887,7 @@ func (db *DB) CreateScript(ctx context.Context, tenantID, name, platform, conten
 		defer finish(true)
 	}
 	var s Script
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO scripts (tenant_id, name, platform, content)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, name, platform, content, created_at, updated_at
@@ -2767,7 +2915,7 @@ func (db *DB) GetScript(ctx context.Context, tenantID, id string) (*Script, erro
 	// id::text, а не id = $1: при кривом script_id (не UUID) сравнение с uuid-колонкой
 	// падает 22P02 → handler отдавал 500 вместо 404. Через ::text несуществующий/кривой
 	// id просто не находится → ErrNoRows → nil,nil → 404 (приём как у DeviceGroupExists).
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT id, name, platform, content, created_at, updated_at FROM scripts
 		 WHERE tenant_id = $1 AND id::text = $2`, tenantID, id).
 		Scan(&s.ID, &s.Name, &s.Platform, &s.Content, &s.CreatedAt, &s.UpdatedAt)
@@ -2794,7 +2942,7 @@ func (db *DB) UpdateScript(ctx context.Context, tenantID, id, name, platform, co
 		defer finish(true)
 	}
 	var s Script
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		UPDATE scripts SET name=$3, platform=$4, content=$5, updated_at=now()
 		WHERE tenant_id=$1 AND id=$2
 		RETURNING id, name, platform, content, created_at, updated_at
@@ -2825,7 +2973,7 @@ func (db *DB) DeleteScript(ctx context.Context, tenantID, id string) error {
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM scripts WHERE tenant_id = $1 AND id = $2`, tenantID, id)
+	_, err = db.Scoped(ctx).Exec(ctx, `DELETE FROM scripts WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	if errors.Is(wrapFKViolation(err), ErrForeignKeyViolation) {
 		return ErrScriptInUse
 	}
@@ -2862,7 +3010,7 @@ func (db *DB) ListScriptPolicies(ctx context.Context, tenantID string) ([]Script
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT p.id, p.name, p.script_id, COALESCE(s.name, ''), p.trigger_type,
 		       COALESCE(p.schedule_config::text, 'null'), COALESCE(p.event_trigger_config::text, 'null'),
 		       p.is_active, p.created_at,
@@ -2912,7 +3060,7 @@ func (db *DB) CreateScriptPolicy(ctx context.Context, tenantID, name, scriptID, 
 	var p ScriptPolicy
 	var schedRaw, eventRaw string
 	// Скрипт обязан быть того же тенанта — иначе INSERT молча связал бы политику A со скриптом B.
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO policies (tenant_id, name, script_id, trigger_type, schedule_config, event_trigger_config)
 		SELECT $1, $2, s.id, $4, $5::jsonb, $6::jsonb
 		FROM scripts s WHERE s.id = $3 AND s.tenant_id = $1
@@ -2945,7 +3093,7 @@ func (db *DB) DeleteScriptPolicy(ctx context.Context, tenantID, id string) error
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM policies WHERE tenant_id = $1 AND id = $2`, tenantID, id)
+	_, err = db.Scoped(ctx).Exec(ctx, `DELETE FROM policies WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	return err
 }
 
@@ -2968,7 +3116,7 @@ func (db *DB) UpdateScriptPolicy(ctx context.Context, tenantID, id, name, script
 	}
 	var p ScriptPolicy
 	var schedRaw, eventRaw string
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		UPDATE policies
 		SET    name = $3, script_id = $4, trigger_type = $5,
 		       schedule_config = $6::jsonb, event_trigger_config = $7::jsonb
@@ -3003,7 +3151,7 @@ func (db *DB) ToggleScriptPolicy(ctx context.Context, tenantID, id string, activ
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `UPDATE policies SET is_active=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, id, active)
+	_, err = db.Scoped(ctx).Exec(ctx, `UPDATE policies SET is_active=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, id, active)
 	return err
 }
 
@@ -3059,7 +3207,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context, tenantID string) ([]DeviceGr
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx,
+	rows, err := db.Scoped(ctx).Query(ctx,
 		`SELECT id, name, color, update_channel, created_at FROM device_groups
 		 WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
@@ -3090,7 +3238,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context, tenantID string) ([]DeviceGr
 		byID[groups[i].ID] = &groups[i]
 	}
 
-	members, err := db.Q(ctx).Query(ctx, `SELECT group_id, device_id FROM device_group_members WHERE tenant_id = $1`, tenantID)
+	members, err := db.Scoped(ctx).Query(ctx, `SELECT group_id, device_id FROM device_group_members WHERE tenant_id = $1`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -3108,7 +3256,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context, tenantID string) ([]DeviceGr
 		return nil, err
 	}
 
-	assignments, err := db.Q(ctx).Query(ctx, `SELECT group_id, policy_id FROM policy_assignments WHERE tenant_id = $1`, tenantID)
+	assignments, err := db.Scoped(ctx).Query(ctx, `SELECT group_id, policy_id FROM policy_assignments WHERE tenant_id = $1`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -3127,7 +3275,7 @@ func (db *DB) ListDeviceGroups(ctx context.Context, tenantID string) ([]DeviceGr
 	}
 
 	// Групповые софт-правила (#2): привязаны через software_policy_rules.group_id.
-	sw, err := db.Q(ctx).Query(ctx,
+	sw, err := db.Scoped(ctx).Query(ctx,
 		`SELECT group_id, id, software_name, rule_type FROM software_policy_rules
 		 WHERE tenant_id = $1 AND group_id IS NOT NULL`, tenantID)
 	if err != nil {
@@ -3174,7 +3322,7 @@ func (db *DB) CreateDeviceGroup(ctx context.Context, tenantID, name, color, chan
 		defer finish(true)
 	}
 	var g DeviceGroup
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`INSERT INTO device_groups (tenant_id, name, color, update_channel)
 		 VALUES ($1, $2, COALESCE(NULLIF($3, ''), $4), COALESCE(NULLIF($5, ''), $6))
 		 RETURNING id, name, color, update_channel, created_at`,
@@ -3210,7 +3358,7 @@ func (db *DB) UpdateDeviceGroup(ctx context.Context, tenantID, id, name, color, 
 		defer finish(true)
 	}
 	var g DeviceGroup
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		UPDATE device_groups
 		SET    name           = COALESCE(NULLIF($3, ''), name),
 		       color          = COALESCE(NULLIF($4, ''), color),
@@ -3248,7 +3396,7 @@ func (db *DB) DeviceGroupExists(ctx context.Context, tenantID, id string) (bool,
 	}
 	var exists bool
 	// id::text, а не id: кривой UUID из URL иначе даёт 22P02 и превращается в 500.
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM device_groups WHERE tenant_id = $1 AND id::text = $2)`,
 		tenantID, id).Scan(&exists)
 	return exists, err
@@ -3267,7 +3415,7 @@ func (db *DB) DeleteDeviceGroup(ctx context.Context, tenantID, id string) error 
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `DELETE FROM device_groups WHERE tenant_id=$1 AND id=$2`, tenantID, id)
+	_, err = db.Scoped(ctx).Exec(ctx, `DELETE FROM device_groups WHERE tenant_id=$1 AND id=$2`, tenantID, id)
 	return err
 }
 
@@ -3287,7 +3435,7 @@ func (db *DB) AddDeviceToGroup(ctx context.Context, tenantID, deviceID, groupID 
 		defer finish(true)
 	}
 	var ok bool
-	if err = db.Q(ctx).QueryRow(ctx, `
+	if err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM devices d
 		  JOIN device_groups g ON g.tenant_id = d.tenant_id
@@ -3298,7 +3446,7 @@ func (db *DB) AddDeviceToGroup(ctx context.Context, tenantID, deviceID, groupID 
 	if !ok {
 		return fmt.Errorf("%w: device_or_group", ErrForeignKeyViolation)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO device_group_members (tenant_id, device_id, group_id)
 		VALUES ($1, $2, $3)
 		ON CONFLICT DO NOTHING`, tenantID, deviceID, groupID)
@@ -3318,7 +3466,7 @@ func (db *DB) RemoveDeviceFromGroup(ctx context.Context, tenantID, deviceID, gro
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`DELETE FROM device_group_members WHERE tenant_id=$1 AND device_id=$2 AND group_id=$3`,
 		tenantID, deviceID, groupID)
 	return err
@@ -3338,7 +3486,7 @@ func (db *DB) AssignPolicyToGroup(ctx context.Context, tenantID, policyID, group
 		defer finish(true)
 	}
 	var ok bool
-	if err = db.Q(ctx).QueryRow(ctx, `
+	if err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM policies p
 		  JOIN device_groups g ON g.tenant_id = p.tenant_id
@@ -3349,7 +3497,7 @@ func (db *DB) AssignPolicyToGroup(ctx context.Context, tenantID, policyID, group
 	if !ok {
 		return fmt.Errorf("%w: policy_or_group", ErrForeignKeyViolation)
 	}
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO policy_assignments (tenant_id, policy_id, group_id)
 		VALUES ($1, $2, $3)
 		ON CONFLICT DO NOTHING`, tenantID, policyID, groupID)
@@ -3369,7 +3517,7 @@ func (db *DB) UnassignPolicyFromGroup(ctx context.Context, tenantID, policyID, g
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`DELETE FROM policy_assignments WHERE tenant_id=$1 AND policy_id=$2 AND group_id=$3`,
 		tenantID, policyID, groupID)
 	return err
@@ -3391,7 +3539,7 @@ func (db *DB) AssignSoftwarePolicyToGroup(ctx context.Context, tenantID, groupID
 		defer finish(true)
 	}
 	var r PolicyRuleRow
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO software_policy_rules (tenant_id, software_name, rule_type, group_id)
   SELECT $1, $3, $4, g.id FROM device_groups g WHERE g.id = $2 AND g.tenant_id = $1
   RETURNING id, software_name, rule_type, device_id, group_id, updated_at
@@ -3421,7 +3569,7 @@ func (db *DB) UnassignSoftwarePolicyFromGroup(ctx context.Context, tenantID, gro
 		}
 		defer finish(true)
 	}
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`DELETE FROM software_policy_rules WHERE tenant_id=$1 AND id=$2 AND group_id=$3`,
 		tenantID, ruleID, groupID)
 	return err
@@ -3443,7 +3591,12 @@ func (db *DB) UnassignSoftwarePolicyFromGroup(ctx context.Context, tenantID, gro
 // при рапорте «успех». Выравнивание этих двух семантик — открытый дизайн-вопрос (бэклог),
 // а не правка здесь: менять поведение без решения нельзя (тест закрепляет три-way).
 func (db *DB) FanOutScriptToGroup(ctx context.Context, groupID, scriptContent, platform, priority string) ([]Task, error) {
-	rows, err := db.Q(ctx).Query(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer finish(true)
+	rows, err := db.Scoped(ctx).Query(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status)
   SELECT m.device_id, $2, $3, $4, 'pending'
   FROM device_group_members m
@@ -3510,7 +3663,7 @@ func (db *DB) GetEffectiveScriptPoliciesForDevice(ctx context.Context, fingerpri
 		return nil, err
 	}
 	defer finish(true)
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT DISTINCT ON (p.id)
 		       p.id, p.name, s.content, s.platform, p.trigger_type,
 		       COALESCE(p.schedule_config->>'cron', ''),
@@ -3569,7 +3722,12 @@ type ScriptResultInput struct {
 }
 
 func (db *DB) SaveScriptResult(ctx context.Context, r ScriptResultInput) error {
-	_, err := db.Q(ctx).Exec(ctx, `
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	defer finish(true)
+	_, err := db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO script_results
 		       (policy_id, device_id, run_id, exit_code, stdout, stderr, trigger, started_at, finished_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
@@ -3611,7 +3769,7 @@ func (db *DB) ListScriptResultsByPolicy(ctx context.Context, tenantID, policyID 
 	}
 	defer finish(true)
 
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT r.id, r.policy_id, r.device_id, COALESCE(d.hostname, ''), r.run_id,
 		       r.exit_code, COALESCE(r.stdout, ''), COALESCE(r.stderr, ''), r.trigger,
 		       r.started_at, r.finished_at, r.created_at
@@ -3654,7 +3812,7 @@ func (db *DB) ListDeviceTasks(ctx context.Context, tenantID, deviceID string) ([
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
   SELECT id, device_id, script_content, platform, priority, status, output, error_log, created_at,
          task_type, uninstall_software_name, uninstall_version, uninstall_uninstall_id,
          uninstall_install_location, uninstall_method, uninstall_scope, uninstall_reason,
@@ -3745,7 +3903,7 @@ func (db *DB) ListEnrolledDevices(ctx context.Context, tenantID, query, groupID 
 	// Порядок дополнен id: last_seen_at у устройств одной волны раскатки совпадает
 	// с точностью до секунды, а нестабильный порядок постранично = строки, которые
 	// перепрыгивают со страницы на страницу и «пропадают» из выдачи.
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT d.id, d.hostname, d.os, COALESCE(d.os_version, ''), COALESCE(d.ip_address, ''),
 		       d.status, d.last_seen_at, d.created_at, COALESCE(d.agent_version, ''),
 		       COALESCE(d.mac_address, ''), COALESCE(d.serial_number, ''), COALESCE(d.public_ip, ''),
@@ -3805,7 +3963,7 @@ func (db *DB) attachDeviceGroups(ctx context.Context, devices []Device) error {
 	// транзакционного set_config(...,true) возвращается не в «не задан», а в '', и
 	// предикат 046 падает на ''::uuid. Итог на проде 30.07 — GET /api/v1/devices
 	// отдавал 500 для всей панели, хотя сам список устройств был корректен.
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT m.device_id, g.id, g.name, g.color
 		FROM device_group_members m
 		JOIN device_groups g ON g.id = m.group_id
@@ -3834,8 +3992,13 @@ func (db *DB) attachDeviceGroups(ctx context.Context, devices []Device) error {
 // LookupUserEmail возвращает email по PK без скоупа тенанта. Нужен reset-flow: JWT ещё нет,
 // а тенант неизвестен. Не использовать для panel list/get.
 func (db *DB) LookupUserEmail(ctx context.Context, id string) (string, bool, error) {
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return "", false, scopeErr
+	}
+	defer finish(true)
 	var email string
-	err := db.Q(ctx).QueryRow(ctx, `SELECT email FROM users WHERE id::text = $1`, id).Scan(&email)
+	err := db.Scoped(ctx).QueryRow(ctx, `SELECT email FROM users WHERE id::text = $1`, id).Scan(&email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -3864,7 +4027,7 @@ func (db *DB) GetUserByID(ctx context.Context, tenantID, id string) (*User, erro
 		defer finish(true)
 	}
 	var u User
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		SELECT id, identity_id, name, email, role, created_at FROM users
 		WHERE tenant_id = $1 AND id::text = $2
 	`, tenantID, id).Scan(&u.ID, &u.IdentityID, &u.Name, &u.Email, &u.Role, &u.CreatedAt)
@@ -3890,7 +4053,7 @@ func (db *DB) ListUsers(ctx context.Context, tenantID string) ([]User, error) {
 		}
 		defer finish(true)
 	}
-	rows, err := db.Q(ctx).Query(ctx, `
+	rows, err := db.Scoped(ctx).Query(ctx, `
 		SELECT id, identity_id, name, email, role, created_at FROM users
 		WHERE tenant_id = $1 ORDER BY created_at
 	`, tenantID)
@@ -3947,7 +4110,7 @@ func (db *DB) DeleteUser(ctx context.Context, tenantID, id string) (bool, error)
 		}
 		defer finish(true)
 	}
-	q := db.Q(ctx)
+	q := db.Scoped(ctx)
 
 	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(AdminGuardLockKey)); err != nil {
 		return false, err
@@ -4042,7 +4205,7 @@ func (db *DB) CreateInvitation(ctx context.Context, tenantID, email, role, token
 		defer finish(true)
 	}
 	var inv Invitation
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO invitation_tokens (tenant_id, email, role, token, invited_by)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, email, role, token, invited_by, created_at, expires_at, accepted_at
@@ -4081,7 +4244,7 @@ func (db *DB) AcceptInvitation(ctx context.Context, token string) error {
 		return err
 	}
 	defer finish(true)
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		UPDATE invitation_tokens SET accepted_at = now() WHERE token = $1
 	`, token)
 	return err
@@ -4113,7 +4276,7 @@ func (db *DB) CreatePasswordResetToken(ctx context.Context, userID, token string
 	}
 	defer finish(true)
 
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		INSERT INTO password_reset_tokens (user_id, token) VALUES ($1, $2)
 	`, userID, token)
 	return err
@@ -4147,7 +4310,7 @@ func (db *DB) MarkPasswordResetTokenUsed(ctx context.Context, token string) erro
 		return err
 	}
 	defer finish(true)
-	_, err = db.Q(ctx).Exec(ctx, `
+	_, err = db.Scoped(ctx).Exec(ctx, `
 		UPDATE password_reset_tokens SET used_at = now() WHERE token = $1
 	`, token)
 	return err
@@ -4157,6 +4320,14 @@ func (db *DB) MarkPasswordResetTokenUsed(ctx context.Context, token string) erro
 // — по dataRetentionDays; audit_log — по отдельному auditRetentionDays (журнал
 // безопасности хранится дольше). Для любого срока 0/отриц = хранить бессрочно.
 func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetentionDays int, archiveDir string) (int64, error) {
+	// Retention гоняется по тенантам (ForEachTenant в cmd/server), и скоуп обычно уже
+	// открыт выше. Свой открываем на случай прямого вызова: чистка мимо скоупа удалила
+	// бы ноль строк и отчиталась бы «удалено 0» — то есть выглядела бы как «мусора нет».
+	ctx, finish, _, scopeErr := db.scopeFor(ctx, "")
+	if scopeErr != nil {
+		return 0, scopeErr
+	}
+	defer finish(true)
 	var total int64
 	purge := func(table, extraWhere string, days int) error {
 		if days <= 0 {
@@ -4167,7 +4338,7 @@ func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetent
 		if extraWhere != "" {
 			q += ` AND ` + extraWhere
 		}
-		res, err := db.Q(ctx).Exec(ctx, q, cutoff)
+		res, err := db.Scoped(ctx).Exec(ctx, q, cutoff)
 		if err != nil {
 			return fmt.Errorf("cleanup %s: %w", table, err)
 		}
@@ -4207,6 +4378,13 @@ func (db *DB) CleanupOldData(ctx context.Context, dataRetentionDays, auditRetent
 	if err := purge("admin_session_changes", "", auditRetentionDays); err != nil {
 		return total, err
 	}
+	// Журнал ввода в сеансах с управлением — тоже по сроку аудита (§9.21 п.1 дословно).
+	// Не по DataRetentionDays и не по сроку записей сеансов: запись показывает, что было
+	// на экране, а этот журнал — что делал оператор под учётной записью сотрудника. Второе
+	// нужно в кадровом разборе ровно тогда, когда первое уже удалено ретеншеном записей.
+	if err := purge("screen_input_events", "", auditRetentionDays); err != nil {
+		return total, err
+	}
 	return total, nil
 }
 
@@ -4239,7 +4417,7 @@ func (db *DB) CreateFileVaultProvisionTask(ctx context.Context, deviceID, reason
 	}
 
 	var t Task
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   INSERT INTO tasks (device_id, script_content, platform, priority, status, task_type, reboot_reason, tenant_id)
   SELECT $1, '', COALESCE(d.os, 'unknown'), 'normal', 'pending', 'filevault_provision', $2, d.tenant_id
   FROM devices d WHERE d.id = $1
@@ -4251,7 +4429,7 @@ func (db *DB) CreateFileVaultProvisionTask(ctx context.Context, deviceID, reason
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	err = scan(db.Q(ctx).QueryRow(ctx, `
+	err = scan(db.Scoped(ctx).QueryRow(ctx, `
   SELECT `+cols+` FROM tasks
   WHERE device_id = $1 AND task_type = 'filevault_provision' AND status = 'pending'`, deviceID), &t)
 	if err != nil {

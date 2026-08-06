@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 // Теперь такая запись обязана считаться нарушением — при том что снять её нечем.
 func TestInventorySoftware_ScopeAndFields(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	inv := storage.InventoryData{
 		CertFingerprint: "fp-soft-scope",

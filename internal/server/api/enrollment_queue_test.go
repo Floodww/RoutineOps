@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -39,7 +38,7 @@ func setDeviceStatus(t *testing.T, db *storage.DB, tenantID, deviceID, status st
 		t.Fatalf("bind %s: %v", tenantID, err)
 	}
 	defer finish(true)
-	if _, err := db.Q(scoped).Exec(scoped,
+	if _, err := db.Scoped(scoped).Exec(scoped,
 		`UPDATE devices SET status = $2 WHERE id = $1`, deviceID, status); err != nil {
 		t.Fatalf("статус устройства %s: %v", deviceID, err)
 	}
@@ -54,7 +53,7 @@ func deviceStatus(t *testing.T, db *storage.DB, tenantID, deviceID string) strin
 	}
 	defer finish(true)
 	var status string
-	if err := db.Q(scoped).QueryRow(scoped,
+	if err := db.Scoped(scoped).QueryRow(scoped,
 		`SELECT status FROM devices WHERE id = $1`, deviceID).Scan(&status); err != nil {
 		t.Fatalf("чтение статуса %s: %v", deviceID, err)
 	}
@@ -235,7 +234,7 @@ func TestEnrollmentQueue_HumanGateOnApproveOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	secret := "rops_" + strings.Repeat("d", 40)
+	secret := serviceTokenSecret(t)
 	if _, err := db.CreateAPIToken(ctx, tenancy.DefaultTenantID,
 		"queue", "it_admin", "", svcUser.ID, secret, nil); err != nil {
 		t.Fatalf("CreateAPIToken: %v", err)

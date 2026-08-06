@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 // открываем собственное соединение на тот же DSN.
 func mustRuleWithDeviceAndGroup(t *testing.T, softwareName, deviceID, groupID string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	conn, err := pgx.Connect(ctx, sharedDSN)
 	if err != nil {
 		t.Fatalf("pgx.Connect: %v", err)
@@ -46,7 +45,7 @@ func mustRuleWithDeviceAndGroup(t *testing.T, softwareName, deviceID, groupID st
 // IP из TEST-NET-1 (192.0.2.0/24) — синтетика, как того требует leak-guard.
 func activeDevice(t *testing.T, db *storage.DB, name, os string, software ...string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-" + name
 	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, name, name, "192.0.2.10")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat %s: %v", name, err)
@@ -65,7 +64,7 @@ func activeDevice(t *testing.T, db *storage.DB, name, os string, software ...str
 // в выдаче всегда лежат ещё и правила соседних тестов — фильтруем по своему rule_id.
 func softwareCompliance(t *testing.T, db *storage.DB, ruleID string) storage.SoftwarePolicyCompliance {
 	t.Helper()
-	rows, err := db.ListSoftwarePolicyCompliance(context.Background(), tenancy.DefaultTenantID)
+	rows, err := db.ListSoftwarePolicyCompliance(tenantCtx(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListSoftwarePolicyCompliance: %v", err)
 	}
@@ -80,7 +79,7 @@ func softwareCompliance(t *testing.T, db *storage.DB, ruleID string) storage.Sof
 
 func scriptCompliance(t *testing.T, db *storage.DB, policyID string) storage.ScriptPolicyCompliance {
 	t.Helper()
-	rows, err := db.ListScriptPolicyCompliance(context.Background(), tenancy.DefaultTenantID)
+	rows, err := db.ListScriptPolicyCompliance(tenantCtx(), tenancy.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListScriptPolicyCompliance: %v", err)
 	}
@@ -105,7 +104,7 @@ func checkCompliance(t *testing.T, got storage.SoftwarePolicyCompliance, inScope
 
 func TestListSoftwarePolicyCompliance(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Глобальное правило по определению действует на ВЕСЬ парк, а парк в этом пакете —
 	// общая БД со всеми устройствами соседних тестов. Поэтому in_scope сверяем с реальным
@@ -312,7 +311,7 @@ func TestListSoftwarePolicyCompliance(t *testing.T) {
 
 func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Построчный разрез должен сходиться с агрегатом: нарушитель — с именем и версией
 	// совпавшего ПО, чистое устройство — installed=false с пустым совпадением.
@@ -407,7 +406,7 @@ func TestListSoftwarePolicyDeviceCompliance(t *testing.T) {
 // mustScriptPolicy создаёт скрипт + политику и возвращает id политики.
 func mustScriptPolicy(t *testing.T, db *storage.DB, suffix string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	scr, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "sc-comp-"+suffix, "linux", "echo hi")
 	if err != nil {
 		t.Fatalf("CreateScript: %v", err)
@@ -422,7 +421,7 @@ func mustScriptPolicy(t *testing.T, db *storage.DB, suffix string) string {
 func mustSaveResult(t *testing.T, db *storage.DB, policyID, deviceID string, exitCode int32) {
 	t.Helper()
 	now := time.Now()
-	if err := db.SaveScriptResult(context.Background(), storage.ScriptResultInput{
+	if err := db.SaveScriptResult(tenantCtx(), storage.ScriptResultInput{
 		PolicyID:   policyID,
 		DeviceID:   deviceID,
 		RunID:      "run-" + uniq(t),
@@ -437,7 +436,7 @@ func mustSaveResult(t *testing.T, db *storage.DB, policyID, deviceID string, exi
 
 func TestListScriptPolicyCompliance(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	// Устройство без результата — не «прошло» и не «упало», а Unknown: политика назначена,
 	// но агент ещё не отчитался. Схлопывать Unknown в Pass значило бы рисовать зелёный

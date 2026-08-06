@@ -208,6 +208,7 @@ func (h *Handler) jwtMiddleware(next http.Handler) http.Handler {
 				TokenScope: tok.Scope,
 				TenantID:   tok.TenantID,
 			})
+			ctx = storage.WithTenantID(ctx, tok.TenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -270,6 +271,12 @@ func (h *Handler) jwtMiddleware(next http.Handler) http.Handler {
 		claims.IdentityID = epoch.IdentityID
 		claims.IsProviderAdmin = epoch.IsProviderAdmin
 		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		// 🔴 Тенант кладётся в контекст ЗДЕСЬ, одним местом на все панельные ручки.
+		// Раньше это делали отдельные хендлеры (auditCtx в handler.go), и «забыл
+		// прокинуть» означало не отказ, а запрос мимо тенантского скоупа: под FORCE RLS
+		// UPDATE трогал ноль строк, а ручка отвечала 200. Значение берётся из
+		// epoch.TenantID — из БД на каждый запрос (ADR-6), а не из тела токена.
+		ctx = storage.WithTenantID(ctx, epoch.TenantID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -449,7 +456,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	// method в аудит: при разборе инцидента нужно знать, чем именно вошли — локальным
 	// паролем или доменным. По одной записи «login» это неразличимо, а вопрос первый.
-	h.audit(r.Context(), active.UserID, identity.Email, "login", "user", active.UserID,
+	// 🔴 Тенант в контекст ЯВНО: вход — единственное событие, которое случается ДО
+	// jwtMiddleware, то есть до того, как тенант попадает в контекст сам. Без этой
+	// строки запись о входе не ложилась в журнал вовсе (audit_log под RLS), и в
+	// журнале не было ровно того события, с которого начинается любой разбор.
+	auditCtx := storage.WithTenantID(r.Context(), active.TenantID)
+	h.audit(auditCtx, active.UserID, identity.Email, "login", "user", active.UserID,
 		map[string]any{"method": method, "tenants": len(memberships)})
 	writeJSON(w, http.StatusOK, loginResponse{Status: "ok"})
 }

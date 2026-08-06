@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -37,12 +36,12 @@ func TestGetTelegramStatus_Linked_Returns200(t *testing.T) {
 
 	// Set telegram_chat_id for the user created by authToken
 	email := "admin_" + t.Name() + "@test.com"
-	user, err := db.GetUserByEmailInTenant(context.Background(), tenancy.DefaultTenantID, email)
+	user, err := db.GetUserByEmailInTenant(tenantCtx(), tenancy.DefaultTenantID, email)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
 
-	err = db.SetUserTelegramChatID(context.Background(), user.ID, "12345")
+	err = db.SetUserTelegramChatID(tenantCtx(), user.ID, "12345")
 	if err != nil {
 		t.Fatalf("set chat id: %v", err)
 	}

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 
 func TestListScriptResultsByPolicy(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	scr, err := db.CreateScript(ctx, tenancy.DefaultTenantID, "res-script-"+uniq(t), "linux", "echo hi")
 	if err != nil {

@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"strings"
@@ -15,7 +14,7 @@ import (
 
 func TestFetchPolicyRules_GroupScope(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	// Устройство с отпечатком (FetchPolicyRules резолвит device по fingerprint).
@@ -95,7 +94,7 @@ func TestFetchPolicyRules_GroupScope(t *testing.T) {
 
 func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-assign-"+suffix, "", "")
@@ -155,7 +154,7 @@ func TestAssignUnassignSoftwarePolicyToGroup(t *testing.T) {
 
 func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-fanout-"+suffix, "", "")
@@ -215,7 +214,7 @@ func TestFanOutScriptToGroup_PlatformFilter(t *testing.T) {
 // оставляло версию прежней, агент видел Unchanged и вечно блокировал разрешённое ПО.
 func TestFetchPolicyRules_VersionTracksSetMembership(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	fp := "fp-ver-" + suffix
@@ -260,7 +259,7 @@ func TestFetchPolicyRules_VersionTracksSetMembership(t *testing.T) {
 
 func TestCreateDeviceGroup_DuplicateName(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	name := "grp-dup-" + uniq(t)
 
 	if _, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, name, "", ""); err != nil {
@@ -277,7 +276,7 @@ func TestCreateDeviceGroup_DuplicateName(t *testing.T) {
 // DEFAULT'ом колонки, иначе UI покрасит рамку в пустоту.
 func TestCreateDeviceGroup_Color(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	explicit, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-color-"+suffix, "#a1b2c3", "")
@@ -301,7 +300,7 @@ func TestCreateDeviceGroup_Color(t *testing.T) {
 // то, что человек поменял, и переименование не должно сбрасывать цвет (и наоборот).
 func TestUpdateDeviceGroup_PartialUpdate(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-upd-"+suffix, "#111111", "")
@@ -343,7 +342,7 @@ func TestUpdateDeviceGroup_PartialUpdate(t *testing.T) {
 // отдать 404. Сравнение идёт по id::text, поэтому мусор вместо UUID не даёт 22P02 → 500.
 func TestUpdateDeviceGroup_NotFound(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	for _, id := range []string{
 		"00000000-0000-0000-0000-000000000000",
@@ -363,7 +362,7 @@ func TestUpdateDeviceGroup_NotFound(t *testing.T) {
 // Переименование в уже занятое имя — конфликт, а не 500 от 23505.
 func TestUpdateDeviceGroup_DuplicateName(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	taken, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-taken-"+suffix, "", "")
@@ -387,7 +386,7 @@ func TestUpdateDeviceGroup_DuplicateName(t *testing.T) {
 // обязательна, а не косметика.
 func TestDeviceGroupColor_CheckConstraintRejectsGarbage(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	group, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-check-"+uniq(t), "#123abc", "")
 	if err != nil {
@@ -421,7 +420,7 @@ func TestDeviceGroupColor_CheckConstraintRejectsGarbage(t *testing.T) {
 // разных набора в одну версию, и агент навсегда оставался на старом (Unchanged).
 func TestFetchPolicyRules_VersionResistsSeparatorInjection(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	version := func(fp string) int64 {

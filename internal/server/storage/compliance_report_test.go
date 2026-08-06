@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 
 func complianceDevice(t *testing.T, db *storage.DB, suffix string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-compl-" + suffix
 	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "cn-compl-"+suffix, "cn-compl-"+suffix, "192.0.2.5")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
@@ -46,7 +45,7 @@ func TestComplianceReport_FreshDeviceIsCompliant(t *testing.T) {
 	db := newDB(t)
 	id := complianceDevice(t, db, uniq(t))
 
-	report, err := db.BuildComplianceReport(context.Background(), tenancy.DefaultTenantID, nil)
+	report, err := db.BuildComplianceReport(tenantCtx(), tenancy.DefaultTenantID, nil)
 	if err != nil {
 		t.Fatalf("BuildComplianceReport: %v", err)
 	}
@@ -63,7 +62,7 @@ func TestComplianceReport_FreshDeviceIsCompliant(t *testing.T) {
 // помечал «Compliant»: всё, что мы о ней знаем, устарело неделю назад.
 func TestComplianceReport_StaleDeviceIsFlagged(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	id := complianceDevice(t, db, uniq(t))
 
 	if _, err := db.Pool().Exec(ctx,
@@ -91,7 +90,7 @@ func TestComplianceReport_StaleDeviceIsFlagged(t *testing.T) {
 // версий эту причину НЕ выставляет: сравнивать не с чем, и обвинять парк не в чем.
 func TestComplianceReport_OutdatedAgent(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	id := complianceDevice(t, db, uniq(t))
 	if _, err := db.Pool().Exec(ctx,
 		`UPDATE devices SET agent_version = '2.0.0' WHERE id = $1`, id); err != nil {
@@ -130,7 +129,7 @@ func TestComplianceReport_OutdatedAgent(t *testing.T) {
 // Отчёт тенантный: чужие устройства в него не попадают.
 func TestComplianceReport_DoesNotCrossTenants(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	id := complianceDevice(t, db, uniq(t))
 
 	other := fmt.Sprintf("dddddddd-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)

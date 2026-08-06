@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
@@ -11,7 +10,7 @@ import (
 
 func TestDetectUnreachableDevices(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-unreach-" + uniq(t)
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
 		CertFingerprint: fp, DeviceID: "dev-unreach-" + uniq(t),
@@ -55,7 +54,7 @@ func TestDetectUnreachableDevices(t *testing.T) {
 // пропускает (alert старее last_seen), а cooldown должен подавить повторный alert.
 func TestDetectUnreachableDevices_CooldownSuppressesFlapping(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-flap-" + uniq(t)
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
 		CertFingerprint: fp, DeviceID: "dev-flap-" + uniq(t),
@@ -116,7 +115,7 @@ func TestDetectUnreachableDevices_CooldownSuppressesFlapping(t *testing.T) {
 
 func TestFetchPolicyRules_PlatformFilter(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-plat-" + uniq(t)
 	_ = db.UpsertDeviceHeartbeat(ctx, storage.HeartbeatData{
 		CertFingerprint: fp, DeviceID: "dev-plat-" + uniq(t),

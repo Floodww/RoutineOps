@@ -16,6 +16,7 @@ import (
 
 	"github.com/Floodww/RoutineOps/internal/server/alerting"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 )
 
 // HTMLf собирает текст сообщения для send() (parse_mode=HTML), экранируя КАЖДЫЙ
@@ -195,13 +196,46 @@ func (b *Bot) reply(chatID int64, text string) {
 	}
 }
 
-// NotifyITAdmins sends a message to all IT admins with a linked Telegram account.
+// inTenant выполняет fn под тенантским скоупом вызывающего — и ТОЛЬКО под ним.
+//
+// 🔴 Раньше здесь стоял обход всех тенантов инсталляции на случай непривязанного
+// контекста, и это была не подстраховка, а рабочий режим: все вызовы рассылки шли с
+// context.Background() (отправка живёт в detached-гоурутине и контекст запроса не
+// переживает). То есть уведомление о событии на устройстве одного подразделения
+// уходило администраторам ВСЕХ подразделений, и вместе с ним — имя хоста, тип
+// инцидента и детали.
+//
+// Теперь непривязанный контекст — отказ, а не режим. Fail-closed выбран сознательно:
+// забытая точка вызова перестаёт слать уведомление и оставляет громкую строку в логе,
+// тогда как fail-open отправлял бы его чужим администраторам молча. Уведомлений,
+// адресованных инсталляции целиком, в продукте нет — все до одного рождаются на
+// конкретном устройстве, а значит тенант в этот момент известен всегда.
+func (b *Bot) inTenant(ctx context.Context, fn func(context.Context) error) error {
+	// Порядок проверок: транзакция скоупа доказывает привязку сильнее, чем id в
+	// значениях контекста, и при ней fn пойдёт в уже открытый скоуп.
+	if _, ok := storage.TxFrom(ctx); ok {
+		return fn(ctx)
+	}
+	if id, ok := storage.TenantIDFrom(ctx); ok && id != "" {
+		return fn(ctx)
+	}
+	return fmt.Errorf("рассылка без тенантского скоупа: %w", tenancy.ErrTenantScopeMissing)
+}
+
+// NotifyITAdmins рассылает сообщение IT-админам ТОГО ЖЕ ТЕНАНТА, что и контекст.
 // Runs synchronously — call with `go` if you don't want to block.
+//
+// Контекст обязан нести тенанта: из хендлера его переносит storage.DetachTenant.
 func (b *Bot) NotifyITAdmins(ctx context.Context, text string) {
 	if b == nil {
 		return // бот не сконфигурён (нет токена) — уведомления просто отключены
 	}
-	chatIDs, err := b.db.GetITAdminsWithTelegramChatID(ctx)
+	var chatIDs []string
+	err := b.inTenant(ctx, func(tctx context.Context) error {
+		ids, err := b.db.GetITAdminsWithTelegramChatID(tctx)
+		chatIDs = append(chatIDs, ids...)
+		return err
+	})
 	if err != nil {
 		b.logger.Error("telegram: get IT admins", "err", err)
 		return
@@ -217,8 +251,11 @@ func (b *Bot) NotifyITAdmins(ctx context.Context, text string) {
 	}
 }
 
-// NotifyAlert рассылает уведомление об алерте, уважая порог доставки каждого
-// получателя (users.notify_min_severity, миграция 041).
+// NotifyAlert рассылает уведомление об алерте получателям ТОГО ЖЕ ТЕНАНТА, что и
+// контекст, уважая порог доставки каждого из них (users.notify_min_severity,
+// миграция 041).
+//
+// Контекст обязан нести тенанта: из хендлера его переносит storage.DetachTenant.
 //
 // Отдельно от NotifyITAdmins намеренно: у части уведомлений критичности нет вообще
 // (заявка на права администратора, служебные сообщения бота), и фильтровать их по
@@ -232,7 +269,12 @@ func (b *Bot) NotifyAlert(ctx context.Context, severity alerting.Severity, text 
 	if b == nil {
 		return // бот не сконфигурён (нет токена) — уведомления просто отключены
 	}
-	recipients, err := b.db.GetTelegramRecipients(ctx)
+	var recipients []storage.TelegramRecipient
+	err := b.inTenant(ctx, func(tctx context.Context) error {
+		rs, err := b.db.GetTelegramRecipients(tctx)
+		recipients = append(recipients, rs...)
+		return err
+	})
 	if err != nil {
 		b.logger.Error("telegram: get alert recipients", "severity", string(severity), "err", err)
 		return
@@ -328,7 +370,7 @@ func (b *Bot) StartPolling(ctx context.Context) {
 }
 
 func (b *Bot) handleStart(ctx context.Context, chatID int64, token string) {
-	user, err := b.db.GetUserByLinkToken(ctx, token)
+	user, tenantID, err := b.db.GetUserByLinkToken(ctx, token)
 	if err != nil {
 		b.logger.Error("telegram: lookup link token", "err", err)
 		b.reply(chatID, "Ошибка сервера. Попробуйте позже.")
@@ -338,6 +380,10 @@ func (b *Bot) handleStart(ctx context.Context, chatID int64, token string) {
 		b.reply(chatID, "❌ Токен не найден или уже использован. Сгенерируйте новый в панели RoutineOps.")
 		return
 	}
+	// Тенант известен только отсюда: токен приходит из мессенджера, где сессии нет.
+	// Дальше идут записи в users (под RLS) — без этой строки они трогали бы ноль строк,
+	// и бот отвечал бы «подключено», ничего не подключив.
+	ctx = storage.WithTenantID(ctx, tenantID)
 	if err := b.db.SetUserTelegramChatID(ctx, user.ID, strconv.FormatInt(chatID, 10)); err != nil {
 		b.logger.Error("telegram: set chat_id", "err", err)
 		b.reply(chatID, "Ошибка сохранения. Попробуйте ещё раз.")

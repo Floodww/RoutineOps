@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -13,7 +12,7 @@ import (
 // как это делает живой инвентарь.
 func deviceWithAgentVersion(t *testing.T, db *storage.DB, name, agentVersion string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := fmt.Sprintf("fp-%s-%s", name, uniq(t))
 	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, name, name, "192.0.2.11")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
@@ -35,7 +34,7 @@ func deviceWithAgentVersion(t *testing.T, db *storage.DB, name, agentVersion str
 // не сделав ничего. Без гейта первый подтест зелёный — то есть задача создана.
 func TestCreateTask_AgentCapabilityGate(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	old := deviceWithAgentVersion(t, db, "cap-old", "2.5.7")
 	if _, err := db.CreateFileVaultProvisionTask(ctx, old, "нужен пароль"); !errors.Is(err, storage.ErrAgentTooOld) {

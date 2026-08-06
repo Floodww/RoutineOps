@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 
 func newDB(t *testing.T) *storage.DB {
 	t.Helper()
-	db, err := storage.Connect(context.Background(), sharedDSN)
+	db, err := storage.Connect(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("storage.Connect: %v", err)
 	}
@@ -122,7 +122,7 @@ func makeCertCtx(t *testing.T, cn string) (context.Context, string) {
 			State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
 		},
 	}
-	return peer.NewContext(context.Background(), p), fingerprint
+	return peer.NewContext(tenantCtx(), p), fingerprint
 }
 
 // uniqEmail возвращает уникальный email, чтобы тесты были идемпотентны под
@@ -134,7 +134,7 @@ func uniqEmail(prefix string) string {
 // registerDevice inserts a device via heartbeat upsert (simulates post-enrollment state).
 func registerDevice(t *testing.T, db *storage.DB, cn, fingerprint string) {
 	t.Helper()
-	err := db.UpsertDeviceHeartbeat(context.Background(), storage.HeartbeatData{
+	err := db.UpsertDeviceHeartbeat(tenantCtx(), storage.HeartbeatData{
 		CertFingerprint: fingerprint,
 		DeviceID:        cn,
 		CertCN:          cn,

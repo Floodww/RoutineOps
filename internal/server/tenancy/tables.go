@@ -133,7 +133,12 @@ var Tables = map[string]Table{
 	// screen_sessions — журнал интерактивных сеансов (ADR-8). tenant_id
 	// денормализован по той же причине, что у admin_session_changes: RLS-предикат
 	// не должен ходить по FK на каждый кадр статистики.
-	"screen_sessions":       {Scope: ScopeDerived, Parent: "devices"},
+	"screen_sessions": {Scope: ScopeDerived, Parent: "devices"},
+	// screen_input_events — журнал ввода оператора в сеансе с управлением (§9.21).
+	// Parent = devices, а не screen_sessions: скоуп тенанта у устройства, сам сеанс
+	// тоже производный, и ход по двум FK на каждую строку журнала — это лишний join в
+	// RLS-предикате там, где строк больше всего.
+	"screen_input_events":   {Scope: ScopeDerived, Parent: "devices"},
 	"device_group_members":  {Scope: ScopeDerived, Parent: "device_groups"},
 	"policy_assignments":    {Scope: ScopeDerived, Parent: "policies"},
 	"script_results":        {Scope: ScopeDerived, Parent: "scripts"},

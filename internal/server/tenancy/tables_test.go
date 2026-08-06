@@ -83,8 +83,8 @@ func tablesInArrays(t *testing.T, file string) map[string]bool {
 // новой миграцией — правь и эти константы, иначе гейт продолжит проверять устаревшее тело
 // и зазеленеет на пустом месте.
 const (
-	reparentTenantFile = "067_screen_sessions.sql"
-	moveDeviceFile     = "067_screen_sessions.sql"
+	reparentTenantFile = "073_screen_control.sql"
+	moveDeviceFile     = "073_screen_control.sql"
 )
 
 // reparentExempt — тенантские таблицы, которых в массивах переноса НЕТ, и это

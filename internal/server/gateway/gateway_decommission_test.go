@@ -1,7 +1,6 @@
 package gateway_test
 
 import (
-	"context"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"testing"
 
@@ -19,9 +18,9 @@ func TestReportTaskResult_DecommissionFlipsStatus(t *testing.T) {
 
 	certCtx, fp := makeCertCtx(t, "device-decomm-ok")
 	registerDevice(t, db, "device-decomm-ok", fp)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 
-	task, err := db.CreateDecommissionTask(context.Background(), devID)
+	task, err := db.CreateDecommissionTask(tenantCtx(), devID)
 	if err != nil {
 		t.Fatalf("CreateDecommissionTask: %v", err)
 	}
@@ -33,7 +32,7 @@ func TestReportTaskResult_DecommissionFlipsStatus(t *testing.T) {
 		t.Fatalf("ReportTaskResult: %v", err)
 	}
 
-	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, devID); st != "decommissioned" {
 		t.Errorf("device status = %q, want decommissioned", st)
 	}
 }
@@ -46,9 +45,9 @@ func TestReportTaskResult_DecommissionFailedKeepsDevice(t *testing.T) {
 
 	certCtx, fp := makeCertCtx(t, "device-decomm-fail")
 	registerDevice(t, db, "device-decomm-fail", fp)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
 
-	task, _ := db.CreateDecommissionTask(context.Background(), devID)
+	task, _ := db.CreateDecommissionTask(tenantCtx(), devID)
 	if _, err := gw.ReportTaskResult(certCtx, &pb.TaskResult{
 		TaskId:   task.ID,
 		Status:   pb.TaskStatus_TASK_STATUS_ERROR,
@@ -57,7 +56,7 @@ func TestReportTaskResult_DecommissionFailedKeepsDevice(t *testing.T) {
 		t.Fatalf("ReportTaskResult: %v", err)
 	}
 
-	if st, _ := db.GetDeviceStatusByID(context.Background(), tenancy.DefaultTenantID, devID); st == "decommissioned" {
+	if st, _ := db.GetDeviceStatusByID(tenantCtx(), tenancy.DefaultTenantID, devID); st == "decommissioned" {
 		t.Errorf("устройство списано по FAILED decommission — не должно (status=%q)", st)
 	}
 }
@@ -70,8 +69,8 @@ func TestConnect_DecommissionedDevice(t *testing.T) {
 
 	ctx, fp := makeCertCtx(t, "device-decomm-conn")
 	registerDevice(t, db, "device-decomm-conn", fp)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
-	if err := db.MarkDeviceDecommissioned(context.Background(), devID); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
+	if err := db.MarkDeviceDecommissioned(tenantCtx(), devID); err != nil {
 		t.Fatalf("MarkDeviceDecommissioned: %v", err)
 	}
 
@@ -91,8 +90,8 @@ func TestConnect_RevokedFingerprintRejectedNoResurrection(t *testing.T) {
 
 	ctx, fp := makeCertCtx(t, "device-deleted-revoked")
 	registerDevice(t, db, "device-deleted-revoked", fp)
-	devID, _ := db.GetDeviceIDByFingerprint(context.Background(), fp)
-	if _, err := db.DeleteDevice(context.Background(), tenancy.DefaultTenantID, devID); err != nil {
+	devID, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp)
+	if _, err := db.DeleteDevice(tenantCtx(), tenancy.DefaultTenantID, devID); err != nil {
 		t.Fatalf("DeleteDevice: %v", err)
 	}
 
@@ -101,7 +100,7 @@ func TestConnect_RevokedFingerprintRejectedNoResurrection(t *testing.T) {
 		t.Errorf("got %v, want NotFound для отозванного серта", code)
 	}
 	// Воскрешения нет: устройство по этому серту в БД не появилось заново.
-	if id, _ := db.GetDeviceIDByFingerprint(context.Background(), fp); id != "" {
+	if id, _ := db.GetDeviceIDByFingerprint(tenantCtx(), fp); id != "" {
 		t.Errorf("воскрешение: устройство %q заведено заново по отозванному серту", id)
 	}
 }

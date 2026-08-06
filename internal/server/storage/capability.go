@@ -64,7 +64,7 @@ func (db *DB) assertAgentSupports(ctx context.Context, deviceID, taskType string
 		return nil
 	}
 	var have string
-	if err := db.Q(ctx).QueryRow(ctx,
+	if err := db.Scoped(ctx).QueryRow(ctx,
 		`SELECT COALESCE(agent_version, '') FROM devices WHERE id = $1`, deviceID).Scan(&have); err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"log/slog"
 	"net"
 	"net/http"
@@ -291,6 +292,14 @@ func (h *Handler) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	h.audit(r.Context(), userID, email, "login", "user", userID, map[string]any{"method": "oidc", "provider": id})
+	// Тенант в контекст: вход случается до jwtMiddleware, и без этого запись о нём не
+	// ложится в журнал (audit_log под RLS). См. тот же приём в auth.go. Тенант берём
+	// оттуда же, откуда его берёт middleware, — из членства в БД, а не из ответа IdP.
+	auditCtx := r.Context()
+	if epoch, eerr := h.db.GetUserEpoch(r.Context(), userID); eerr == nil && epoch != nil {
+		auditCtx = storage.WithTenantID(auditCtx, epoch.TenantID)
+	}
+	h.audit(auditCtx, userID, email, "login", "user", userID,
+		map[string]any{"method": "oidc", "provider": id})
 	http.Redirect(w, r, "/", http.StatusFound)
 }

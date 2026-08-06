@@ -32,7 +32,7 @@ func (db *DB) CreateManualPerson(ctx context.Context, tenantID, displayName, ema
 		defer finish(true)
 	}
 	var p DirectoryPerson
-	err = db.Q(ctx).QueryRow(ctx, `
+	err = db.Scoped(ctx).QueryRow(ctx, `
 		INSERT INTO directory_persons (tenant_id, object_guid, display_name, email, source)
 		VALUES ($1, 'manual:' || uuid_generate_v4()::text, $2, NULLIF($3,''), 'manual')
 		RETURNING id, object_guid, COALESCE(object_sid,''), COALESCE(sam_account,''),
@@ -59,7 +59,7 @@ func (db *DB) UpdateManualPerson(ctx context.Context, tenantID, id, displayName,
 		defer finish(true)
 	}
 	var source string
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT source FROM directory_persons WHERE tenant_id = $1 AND id = $2`, tenantID, id,
 	).Scan(&source)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -71,7 +71,7 @@ func (db *DB) UpdateManualPerson(ctx context.Context, tenantID, id, displayName,
 	if source != PersonSourceManual {
 		return false, ErrPersonNotManual
 	}
-	_, err = db.Q(ctx).Exec(ctx,
+	_, err = db.Scoped(ctx).Exec(ctx,
 		`UPDATE directory_persons SET display_name = $3, email = NULLIF($4,'') WHERE tenant_id = $1 AND id = $2`,
 		tenantID, id, displayName, email)
 	return err == nil, err
@@ -94,7 +94,7 @@ func (db *DB) DeleteManualPerson(ctx context.Context, tenantID, id string) (bool
 		defer finish(true)
 	}
 	var source string
-	err = db.Q(ctx).QueryRow(ctx,
+	err = db.Scoped(ctx).QueryRow(ctx,
 		`SELECT source FROM directory_persons WHERE tenant_id = $1 AND id = $2`, tenantID, id,
 	).Scan(&source)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -106,7 +106,7 @@ func (db *DB) DeleteManualPerson(ctx context.Context, tenantID, id string) (bool
 	if source != PersonSourceManual {
 		return false, ErrPersonNotManual
 	}
-	tag, err := db.Q(ctx).Exec(ctx, `DELETE FROM directory_persons WHERE tenant_id = $1 AND id = $2`, tenantID, id)
+	tag, err := db.Scoped(ctx).Exec(ctx, `DELETE FROM directory_persons WHERE tenant_id = $1 AND id = $2`, tenantID, id)
 	if err != nil {
 		return false, err
 	}

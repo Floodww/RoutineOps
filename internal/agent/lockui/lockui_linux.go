@@ -44,6 +44,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Floodww/RoutineOps/internal/agent/lock"
+	"github.com/Floodww/RoutineOps/internal/agent/x11ui"
 )
 
 const (
@@ -165,9 +166,7 @@ type overlay struct {
 	// пустой экран вместо текста — худший исход, сотрудник не понимает, что произошло.
 	twoByte bool
 
-	keymap       *xproto.GetKeyboardMappingReply
-	minKeycode   xproto.Keycode
-	perKeycode   byte
+	kb           x11ui.Keyboard
 	password     []rune
 	message      text
 	pendingUntil time.Time
@@ -227,13 +226,11 @@ func (u *overlay) setup() error {
 	u.gcErr = u.newGC(0xff5555, u.fText)
 	u.gcBg = u.newGC(0x000000, u.fText)
 
-	u.minKeycode = setup.MinKeycode
-	count := byte(setup.MaxKeycode - setup.MinKeycode + 1)
-	km, err := xproto.GetKeyboardMapping(u.conn, setup.MinKeycode, count).Reply()
+	kb, err := x11ui.NewKeyboard(u.conn)
 	if err != nil {
 		return err
 	}
-	u.keymap, u.perKeycode = km, km.KeysymsPerKeycode
+	u.kb = kb
 
 	u.raise()
 	u.grabInput()
@@ -241,56 +238,14 @@ func (u *overlay) setup() error {
 	return nil
 }
 
-// Шрифты подбираем в кодировке iso10646-1 (Unicode): в наборах iso8859-1 кириллицы
-// нет и весь текст замка ушёл бы в пустоту. Кандидаты перечислены явно и проверяются
-// ИЗМЕРЕНИЕМ, а не фактом открытия: шаблон "-*-*-..." матчит в том числе масштабируемые
-// начертания экзотических наборов, которые открываются без ошибки и рисуют строку
-// нулевой ширины — на живом Xvfb первым таким кандидатом оказался arabic-newspaper,
-// и замок показывал чёрный экран, считая, что всё нарисовал.
-type fontCandidate struct {
-	pattern string
-	pixel   int // ожидаемый размер в пикселях: имя кандидата обязано совпасть по нему
-}
-
-var fontCandidates = struct{ big, text []fontCandidate }{
-	big: []fontCandidate{
-		// misc-fixed идёт первым не по красоте, а по полноте: это базовый Unicode-набор
-		// X (пакет xfonts-base), и кириллица в нём есть всегда. Крупные helvetica/courier
-		// из 100dpi-наборов формально тоже iso10646-1, но содержат только латиницу —
-		// на живом Xvfb заголовок из них выходил рядом пустых квадратов.
-		{"-misc-fixed-bold-r-normal--20-*-*-*-*-*-iso10646-1", 20},
-		{"-misc-fixed-medium-r-normal--20-*-*-*-*-*-iso10646-1", 20},
-		{"-adobe-helvetica-bold-r-normal--34-*-*-*-*-*-iso10646-1", 34},
-		{"-*-*-bold-r-normal--24-*-*-*-*-*-iso10646-1", 24},
-	},
-	text: []fontCandidate{
-		{"-misc-fixed-medium-r-normal--14-*-*-*-*-*-iso10646-1", 14},
-		{"-misc-fixed-medium-r-normal--13-*-*-*-*-*-iso10646-1", 13},
-		{"-adobe-helvetica-medium-r-normal--14-*-*-*-*-*-iso10646-1", 14},
-		{"-*-*-medium-r-normal--14-*-*-*-*-*-iso10646-1", 14},
-	},
-}
-
-// probeRunes — буквы, которые обязаны быть у шрифта замка: заглавная и строчная
-// кириллица плюс латиница. Проверяем по три, а не по одной: часть наборов несёт
-// только заглавные.
-var probeRunes = []rune{'У', 'с', 'т', 'A'}
-
 // pickFonts выбирает шрифты и решает, доступен ли двухбайтовый вывод вообще.
+//
+// Сам подбор живёт в x11ui: та же задача стоит перед плашкой наблюдения за экраном, а
+// две копии проверки «рисует ли шрифт кириллицу» разъехались бы молча — с исходом «окно
+// без текста у сотрудника».
 func (u *overlay) pickFonts() {
-	var bigName, textName string
-	u.fBig, bigName = u.openFont(fontCandidates.big)
-	u.fText, textName = u.openFont(fontCandidates.text)
-	u.log.Info("lock-screen: шрифты замка",
-		slog.String("заголовок", bigName), slog.String("текст", textName))
-	u.twoByte = u.fText != 0
-	if !u.twoByte {
-		// Ни один Unicode-шрифт не подошёл: рисуем латиницей серверным "fixed",
-		// который есть на любом X-сервере.
-		u.fText = u.openFallbackFont()
-		u.fBig = u.fText
-		u.log.Warn("lock-screen: Unicode-шрифты недоступны, текст замка будет на латинице")
-	}
+	f := x11ui.PickFonts(u.conn, u.log)
+	u.fBig, u.fText, u.twoByte = f.Big, f.Text, f.TwoByte
 }
 
 // nameWindow подписывает окно. Оверлей override-redirect не показывается в списке
@@ -303,106 +258,6 @@ func (u *overlay) nameWindow() {
 	class := []byte("routineops-lock\x00RoutineOps\x00")
 	xproto.ChangeProperty(u.conn, xproto.PropModeReplace, u.win, xproto.AtomWmClass,
 		xproto.AtomString, 8, uint32(len(class)), class)
-}
-
-// openFont возвращает первый кандидат, который ОТКРЫЛСЯ и реально что-то рисует.
-func (u *overlay) openFont(candidates []fontCandidate) (xproto.Font, string) {
-	for _, c := range candidates {
-		reply, err := xproto.ListFonts(u.conn, 16, uint16(len(c.pattern)), c.pattern).Reply()
-		if err != nil {
-			continue
-		}
-		for _, name := range reply.Names {
-			f, err := xproto.NewFontId(u.conn)
-			if err != nil {
-				return 0, ""
-			}
-			if err := xproto.OpenFontChecked(u.conn, f, uint16(len(name.Name)), name.Name).Check(); err != nil {
-				continue
-			}
-			if u.drawsCyrillic(f) {
-				return f, name.Name
-			}
-			xproto.CloseFont(u.conn, f)
-		}
-	}
-	return 0, ""
-}
-
-// drawsCyrillic — есть ли у шрифта НАСТОЯЩИЕ глифы кириллицы.
-//
-// Ширины здесь недостаточно в обе стороны: у шрифта без нужного глифа сервер
-// подставляет символ по умолчанию (ширина ненулевая, на экране пустой квадрат), а у
-// моноширинного набора ширина вообще одинакова у всех символов, включая
-// отсутствующие. Поэтому спрашиваем таблицу метрик: глиф существует, когда его
-// Charinfo непустой. AllCharsExist=true — ответ сервера «в этом шрифте есть всё, что
-// он объявил», и тогда достаточно попадания в диапазон.
-func (u *overlay) drawsCyrillic(font xproto.Font) bool {
-	qf, err := xproto.QueryFont(u.conn, xproto.Fontable(font)).Reply()
-	if err != nil {
-		return false
-	}
-	for _, r := range probeRunes {
-		if !glyphExists(qf, r) {
-			return false
-		}
-	}
-	return true
-}
-
-// glyphExists — есть ли у шрифта глиф для кодовой точки (шрифт двухбайтовый,
-// индексация как в X11: (byte1-min)*ширина_строки + (byte2-min)).
-func glyphExists(qf *xproto.QueryFontReply, r rune) bool {
-	if r > 0xffff {
-		return false
-	}
-	b1, b2 := byte(r>>8), byte(r)
-	if b1 < qf.MinByte1 || b1 > qf.MaxByte1 {
-		return false
-	}
-	if uint16(b2) < qf.MinCharOrByte2 || uint16(b2) > qf.MaxCharOrByte2 {
-		return false
-	}
-	if qf.AllCharsExist || len(qf.CharInfos) == 0 {
-		return qf.AllCharsExist
-	}
-	rowLen := int(qf.MaxCharOrByte2-qf.MinCharOrByte2) + 1
-	idx := (int(b1)-int(qf.MinByte1))*rowLen + (int(b2) - int(qf.MinCharOrByte2))
-	if idx < 0 || idx >= len(qf.CharInfos) {
-		return false
-	}
-	ci := qf.CharInfos[idx]
-	// Пустой Charinfo = глифа нет (X11 protocol, §Fonts): у существующего символа
-	// хоть одна метрика ненулевая.
-	return ci.CharacterWidth != 0 || ci.Ascent != 0 || ci.Descent != 0 ||
-		ci.LeftSideBearing != 0 || ci.RightSideBearing != 0
-}
-
-// openFallbackFont открывает серверный "fixed" (однобайтовый, есть везде).
-func (u *overlay) openFallbackFont() xproto.Font {
-	f, err := xproto.NewFontId(u.conn)
-	if err != nil {
-		return 0
-	}
-	if err := xproto.OpenFontChecked(u.conn, f, uint16(len("fixed")), "fixed").Check(); err != nil {
-		u.log.Warn("lock-screen: не открылся даже шрифт fixed", slog.Any("error", err))
-		return 0
-	}
-	return f
-}
-
-// textWidth — ширина строки в пикселях по метрикам сервера; 0 означает «шрифт эту
-// строку не рисует».
-func (u *overlay) textWidth(font xproto.Font, s string) int32 {
-	if font == 0 {
-		return 0
-	}
-	chars := toChar2b(s)
-	ext, err := xproto.QueryTextExtents(u.conn, xproto.Fontable(font), chars, uint16(len(chars))).Reply()
-	if err != nil {
-		return 0
-	}
-	return ext.OverallWidth
 }
 
 func (u *overlay) newGC(fg uint32, font xproto.Font) xproto.Gcontext {
@@ -534,14 +389,7 @@ func (u *overlay) handleKey(e xproto.KeyPressEvent) {
 // когда нажат Shift, иначе столбец 0 — этого достаточно для ввода пароля; групповые
 // раскладки (столбцы 2-3) сознательно не трогаем, чтобы не гадать о состоянии группы.
 func (u *overlay) keysym(e xproto.KeyPressEvent) uint32 {
-	if u.keymap == nil || u.perKeycode == 0 {
-		return 0
-	}
-	idx := int(e.Detail-u.minKeycode)*int(u.perKeycode) + u.shiftColumn(e.State)
-	if idx < 0 || idx >= len(u.keymap.Keysyms) {
-		return 0
-	}
-	return uint32(u.keymap.Keysyms[idx])
+	return u.kb.Keysym(e.Detail, u.shiftColumn(e.State))
 }
 
 func (u *overlay) shiftColumn(state uint16) int {
@@ -640,32 +488,9 @@ func (u *overlay) drawInputLine(y int16) {
 		[]xproto.Rectangle{{X: x, Y: y, Width: width, Height: 1}})
 }
 
-// centerText рисует строку по центру экрана. Ширину спрашиваем у сервера
-// (QueryTextExtents): считать её самостоятельно нельзя — шрифт подобран по шаблону и
-// его метрики заранее неизвестны.
+// centerText рисует строку по центру экрана.
 func (u *overlay) centerText(s string, y int16, gc xproto.Gcontext, font xproto.Font) {
-	if s == "" || gc == 0 {
-		return
-	}
-	x := int16(u.w) / 4 // запасное положение, если метрики недоступны
-	if w := u.textWidth(font, s); w > 0 {
-		x = (int16(u.w) - int16(w)) / 2
-	}
-	if u.twoByte {
-		chars := toChar2b(s)
-		// ImageText16 передаёт длину одним байтом — режем по 255 символов; строки
-		// замка короче, но причина приезжает с сервера и бывает любой.
-		if len(chars) > 255 {
-			chars = chars[:255]
-		}
-		xproto.ImageText16(u.conn, byte(len(chars)), xproto.Drawable(u.win), gc, x, y, chars)
-		return
-	}
-	b := []byte(s)
-	if len(b) > 255 {
-		b = b[:255]
-	}
-	xproto.ImageText8(u.conn, byte(len(b)), xproto.Drawable(u.win), gc, x, y, string(b))
+	x11ui.DrawCentered(u.conn, xproto.Drawable(u.win), gc, font, u.twoByte, s, y, u.w)
 }
 
 // t выбирает язык строки: кириллицу, когда есть Unicode-шрифт, иначе латиницу.
@@ -691,20 +516,6 @@ func reasonText(reason string) text {
 		}
 	}
 	return text{reason, en}
-}
-
-// toChar2b переводит строку в двухбайтовые символы X11 (кодировка iso10646-1 = UCS-2).
-// Всё вне BMP заменяется на «?»: суррогатных пар в этом протоколе нет, а текст замка
-// эмодзи не содержит.
-func toChar2b(s string) []xproto.Char2b {
-	out := make([]xproto.Char2b, 0, len(s))
-	for _, r := range s {
-		if r > 0xffff {
-			r = '?'
-		}
-		out = append(out, xproto.Char2b{Byte1: byte(r >> 8), Byte2: byte(r)})
-	}
-	return out
 }
 
 // flockNB — неблокирующий эксклюзивный flock. Отдельной функцией, чтобы условие

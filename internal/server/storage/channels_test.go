@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Floodww/RoutineOps/internal/server/storage"
@@ -14,7 +13,7 @@ import (
 // Возвращает device_id.
 func newDeviceInGroups(t *testing.T, db *storage.DB, suffix string, channels ...string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	fp := "fp-chan-" + suffix
 	if err := db.UpsertDeviceHeartbeat(ctx, storageHeartbeatData(fp, "cn-"+suffix, "cn-"+suffix, "192.0.2.10")); err != nil {
 		t.Fatalf("UpsertDeviceHeartbeat: %v", err)
@@ -45,7 +44,7 @@ func TestResolveDeviceUpdateChannel_DefaultStable(t *testing.T) {
 	db := newDB(t)
 	deviceID := newDeviceInGroups(t, db, uniq(t))
 
-	got, err := db.ResolveDeviceUpdateChannel(context.Background(), deviceID)
+	got, err := db.ResolveDeviceUpdateChannel(tenantCtx(), deviceID)
 	if err != nil {
 		t.Fatalf("ResolveDeviceUpdateChannel: %v", err)
 	}
@@ -62,7 +61,7 @@ func TestResolveDeviceUpdateChannel_BetaWinsOverStable(t *testing.T) {
 	suffix := uniq(t)
 	deviceID := newDeviceInGroups(t, db, suffix, storage.ChannelStable, storage.ChannelBeta, storage.ChannelStable)
 
-	got, err := db.ResolveDeviceUpdateChannel(context.Background(), deviceID)
+	got, err := db.ResolveDeviceUpdateChannel(tenantCtx(), deviceID)
 	if err != nil {
 		t.Fatalf("ResolveDeviceUpdateChannel: %v", err)
 	}
@@ -74,7 +73,7 @@ func TestResolveDeviceUpdateChannel_BetaWinsOverStable(t *testing.T) {
 // Канал группы меняется и обратно — снятие метки возвращает машину на парковую версию.
 func TestResolveDeviceUpdateChannel_FollowsGroupEdit(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 	deviceID := newDeviceInGroups(t, db, suffix, storage.ChannelBeta)
 
@@ -109,7 +108,7 @@ func TestResolveDeviceUpdateChannel_FollowsGroupEdit(t *testing.T) {
 // Опечатка в канале — ошибка на входе, а не 23514 из глубины БД.
 func TestDeviceGroup_RejectsUnknownChannel(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	if _, err := db.CreateDeviceGroup(ctx, tenancy.DefaultTenantID, "grp-bad-"+uniq(t), "", "BETA"); err == nil {
 		t.Fatal("группа создана с неизвестным каналом")
 	}
@@ -123,7 +122,7 @@ func TestDeviceGroup_RejectsUnknownChannel(t *testing.T) {
 // версии в stable отбирало бы её у beta-групп.
 func TestAgentRelease_ChannelVisibility(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	osName := "testos" + uniq(t) // свой os → в выборку попадут только наши строки
 	arch := "amd64"
 
@@ -167,7 +166,7 @@ func TestAgentRelease_ChannelVisibility(t *testing.T) {
 // этом НЕ откатывается — beta видит stable-строки.
 func TestAgentRelease_PromoteBetaToStable(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	osName := "testos" + uniq(t)
 	arch := "arm64"
 
@@ -198,7 +197,7 @@ func TestAgentRelease_PromoteBetaToStable(t *testing.T) {
 // дороге, обязано падать, иначе канареечная машина тихо поедет на парковую версию.
 func TestGetLatestAgentReleaseForChannel_RejectsUnknown(t *testing.T) {
 	db := newDB(t)
-	if _, err := db.GetLatestAgentReleaseForChannel(context.Background(), "linux", "amd64", ""); err == nil {
+	if _, err := db.GetLatestAgentReleaseForChannel(tenantCtx(), "linux", "amd64", ""); err == nil {
 		t.Fatal("пустой канал принят")
 	}
 }
@@ -208,7 +207,7 @@ func TestGetLatestAgentReleaseForChannel_RejectsUnknown(t *testing.T) {
 // незаметно: картина выкатки показывала бы машину в stable, пока та обновляется по beta.
 func TestUpdateRollout_MatchesResolver(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := uniq(t)
 
 	canary := newDeviceInGroups(t, db, "canary-"+suffix, storage.ChannelStable, storage.ChannelBeta)

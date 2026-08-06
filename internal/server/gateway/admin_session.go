@@ -176,7 +176,7 @@ func (g *Gateway) SweepAdminSessionEvidenceGaps(ctx context.Context) (int, error
 			sev := alerting.DefaultFor(alertTypeAdminSessionEvidenceGap)
 			text := notifier.HTMLf("%s <b>Алерт безопасности</b>\nТип: %s\nКритичность: %s\nУстройство: <code>%s</code>\nДетали: %s",
 				alerting.Emoji(sev), "Улики сессии админ-прав не пришли", alerting.Label(sev), hostname, details)
-			go g.bot.NotifyAlert(context.Background(), sev, text)
+			go g.bot.NotifyAlert(storage.DetachTenant(ctx), sev, text)
 		}
 	}
 	return n, nil

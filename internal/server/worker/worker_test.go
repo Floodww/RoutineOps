@@ -1,7 +1,6 @@
 package worker_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
@@ -32,7 +31,7 @@ func TestMain(m *testing.M) {
 
 func newDB(t *testing.T) *storage.DB {
 	t.Helper()
-	db, err := storage.Connect(context.Background(), sharedDSN)
+	db, err := storage.Connect(tenantCtx(), sharedDSN)
 	if err != nil {
 		t.Fatalf("storage.Connect: %v", err)
 	}
@@ -53,7 +52,7 @@ func deliverTask(taskID string) *asynq.Task {
 // (deviceID, cn). cert_cn проставляется через heartbeat-upsert.
 func setupDeviceWithCN(t *testing.T, db *storage.DB) (deviceID, cn string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := tenantCtx()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	fingerprint := "fp-" + suffix
 	cn = "cn-" + suffix
@@ -143,7 +142,7 @@ func TestNewServer_Constructs(t *testing.T) {
 // Happy-path: pending-задача для подключённого устройства доставляется в канал registry.
 func TestProcessTask_DeliversToConnectedDevice(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, cn := setupDeviceWithCN(t, db)
 
 	task, err := db.CreateTask(ctx, deviceID, "echo hello", "macos", "normal")
@@ -179,7 +178,7 @@ func TestProcessTask_DeliversToConnectedDevice(t *testing.T) {
 // вранья закрыт на агенте отказом на незнакомый тип; здесь закрыта его причина.
 func TestProcessTask_DeliversFileVaultProvision(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, cn := setupDeviceWithCN(t, db)
 
 	const reason = "нужен пароль для дозавершения FileVault"
@@ -218,7 +217,7 @@ func TestProcessTask_BadPayload_ReturnsError(t *testing.T) {
 	db := newDB(t)
 	h := worker.NewHandler(db, registry.New(), discardLogger())
 	bad := asynq.NewTask(worker.TypeDeliverTask, []byte("{not json"))
-	if err := h.ProcessTask(context.Background(), bad); err == nil {
+	if err := h.ProcessTask(tenantCtx(), bad); err == nil {
 		t.Error("ожидалась ошибка на битом payload, получили nil")
 	}
 }
@@ -228,7 +227,7 @@ func TestProcessTask_TaskNotFound_ReturnsError(t *testing.T) {
 	db := newDB(t)
 	h := worker.NewHandler(db, registry.New(), discardLogger())
 	// Валидный UUID, которого нет в БД.
-	err := h.ProcessTask(context.Background(), deliverTask("00000000-0000-0000-0000-000000000000"))
+	err := h.ProcessTask(tenantCtx(), deliverTask("00000000-0000-0000-0000-000000000000"))
 	if err == nil {
 		t.Error("ожидалась ошибка для несуществующей задачи, получили nil")
 	}
@@ -237,7 +236,7 @@ func TestProcessTask_TaskNotFound_ReturnsError(t *testing.T) {
 // Задача не в статусе pending (уже acked) → no-op, без ошибки и без доставки.
 func TestProcessTask_NonPending_IsNoOp(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, cn := setupDeviceWithCN(t, db)
 
 	task, err := db.CreateTask(ctx, deviceID, "echo hi", "macos", "normal")
@@ -266,7 +265,7 @@ func TestProcessTask_NonPending_IsNoOp(t *testing.T) {
 // Устройство не подключено (нет в registry) → ошибка с retry-семантикой.
 func TestProcessTask_DeviceNotConnected_ReturnsError(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, _ := setupDeviceWithCN(t, db)
 
 	task, err := db.CreateTask(ctx, deviceID, "echo hi", "macos", "normal")
@@ -284,7 +283,7 @@ func TestProcessTask_DeviceNotConnected_ReturnsError(t *testing.T) {
 // У устройства не проставлен cert_cn (pending-устройство) → ошибка получения CN.
 func TestProcessTask_EmptyCN_ReturnsError(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	// CreatePendingDevice оставляет cert_cn = NULL → GetDeviceCN вернёт "".
 	dev, err := db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, "pending-host-"+fmt.Sprintf("%d", time.Now().UnixNano()), "macos")
 	if err != nil {
@@ -309,7 +308,7 @@ func TestProcessTask_EmptyCN_ReturnsError(t *testing.T) {
 // Буфер канала переполнен → Send даёт false → ошибка "send failed, will retry".
 func TestProcessTask_FullBuffer_ReturnsError(t *testing.T) {
 	db := newDB(t)
-	ctx := context.Background()
+	ctx := tenantCtx()
 	deviceID, cn := setupDeviceWithCN(t, db)
 
 	task, err := db.CreateTask(ctx, deviceID, "echo hi", "macos", "normal")

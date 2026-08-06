@@ -122,7 +122,7 @@ func assertStatus(t *testing.T, db *storage.DB, deviceID, want string) {
 	defer finish(true)
 
 	var got string
-	if err := db.Q(ctx).QueryRow(ctx, `SELECT status FROM devices WHERE id = $1`, deviceID).Scan(&got); err != nil {
+	if err := db.Scoped(ctx).QueryRow(ctx, `SELECT status FROM devices WHERE id = $1`, deviceID).Scan(&got); err != nil {
 		t.Fatalf("чтение статуса %s: %v", deviceID, err)
 	}
 	if got != want {

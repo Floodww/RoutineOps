@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"net/http"
@@ -35,7 +34,7 @@ func TestRebootDevice_SecondRequestReusesPendingTask(t *testing.T) {
 	db := newTestDB(t)
 	rtr := newRouterFull(t, db)
 	tok := authToken(t, rtr, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	deviceID, _ := createDevice(t, rtr, tok, "reboot-idem", "windows")
 	if err := db.UpdateDeviceStatus(ctx, tenancy.DefaultTenantID, deviceID, "active"); err != nil {
@@ -65,7 +64,7 @@ func TestRebootDevice_DelayNormalization(t *testing.T) {
 	db := newTestDB(t)
 	rtr := newRouterFull(t, db)
 	tok := authToken(t, rtr, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	for _, tc := range []struct {
 		name  string
@@ -111,7 +110,7 @@ func TestRebootDevice_RefusesNonActive(t *testing.T) {
 	db := newTestDB(t)
 	rtr := newRouterFull(t, db)
 	tok := authToken(t, rtr, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	for _, st := range []string{"blocked", "decommissioned", "pending_approval"} {
 		deviceID, _ := createDevice(t, rtr, tok, "reboot-"+st, "windows")
@@ -132,7 +131,7 @@ func TestRebootDevice_ViewerForbidden(t *testing.T) {
 	viewer := tokenForRole(t, rtr, db, "viewer", "viewer_")
 
 	deviceID, _ := createDevice(t, rtr, admin, "reboot-rbac", "windows")
-	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, deviceID, "active"); err != nil {
+	if err := db.UpdateDeviceStatus(tenantCtx(), tenancy.DefaultTenantID, deviceID, "active"); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
 	_, code := postReboot(t, rtr, viewer, "/api/v1/devices/"+deviceID+"/reboot", map[string]any{})
@@ -148,7 +147,7 @@ func TestRebootGroup_ConfirmsScope(t *testing.T) {
 	db := newTestDB(t)
 	rtr := newRouterFull(t, db)
 	tok := authToken(t, rtr, db)
-	ctx := context.Background()
+	ctx := tenantCtx()
 
 	groupID := createGroup(t, rtr, tok, "reboot-group-"+t.Name())
 	var deviceIDs []string
