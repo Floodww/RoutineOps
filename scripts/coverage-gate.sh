@@ -49,11 +49,31 @@ EXCLUDED_FILES="
 internal/server/directory/conn.go|провод LDAP: dial/StartTLS, сервисный bind, пейджинг-search и оба потребителя живого соединения (fetchLDAP, Authenticate/resolveDN, TestConnection). Поднять контроллер домена на раннере нечем, а подделка LDAP проверяла бы собственную заглушку. Живое покрытие — live_stand_test.go против настоящего Samba AD DC (по ROUTINEOPS_LDAP_STAND_URL)
 "
 
+# Редакция дерева. Определяется наличием enterprise-исходников, а НЕ меткой из
+# аргумента: метка — свободный текст вызывающего, и опечатка в ней тихо ослабила бы
+# гейт ровно там, где он должен быть строгим.
+#
+# Зачем это здесь. Часть исключений указывает на enterprise-код (LDAP-провод,
+# escrow, удалённый стол), который export-free.sh из публичного среза вырезает. В
+# срезе такая строка описывает несуществующий файл — и гейт падал на ней, хотя
+# исключение исправно и относится к суперсету. Тот же класс, что чинили в
+# TestPoolBypassesAreDocumented: список писан для суперсета и уезжает в срез как есть.
+#
+# Ослабления строгости нет: в суперсете протухшая строка по-прежнему валит гейт, а
+# суперсет и есть место, где исключения заводят и где файл может исчезнуть незаметно.
+enterprise_tree=0
+[ -f "$ROOT/cmd/server/enterprise.go" ] && enterprise_tree=1
+
 excl_re=""
 excl_stale=0
 while IFS='|' read -r excl_path excl_why; do
   [ -z "$excl_path" ] && continue
   if [ ! -f "$ROOT/$excl_path" ]; then
+    if [ "$enterprise_tree" -eq 0 ]; then
+      # Строку не молчим: тихое сужение охвата — тот же дефект, что и ложное падение.
+      echo "пропущено исключение $excl_path — файла нет в open-core срезе (вырезан export-free.sh)" >&2
+      continue
+    fi
     echo "FAIL: в списке исключений файл $excl_path, которого в дереве нет — строку надо снять либо поправить путь" >&2
     excl_stale=1
     continue
