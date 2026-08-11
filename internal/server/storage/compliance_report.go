@@ -77,6 +77,14 @@ type ComplianceReport struct {
 // видимости каналов (beta ⊇ stable) живёт в коде, и дублировать его в SQL значило бы
 // завести второе место, где оно может разойтись. Пустая карта = сравнивать не с чем,
 // причина outdated_agent тогда не выставляется вовсе (а не выставляется всем подряд).
+//
+// 🔴 `status != 'pending'` — тот же предикат, что у ListEnrolledDevices, и стоит он здесь
+// по той же причине. Строка устройства заводится ВЫДАЧЕЙ ТОКЕНА, а не подключением: пока
+// агент не пришёл, машины физически нет, отчитываться ей нечем и соответствовать нечему.
+// Без предиката каждый невыданный или невостребованный токен добавлял в отчёт вечно
+// несоответствующую строку с причиной stale — и «Соответствия» копили мусор, растущий от
+// самого факта заказа устройств. Отчёт при этом отвечал не на «в каком состоянии парк»,
+// а на «сколько токенов выписали».
 func (db *DB) BuildComplianceReport(ctx context.Context, tenantID string, targets map[string]string) (*ComplianceReport, error) {
 	tenantID, err := requireTenant(tenantID)
 	if err != nil {
@@ -112,6 +120,7 @@ func (db *DB) BuildComplianceReport(ctx context.Context, tenantID string, target
 		                 WHERE v.device_id = d.id AND v.match_status = 'unknown'), 0)
 		FROM devices d
 		WHERE d.tenant_id = $1
+		  AND d.status != 'pending'
 		ORDER BY d.hostname NULLS LAST, d.id
 	`, tenantID)
 	if err != nil {

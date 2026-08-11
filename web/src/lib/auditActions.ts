@@ -113,6 +113,44 @@ export const ACTION_LABELS: Record<string, string> = {
   screen_session_operator_revoked: "auditAction.screen_session_operator_revoked",
   screen_event_foreign_session: "auditAction.screen_event_foreign_session",
 
+  // --- владельцы и пользователи ---
+  delete_person: "auditAction.delete_person",
+  update_person: "auditAction.update_person",
+  delete_user: "auditAction.delete_user",
+  update_script_policy: "auditAction.update_script_policy",
+
+  // --- второй фактор и каталог ---
+  login_mfa_pending: "auditAction.login_mfa_pending",
+  mfa_disabled: "auditAction.mfa_disabled",
+  mfa_recovery_code_used: "auditAction.mfa_recovery_code_used",
+  scim_create_user: "auditAction.scim_create_user",
+  scim_update_user: "auditAction.scim_update_user",
+  scim_deactivate_user: "auditAction.scim_deactivate_user",
+  scim_delete_user: "auditAction.scim_delete_user",
+  set_directory_config: "auditAction.set_directory_config",
+  sync_directory: "auditAction.sync_directory",
+
+  // --- удалённый стол: доступ и управление ---
+  screen_access_mode_changed: "auditAction.screen_access_mode_changed",
+  screen_profile_cap_changed: "auditAction.screen_profile_cap_changed",
+  screen_recording_grant_granted: "auditAction.screen_recording_grant_granted",
+  screen_recording_grant_revoked: "auditAction.screen_recording_grant_revoked",
+  screen_session_consent: "auditAction.screen_session_consent",
+  screen_session_control_granted: "auditAction.screen_session_control_granted",
+  screen_session_control_returned: "auditAction.screen_session_control_returned",
+
+  // --- события от агента и FileVault ---
+  admin_session_changes_final: "auditAction.admin_session_changes_final",
+  late_task_result: "auditAction.late_task_result",
+  lock_failed: "auditAction.lock_failed",
+  arm_lock_secrets: "auditAction.arm_lock_secrets",
+  filevault_revoked: "auditAction.filevault_revoked",
+  filevault_revoke_failed: "auditAction.filevault_revoke_failed",
+  filevault_not_armed: "auditAction.filevault_not_armed",
+  filevault_secret_mismatch: "auditAction.filevault_secret_mismatch",
+  reveal_escrow: "auditAction.reveal_escrow",
+  reveal_escrow_denied: "auditAction.reveal_escrow_denied",
+
   // --- прочее ---
   create_person: "auditAction.create_person",
   acknowledge_alert: "auditAction.acknowledge_alert",
@@ -181,6 +219,36 @@ export const ACTION_CATEGORY: Record<string, EventCategory> = {
   screen_session_operator_revoked: "security",
   screen_event_foreign_session: "security",
 
+  // Раскрытие ключа восстановления, второй фактор и права на записи сеансов — это
+  // расширение доступа либо попытка его получить, а не рутина: в ленте они обязаны быть
+  // видны категорией, а не теряться серым «контентом».
+  reveal_escrow: "security",
+  reveal_escrow_denied: "security",
+  mfa_disabled: "security",
+  mfa_recovery_code_used: "security",
+  screen_access_mode_changed: "security",
+  screen_profile_cap_changed: "security",
+  screen_recording_grant_granted: "security",
+  screen_recording_grant_revoked: "security",
+  screen_session_consent: "security",
+  screen_session_control_granted: "security",
+  screen_session_control_returned: "security",
+  arm_lock_secrets: "security",
+  filevault_revoked: "security",
+  filevault_secret_mismatch: "security",
+
+  login_mfa_pending: "auth",
+
+  delete_person: "admin",
+  update_person: "admin",
+  delete_user: "admin",
+  scim_create_user: "admin",
+  scim_update_user: "admin",
+  scim_deactivate_user: "admin",
+  scim_delete_user: "admin",
+  set_directory_config: "admin",
+  sync_directory: "admin",
+
   create_device: "device",
   delete_device: "device",
   reenroll_device: "device",
@@ -201,6 +269,11 @@ export const ACTION_CATEGORY: Record<string, EventCategory> = {
   add_device_to_group: "device",
   remove_device_from_group: "device",
   create_person: "device",
+  lock_failed: "device",
+  filevault_revoke_failed: "device",
+  filevault_not_armed: "device",
+  late_task_result: "device",
+  admin_session_changes_final: "device",
   // всё остальное (скрипты/политики/алерты) — content по умолчанию
 }
 

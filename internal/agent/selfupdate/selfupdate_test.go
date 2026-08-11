@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,36 +173,167 @@ func TestAntiRollbackFloor(t *testing.T) {
 	if applied != 0 {
 		t.Fatal("манифест ниже high-water mark НЕ должен применяться")
 	}
+	// Пол ОБЯЗАН пережить подтверждение работающей версии: ровно этот случай — ручной
+	// откат бинаря после того, как v2.0.0 отработала, — защита SEC-3 и стережёт.
+	// Понижение пола до работающей версии обнулило бы её целиком.
+	if got := readFloor(t, floorFile); got != "v2.0.0" {
+		t.Fatalf("пол = %q, хотим v2.0.0: откат бинаря вниз пол не опускает", got)
+	}
 }
 
-// TestFloorPersistsAfterApply: успешное применение обновления поднимает
-// high-water mark на диске — следующая проверка сравнивается уже с ним.
-func TestFloorPersistsAfterApply(t *testing.T) {
+// TestFloorRaisedByConfirmedRun: пол поднимает ЗАПУСК версии, а не замена файла.
+// Агент работает на v2.0.0, на диске пол от прежней v1.0.0 — первая же успешная
+// проверка обязана довести пол до работающей версии.
+func TestFloorRaisedByConfirmedRun(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	floorFile := filepath.Join(t.TempDir(), "floor.txt")
-	bin := []byte("новый-бинарь")
-	m := signedManifest("v2.0.0", bin, priv)
+	if err := os.WriteFile(floorFile, []byte("v1.0.0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := []byte("тот-же-бинарь")
+	m := signedManifest("v2.0.0", bin, priv) // ровно то, что уже работает — применять нечего
 
 	u := &Updater{
-		current:   "v1.0.0",
+		current:   "v2.0.0",
 		pubKey:    pub,
 		floorFile: floorFile,
 		log:       discardLog(),
 		check:     func(context.Context) (*Manifest, error) { return m, nil },
 		download:  func(context.Context, string) ([]byte, error) { return bin, nil },
-		replace:   func([]byte) error { return nil },
+		replace:   func([]byte) error { t.Fatal("применять нечего — версия та же"); return nil },
 		restart:   func() {},
 	}
 	if err := u.checkAndApply(context.Background()); err != nil {
 		t.Fatalf("checkAndApply: %v", err)
 	}
-	got, err := os.ReadFile(floorFile)
+	if got := readFloor(t, floorFile); got != "v2.0.0" {
+		t.Fatalf("пол = %q, хотим v2.0.0 — работающая версия обязана попасть в пол", got)
+	}
+}
+
+// TestFloorNotRaisedByReplaceAlone — регрессия инцидента 10.08.2026 (подписанный
+// мусор в канале). Замена файла удалась, но новая версия не проработала ни секунды:
+// пол обязан остаться на РАБОТАЮЩЕЙ версии, иначе машина запирается вне исправленной
+// пересборки под тем же номером — молча и навсегда.
+//
+// Второй половиной теста проверяется именно то, что в поле не сработало: агент,
+// поднятый обратно на прежней версии (штатное восстановление из .old), обязан ту же
+// версию ПРИНЯТЬ.
+func TestFloorNotRaisedByReplaceAlone(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	floorFile := filepath.Join(t.TempDir(), "floor.txt")
+	bin := []byte("бинарь-который-не-запустится")
+	m := signedManifest("v2.6.7", bin, priv)
+
+	newUpdater := func() (*Updater, *int) {
+		applied := 0
+		return &Updater{
+			current:   "v2.6.6",
+			pubKey:    pub,
+			floorFile: floorFile,
+			log:       discardLog(),
+			check:     func(context.Context) (*Manifest, error) { return m, nil },
+			download:  func(context.Context, string) ([]byte, error) { return bin, nil },
+			replace:   func([]byte) error { applied++; return nil },
+			restart:   func() {},
+		}, &applied
+	}
+
+	u, applied := newUpdater()
+	if err := u.checkAndApply(context.Background()); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if *applied != 1 {
+		t.Fatalf("обновление не применилось (applied=%d)", *applied)
+	}
+	if got := readFloor(t, floorFile); got != "v2.6.6" {
+		t.Fatalf("пол = %q, хотим v2.6.6: замена файла — не доказательство запуска", got)
+	}
+
+	// Процесс перезапустился на СТАРОЙ версии (новая не поднялась, бинарь вернули
+	// из .old). Тот же релиз обязан поехать снова.
+	again, appliedAgain := newUpdater()
+	if err := again.checkAndApply(context.Background()); err != nil {
+		t.Fatalf("checkAndApply после восстановления: %v", err)
+	}
+	if *appliedAgain != 1 {
+		t.Fatal("исправленная пересборка того же номера не поехала — машина заперта полом")
+	}
+}
+
+// TestAppliedNotReDownloadedWithinProcess: пол не поднимается заменой — значит от
+// повторного скачивания того же бинаря каждый тик защищает только память процесса.
+// Проверяем, что защищает: супервизор может поднять новую версию не мгновенно.
+func TestAppliedNotReDownloadedWithinProcess(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bin := []byte("новый-бинарь")
+	m := signedManifest("v2.0.0", bin, priv)
+	h := newHarness(t, "v1.0.0", pub, m, bin)
+
+	for range 3 {
+		if err := h.u.checkAndApply(context.Background()); err != nil {
+			t.Fatalf("checkAndApply: %v", err)
+		}
+	}
+	if len(h.applied) != 1 {
+		t.Fatalf("бинарь применён %d раз(а), ожидался один: версия уже на диске", len(h.applied))
+	}
+}
+
+// TestFloorBlockIsLoud: отказ по полу обязан оставлять строку в логе. Тихий отказ и
+// был тем, что превратило дефект в вечную ловушку — снаружи агент выглядел здоровым.
+// Проверяются ОБА исхода: заперт полом — говорим; просто актуальная версия — молчим.
+func TestFloorBlockIsLoud(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bin := []byte("бинарь")
+
+	newUpdater := func(current, floor, offered string, buf *bytes.Buffer) *Updater {
+		floorFile := filepath.Join(t.TempDir(), "floor.txt")
+		if floor != "" {
+			if err := os.WriteFile(floorFile, []byte(floor), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		m := signedManifest(offered, bin, priv)
+		return &Updater{
+			current:   current,
+			pubKey:    pub,
+			floorFile: floorFile,
+			log:       slog.New(slog.NewTextHandler(buf, nil)),
+			check:     func(context.Context) (*Manifest, error) { return m, nil },
+			download:  func(context.Context, string) ([]byte, error) { return bin, nil },
+			replace:   func([]byte) error { return nil },
+			restart:   func() {},
+		}
+	}
+
+	// Красный: версия новее работающей, но не новее пола — держит пол.
+	var blocked bytes.Buffer
+	if err := newUpdater("v2.6.6", "v2.6.7", "v2.6.7", &blocked).checkAndApply(context.Background()); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if !strings.Contains(blocked.String(), "держит пол анти-отката") {
+		t.Fatalf("отказ по полу прошёл молча, лог:\n%s", blocked.String())
+	}
+
+	// Зелёный: пола нет, предлагают ровно то, что работает — это норма каждые шесть
+	// часов, и превращать её в предупреждение нельзя.
+	var quiet bytes.Buffer
+	if err := newUpdater("v2.6.7", "", "v2.6.7", &quiet).checkAndApply(context.Background()); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if strings.Contains(quiet.String(), "держит пол") {
+		t.Fatalf("штатная проверка «уже актуальны» шумит про пол, лог:\n%s", quiet.String())
+	}
+}
+
+func readFloor(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("floor не персистнулся: %v", err)
+		t.Fatalf("пол не персистнулся: %v", err)
 	}
-	if string(got) != "v2.0.0" {
-		t.Fatalf("floor = %q, хотим v2.0.0", got)
-	}
+	return strings.TrimSpace(string(data))
 }
 
 // TestRejectDowngrade: сервер предлагает ВЕРСИЮ СТАРШЕ текущей — агент не должен

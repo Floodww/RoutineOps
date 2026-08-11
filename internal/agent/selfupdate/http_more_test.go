@@ -76,7 +76,8 @@ func TestNewHTTPClient(t *testing.T) {
 	}
 }
 
-// CleanupOld на unix — безопасный no-op (старый inode освобождается сам).
-func TestCleanupOldNoop(t *testing.T) {
-	CleanupOld() // не должен паниковать
+// Уборка после обновления на unix — безопасный no-op (старый inode освобождается сам).
+func TestCleanupNoop(t *testing.T) {
+	SweepTemp()    // не должен паниковать
+	DropPrevious() // и этот тоже: зовётся из confirmRunning на всех ОС
 }

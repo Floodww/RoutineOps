@@ -14,6 +14,284 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.6.7 — 10 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] Control diagnostics now state the cause in words, not by hint.** The
+  field run of 2.6.6 reached the cause: input is dropped by UIPI — the foreground window
+  sits at a higher integrity level than the agent. The previous reading scheme was
+  **actively misleading**: "setting the cursor position directly did not help" was taken to
+  mean a foreign desktop, whereas it obeys the very same UIPI and, in the actual field case,
+  would have sent the investigation the wrong way. The diagnosis is now printed as its own
+  line together with what actually fixes it, instead of being inferred by the reader from
+  two flags.
+- 🔴 **[Enterprise] The self-check no longer shows green while clicks are dead.** It hung on
+  the first mouse move only, so in two field sessions the log reported "input reaches the
+  OS" while not a single click went through — an hour and a half of investigation went into
+  a green line over a live defect. A first-click check was added, and the counters are now
+  split by input kind: moves, buttons, keys, wheel (a single total cannot tell "buttons
+  never arrived" from "they arrived and were dropped").
+- **[Enterprise] The notice card no longer gets clipped by display scaling.** At 1920×1200
+  and 125% it ran off the bottom-right corner: the work area is taken in physical pixels
+  while the content is laid out in 96-DPI units — the two agree at 100% and diverge above
+  it. Sizes are now derived from the **window's** DPI (scaling differs per monitor) and
+  clamped to the work area.
+- **[Enterprise] A probe for reaching elevated windows — behind a flag, off by default.** The
+  service runs as LocalSystem and can set the UIAccess bit in the capturer's token directly,
+  with no certificate purchase and no rollout of an internal certificate authority to every
+  machine. The hypothesis is being verified in the field; a refusal is safe — without the
+  bit the capturer behaves exactly as before. Enabling it fleet-wide is a separate decision
+  and a separate release: it changes the agent's privilege model.
+
+## 2.6.6 — 10 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] The log now names the foreground owner and both integrity levels.** The
+  field run of 2.6.5 ruled out two explanations of three; the third remained — the event is
+  accepted and dropped after acceptance. Only a process inside the session at the moment of
+  injection can observe that: a process list captured over SSH an hour later answers a
+  different question. The foreground window's process, its level and **our own level next to
+  it** are logged — the rule is about the relation between levels, so one number without the
+  other means nothing. The window title is deliberately not captured: it can carry file
+  names and an employee's correspondence.
+- **[Enterprise] The two remaining branches are separated by a single probe.** Setting the
+  cursor position directly bypasses the synthetic input queue; it runs once per session and
+  only after input has already failed — moving an employee's cursor without cause is not
+  acceptable.
+
+## 2.6.5 — 10 August 2026
+
+Agent release. The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] The mouse pointer now appears in the frame.** It never did: the system
+  screen capture on Windows does not include the cursor under any setting, and on macOS it
+  had been switched off back during measurements. That was harmless while sessions were
+  watch-only; with control it turned out the operator was moving a mouse they could not
+  see, with nothing to aim by — the only way to locate the pointer was to bump into
+  something visible. Linux still has no cursor: it requires a separate mechanism there, and
+  that work is not done.
+- **[Enterprise] Control diagnostics now name the whole environment.** The previous log line
+  printed the desktop name — not enough: the interactive and the service desktop share a
+  name, so "Default" looked identical whether input worked or went into a queue nobody
+  reads. The window station, the session number and the desktop that owns input are now
+  logged, stating plainly whether it matches the thread's desktop.
+- **[Enterprise] The input thread is pinned to the input desktop.** Previously the binding
+  depended on which system thread the code happened to run on — that is, it worked
+  sometimes, and such a defect reproduces every other time.
+- **[Enterprise] The first-move self-check no longer rules instantly.** The system accepts
+  an event before it processes it, and the "did the cursor arrive" check ran before there
+  was anywhere for it to arrive: it reported a fault on a healthy machine just as
+  confidently. It now waits and retries, and the log shows how long the cursor took.
+
+## 2.10.0 — 10 August 2026
+
+Product release (server + web). The agent does not move — 2.6.4. Minor rather than patch:
+a migration, a new endpoint, a new interface section and **a changed default for existing
+installations**.
+
+Deliberately its own number rather than an addition to 2.9.0: that release is about owner
+records and the compliance report, and folding a fleet-wide doubling of the frame rate
+into its section would misstate the very text an operator reads before upgrading. It also
+keeps "roll back to 2.9.0" a working answer for a tenant whose link could not take it — a
+bandwidth rollback then does not drag along the compliance fix, which has nothing to do
+with bandwidth.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] Session quality is no longer a constant; it is a tenant setting.** Until
+  now every session ran the "1 frame per second, up to 1280 px" profile — not by decision,
+  but because the bandwidth budget had been computed from the worst case (a full frame
+  refresh every frame). Field measurement showed the worst case does not occur: a session
+  with control takes 1.6–1.7% of the allotted bandwidth. A new section, **"Screen access" →
+  "Quality and frame rate"**, offers two values: `medium` (2 fps, up to 1920 px) and `low`
+  (1 fps, up to 1280 px).
+- **[Enterprise] This is a tenant ceiling, not an operator's choice.** The server still
+  assigns the profile when issuing the invitation; the setting defines the upper bound a
+  session cannot exceed. Changing the ceiling is recorded in the audit log as its own
+  action.
+- 🔴 **[Enterprise] Control no longer continues after the recording breaks.** The rule "no
+  recording, no control" existed from the start but never took effect: the "session with
+  control" flag never reached the frame loop, so a broken recording terminated nothing. The
+  operator kept working on the employee's machine while no trace of those actions was being
+  kept. Such a session is now closed on the very frame where the recording broke; a
+  watch-only session continues, as before, marked "recording incomplete".
+
+### 🔴 Read before upgrading
+
+- **The default changes for existing tenants, not only new ones.** The migration sets
+  `medium` across the fleet at apply time. This is deliberate: the measurement was taken on
+  a live machine, and keeping working installations on a knowingly worse profile out of a
+  caution that same measurement refuted would mean not using the result. To restore the
+  previous behaviour: "Screen access" → "Quality and frame rate" → `low`, per tenant, with
+  no restart and no agent rebuild.
+- **Session recordings take noticeably more space.** On `medium` frames arrive twice as
+  often and each is heavier (2.25× the area, higher quality), so the same day of
+  observation weighs several times more — modest on quiet work, a multiple on busy work
+  (window dragging, scrolling, video). Per-tenant capacity is expressed in bytes (20 GiB by
+  default), not hours, so more volume means less time before the cap. The consequence is
+  not about disk but about evidence: a recording is marked truncated sooner, and a session
+  WITH CONTROL is terminated when its recording breaks — controlling a machine without
+  evidence is not permitted by contract.
+- **The per-session recording ceiling now scales with the profile.** 512 MiB was chosen as
+  a duration (≈ 47 minutes at the `low` bandwidth ceiling), not as a volume: on `medium`
+  the same byte count would mean ≈ 22 minutes, silently halving the longest possible
+  support session. The ceiling now scales with bandwidth, preserving that duration.
+- **Both capacities are now configurable:** `ROUTINEOPS_SCREEN_SESSION_MAX_BYTES` and
+  `ROUTINEOPS_SCREEN_TENANT_MAX_BYTES` (e.g. `40GiB`). Previously "raise the quota" meant
+  rebuilding the server.
+- Usual order: apply migrations before starting the new server.
+
+## 2.9.0 — 7 August 2026
+
+Product release (server + web). The agent does not move and ships under its own number,
+2.6.4. Minor rather than patch: deleting owner records is a new capability.
+
+### Devices and owners
+
+- **Owner records can now be deleted.** Creating one was possible from the start, removing
+  one was not: the list filled up with test entries, and picking an owner in a device card
+  lost its meaning. Deletion lives on the separate "Owners" page rather than in the device
+  card: it removes the owner from ALL of their machines, and inside a single device card
+  such an action would read as "remove the owner here". The confirmation says so plainly.
+  Records synchronised from a directory have no button — those are removed in the
+  directory itself.
+
+### Compliance
+
+- 🔴 **The Compliance section no longer accumulates unused enrollment tokens.** A device
+  row is created when a token is issued, not when an agent connects, and until now every
+  unused row appeared in the report as a permanently non-compliant machine that "has not
+  been seen". The report answered "how many tokens were issued" rather than "what state is
+  the fleet in", and the clutter grew on its own. Unenrolled devices are excluded from the
+  report — they remain visible in the enrollment queue, where they belong.
+
+### Audit log
+
+- **Server action codes no longer reach the interface raw.** Some entries were shown as a
+  technical string such as `screen_recording_view_denied` instead of a human description.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] The recording button is no longer offered without the grant to view
+  recordings.** The grant is revocable and issued separately, yet the button was shown to
+  everyone: an administrator without it clicked and received a bare refusal code for an
+  action the interface itself had offered. The journal row now shows that a recording
+  exists, and explains who issues access, with a link to the page where it is granted.
+- **[Enterprise] Early input no longer costs the operator control for the rest of the
+  session.**
+- **[Enterprise] Session quality (dropped frames and bandwidth stalls) is now stored in
+  the session journal** — "the picture stutters" and "the picture lags" became
+  distinguishable.
+
+## 2.6.4 — 7 August 2026
+
+Agent release. The product (server + web) does not move. Diagnostics only: no new
+capabilities, session behaviour is unchanged.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] Input in a control session now leaves traces in the agent log.** The
+  field showed a failure with no symptoms at all: the operator clicks, the server records
+  event after event, nothing happens on the employee's screen, and neither the agent nor
+  the service writes a single line about it. "No errors" meant three different things at
+  once — the events never arrived, they arrived and were applied in the wrong place, or
+  they were applied and discarded by the operating system itself — and there was nothing
+  to tell them apart.
+
+  The session heartbeat now carries counters of accepted, applied and rejected events, the
+  first batch of input is printed together with the full coordinate mapping, and input
+  skipped because the desktop changed is no longer silent. Windows adds two checks for the
+  same question: the name of the desktop the injecting thread is bound to, and a
+  comparison of the first move against the cursor's actual position — the system accepts
+  an event even when it lands nowhere.
+
+- **[Enterprise] Session quality is visible in the session journal.** The agent has been
+  counting dropped frames and bandwidth stalls since telemetry first appeared — and the
+  server discarded both numbers. "The picture stutters" and "the picture lags" are
+  different faults with different causes, and there was no way to tell them apart.
+
+## 2.6.3 — 7 August 2026
+
+Agent release. The product (server + web) does not move. A patch on top of 2.6.2: a
+transport defect and diagnostics, no new capabilities.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] Observation sessions on Windows finally show a picture.** Until this
+  release they never did, on any machine: the session opened, the screen geometry reached
+  the panel, and not a single frame arrived — with a live capture process and no error in
+  any log. The channel between the service and the capture process was opened in a mode
+  where Windows performs reads and writes one after another rather than simultaneously,
+  and both sides always have a read outstanding, so the very first frame could never leave.
+  Operator input failed to reach the device for the same reason — it was one defect, not two.
+- **[Enterprise] The frame-loop heartbeat names its phase.** Alongside the number of frames
+  handed off and the time since the last iteration, it now reports what the loop is actually
+  doing: waiting for the pacer, grabbing, encoding, assembling a frame, or writing to the
+  channel. Diagnosing "no frames" now starts from one log line instead of a list of suspects.
+
+## 2.6.2 — 6 August 2026
+
+Agent release. The product (server + web) does not move. A patch on top of 2.6.1:
+diagnostics and output, no new capabilities.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] Screen capture now keeps its own log.** A session could open, hold for a
+  minute and close without showing a single frame — and there was nothing to explain it
+  with: capture runs as a separate process inside the employee's session, and its output
+  went nowhere. It now writes `screen-worker.log` next to the service log, and if that
+  file cannot be opened it reports the actual path and the reason back to the service, so
+  the failure shows up in the agent log instead of dying with the process.
+- **[Enterprise] A stalled capture is no longer silent.** "No frames" looked identical
+  whether the capture loop was stuck inside a system call, spinning without producing
+  anything, or losing frames on the way to the service. The agent now prints a line every
+  few seconds with the number of frames handed off and the time since the last iteration,
+  and entering the loop, the first frame and a failed grab are logged separately.
+
+### Windows
+
+- **Agent command output reaches redirection again.** `RoutineOps-agent version >
+  out.txt` and launching via `Start-Process -RedirectStandardOutput` produced an empty
+  file with a successful exit code: the agent is built as a GUI-subsystem binary and, when
+  attaching to the parent console, reopened its output onto that console over the handles
+  the parent had deliberately supplied. Files and pipes are no longer overridden — a
+  console still is. The `screen-probe` diagnostic command gained an `-out` flag for the
+  case where there is no console at all.
+
+## 2.6.1 — 6 August 2026
+
+Agent release. The product (server + web) does not move. This section was added
+retroactively — the release shipped without one.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] Keyboard and mouse in an interactive session.** Viewing from 2.6.0 is
+  joined by control: an operator holding an explicitly granted right works on the device
+  directly. The employee sees the same observation badge, and every control session lands
+  in the audit log as its own event.
+- 🔴 **[Enterprise] Observation sessions finally start.** Before this release they never
+  started on any platform: the agent opened the frame stream on the context of the task
+  that carried the invitation, and the stream died as soon as that task was answered. The
+  operator saw a blank screen and not a single error.
+
+### Windows
+
+- 🔴 **Manual removal of the agent also removes the installer registration.**
+  `uninstall.bat` removed the service, the files and the registry keys but never called
+  `msiexec /x` — the product stayed registered as installed over an empty disk. The next
+  installation of the same package went into maintenance mode and exited 0 without
+  installing either the service or the certificates: silent success with a zero result.
+  The registration is now removed, and a package handed enrollment parameters where
+  enrollment will not run aborts the installation with a hint instead of a quiet "done".
+
 ## 2.8.0 — 3 August 2026
 
 Product (server + web) **2.8.0** and agent **2.6.0** — both move: the agent binary changed

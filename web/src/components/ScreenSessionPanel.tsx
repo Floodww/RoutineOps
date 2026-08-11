@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { Link } from "react-router-dom"
 
 import ConfirmDialog from "@/components/ConfirmDialog"
 import { Badge } from "@/components/ui/badge"
@@ -51,6 +52,24 @@ const WAITING_POLL_MS = 1000
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
+// Что панель предлагает сделать с записью сеанса.
+//
+// Развилка вынесена из разметки намеренно — иначе её нечем гейтить (тот же приём, что у
+// inputOutcome после Q-82). Правило неочевидно ровно в одном месте: «право неизвестно».
+//
+//   - grant === false — право спрошено и его нет. Кнопки быть не должно: сервер ответит
+//     403, а оператор увидит голый код отказа за действие, которое ему предложили сами.
+//   - grant === null — спросить НЕ УДАЛОСЬ (ручки нет, сеть, 500). Кнопку оставляем:
+//     сказать «права нет» из-за собственного сбоя значило бы соврать тому, у кого право
+//     есть, и отправить его просить уже выданный грант. Отказ, если он всё-таки придёт,
+//     виден тостом.
+export type RecordingAffordance = "download" | "locked" | "none"
+
+export function recordingAffordance(hasRecording: boolean, grant: boolean | null): RecordingAffordance {
+  if (!hasRecording) return "none"
+  return grant === false ? "locked" : "download"
+}
+
 export function ScreenSessionPanel({ deviceId }: Props) {
   const { t } = useTranslation()
   const [sessions, setSessions] = useState<ScreenSession[]>([])
@@ -59,6 +78,8 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // отвечает ошибкой.
   const [available, setAvailable] = useState(true)
   const [reason, setReason] = useState("")
+  // Право открывать записи (§5). null — спросить не удалось; см. recordingAffordance.
+  const [recordingGrant, setRecordingGrant] = useState<boolean | null>(null)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState("")
   const [live, setLive] = useState<ScreenSession | null>(null)
@@ -101,6 +122,23 @@ export function ScreenSessionPanel({ deviceId }: Props) {
       if (errStatus(e) === 404) setAvailable(false)
     }
   }, [deviceId])
+
+  // Свой грант на просмотр записей. Спрашивается один раз на монтирование, а не на каждое
+  // обновление журнала: право отзывается администратором вручную, а не по ходу сеанса.
+  // Сбой запроса оставляет null — см. recordingAffordance, он трактует это как «не знаем»,
+  // а не как «нельзя».
+  useEffect(() => {
+    let dropped = false
+    api
+      .get<{ can_view_session_recording: boolean }>("/screen-recording-grants/me")
+      .then((r) => {
+        if (!dropped) setRecordingGrant(r.data?.can_view_session_recording === true)
+      })
+      .catch(() => {})
+    return () => {
+      dropped = true
+    }
+  }, [])
 
   useEffect(() => {
     void loadJournal()
@@ -471,6 +509,16 @@ export function ScreenSessionPanel({ deviceId }: Props) {
             {controlOn && (
               <p className="text-xs text-destructive">{t("screenSession.controlHint")}</p>
             )}
+            {/*
+              Граница управления называется ЗДЕСЬ, а не в документации: без манифеста
+              UIAccess Windows молча выбрасывает синтетический ввод, адресованный окнам,
+              запущенным от администратора. Оператор в этот момент видит живую картинку и
+              неработающую мышь — то есть ровно ту картину, из-за которой в поле идут чинить
+              сеть. Молчание интерфейса здесь стоит дороже лишней строки.
+            */}
+            {controlOn && (
+              <p className="text-xs text-muted-foreground">{t("screenSession.controlUipiHint")}</p>
+            )}
             {inputWarning && <p className="text-xs text-amber-600 dark:text-amber-500">{inputWarning}</p>}
             <p className="text-xs text-muted-foreground">{t("screenSession.recordingNotice")}</p>
           </div>
@@ -507,7 +555,9 @@ export function ScreenSessionPanel({ deviceId }: Props) {
 
       {sessions.length > 0 && (
         <div>
-          {sessions.map((s) => (
+          {sessions.map((s) => {
+            const affordance = recordingAffordance(s.has_recording, recordingGrant)
+            return (
             <div key={s.id} className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 last:rounded-b-2xl">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
@@ -555,7 +605,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
                     </Button>
                   </>
                 )}
-                {s.has_recording && (
+                {affordance !== "none" && (
                   <>
                     {/* Отметка рядом с кнопкой, а не вместо неё: неполную запись всё равно
                         смотрят — просто знают заранее, что в ней есть не всё. */}
@@ -568,15 +618,43 @@ export function ScreenSessionPanel({ deviceId }: Props) {
                         {t("screenSession.truncated.badge")}
                       </span>
                     )}
-                    <Button size="sm" variant="outline" onClick={() => void download(s.id)}>
-                      {t("screenSession.recording")}
-                      {s.recording_bytes ? ` · ${formatBytes(s.recording_bytes)}` : ""}
-                    </Button>
+                    {affordance === "download" ? (
+                      <Button size="sm" variant="outline" onClick={() => void download(s.id)}>
+                        {t("screenSession.recording")}
+                        {s.recording_bytes ? ` · ${formatBytes(s.recording_bytes)}` : ""}
+                      </Button>
+                    ) : (
+                      // Запись есть, права на неё нет. Показываем ФАКТ записи, но не
+                      // предлагаем действие: сама строка журнала — тоже сведение, и
+                      // прятать её значило бы скрывать, что сеанс писался.
+                      //
+                      // Не `<Button disabled>`: неактивная кнопка выпадает из обхода с
+                      // клавиатуры вместе со своей подсказкой, то есть объяснение
+                      // достаётся только мыши. Объяснение целиком — в сноске под
+                      // журналом, здесь только пометка.
+                      <span className="text-xs text-muted-foreground">
+                        {t("screenSession.recordingLocked")}
+                        {s.recording_bytes ? ` · ${formatBytes(s.recording_bytes)}` : ""}
+                      </span>
+                    )}
                   </>
                 )}
               </div>
             </div>
-          ))}
+            )
+          })}
+          {/* Сноска одна на панель, а не подпись у каждой строки: причина у всех записей
+              одна и та же, и повторять её на каждом сеансе значит спрятать её в шуме.
+              Ссылка ведёт туда, где грант выдают, — «попросите права» без адреса это и
+              есть тот самый голый отказ, только словами. */}
+          {recordingGrant === false && sessions.some((s) => s.has_recording) && (
+            <p className="border-t border-border px-5 py-3 text-xs text-muted-foreground">
+              {t("screenSession.recordingLockedHint")}{" "}
+              <Link to="/screen-access" className="underline underline-offset-2 hover:text-foreground">
+                {t("nav.screenAccess")}
+              </Link>
+            </p>
+          )}
         </div>
       )}
 

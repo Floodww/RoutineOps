@@ -10,6 +10,19 @@ bin/
 agent/bin/
 server/bin/
 
+# Собранные командные бинари в КОРНЕ: `go build ./cmd/...` кладёт их именно сюда, и
+# именно так в репозиторий уехали publish-release (14 МБ), publish-escrow-recipient
+# (13 МБ) и routineops (9 МБ) — артефакт сборки неотличим в диффе от исходника, потому
+# что дифф его не показывает вовсе. Перечислены поимённо и с ведущим слэшем:
+# `agent` и `server` в корне — КАТАЛОГИ с кодом, шаблон без якоря выключил бы их.
+/publish-release
+/publish-escrow-recipient
+/routineops
+/routineops-license
+/routineops-unseal
+/seeddev
+/mockserver
+
 # Состояние агента (runtime)
 *.seen
 forbidden_software.txt

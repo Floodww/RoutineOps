@@ -1633,8 +1633,10 @@ func runAgent(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 			"локальным пользователям машины", slog.Any("error", err))
 	}
 
-	// Подчистить остатки прошлого самообновления (<exe>.old на Windows).
-	selfupdate.CleanupOld()
+	// Подмести обрывки прерванного самообновления (temp-файлы на Windows). Прежний
+	// бинарь <exe>.old здесь НЕ трогаем: он остаётся запасным путём восстановления,
+	// пока новая версия не подтвердит работой, что поднялась (selfupdate.DropPrevious).
+	selfupdate.SweepTemp()
 
 	// Windows: самообновление рестартит службу через os.Exit(1) → SCM failure-actions,
 	// а трей в юзер-сессии к этому моменту убит taskkill'ом на этапе подмены exe

@@ -78,12 +78,40 @@ func replaceExecutable(data []byte) error {
 	return nil
 }
 
-// CleanupOld удаляет оставшийся после обновления <exe>.old И осиротевшие
-// temp-файлы прерванного апдейта (.routineops-upd-*.exe): best-effort, вызывать
-// при старте — прошлый процесс их уже не держит. Без подметания temp повторные
-// неудачные апдейты (краш/сбой питания в окне записи) копили бы ~20МБ-файлы в
-// каталоге установки без верхней границы.
-func CleanupOld() {
+// SweepTemp подметает осиротевшие temp-файлы прерванного апдейта
+// (.routineops-upd-*.exe): best-effort, вызывать при старте — прошлый процесс их уже
+// не держит. Без подметания повторные неудачные апдейты (краш/сбой питания в окне
+// записи) копили бы ~20МБ-файлы в каталоге установки без верхней границы.
+//
+// 🔴 <exe>.old отсюда убран намеренно, см. DropPrevious.
+func SweepTemp() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(exe), ".routineops-upd-*.exe")); err == nil {
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+// DropPrevious удаляет прежний бинарь <exe>.old, оставшийся после самообновления.
+//
+// 🔴 Зовётся не при старте, а после того, как работающая версия себя ПОДТВЕРДИЛА
+// (selfupdate.confirmRunning). Прежде удаление стояло в самом начале main: агент,
+// который поднялся и умер через две секунды (несовместимая DLL, паника на старте,
+// битая сборка), успевал снести единственный путь восстановления ещё до того, как
+// сломаться, — а SCM дальше крутил бы crash-loop уже без запасного бинаря. Именно
+// .old спас стенд после инцидента с подписанным мусором 10.08.2026.
+//
+// Одним файлом всё и ограничено: replaceExecutable сам удаляет .old перед тем, как
+// отодвинуть туда текущий exe, так что накопления не будет даже при выключенном
+// самообновлении.
+func DropPrevious() {
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -92,9 +120,4 @@ func CleanupOld() {
 		exe = resolved
 	}
 	_ = os.Remove(exe + ".old")
-	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(exe), ".routineops-upd-*.exe")); err == nil {
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}
 }

@@ -609,9 +609,14 @@ export const SCREEN_CONSENT: Record<string, string> = {
   UNAVAILABLE: "screenSession.consent.unavailable",
 }
 
-// Режим доступа к экрану и состояние квоты записей — свойства ТЕНАНТА (§4, §5).
+// Режим доступа к экрану, потолок профиля и состояние квоты записей — свойства ТЕНАНТА
+// (§4, §5, §10).
 export interface ScreenAccessPolicy {
   mode: "unattended" | "consent_required"
+  // profile_cap — ПОТОЛОК, а не значение: сервер выдаёт профиль в приглашении не выше
+  // него. Отсутствует у сервера до 075 — трактуем как low, то есть как поведение до
+  // появления настройки, а не как «потолок неизвестен».
+  profile_cap?: "low" | "medium"
   recording_used: number
   recording_quota: number
   recording_retention: number

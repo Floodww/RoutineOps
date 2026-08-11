@@ -5,6 +5,7 @@ package collector
 import (
 	"encoding/json"
 	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -277,19 +278,51 @@ func TestLiveProbesContract(t *testing.T) {
 // входит в inventory.hashReport. Сравнение по ключу (имя, версия) намеренно
 // терпимо к появлению/исчезновению записей между вызовами (обновление в фоне,
 // временный каталог установщика) — ловим именно изменение полей у той же записи.
+//
+// 🔴 Ключ (имя, версия) НЕ ИДЕНТИФИЦИРУЕТ запись, и это не редкость: приложение и его
+// вспомогательный агент — разные бандлы с одинаковыми CFBundleName и версией.
+// Живой пример: «NTFS for Mac» 17.0.488 существует одновременно как
+// /Applications/NTFS for Mac.app и как .../com.paragon-software.ntfs.notification-agent.app.
+// Прежняя редакция клала в map по одному представителю на ключ и сравнивала первого из
+// одного снимка со вторым из другого — вердикт зависел от порядка выдачи
+// system_profiler, то есть тест требовал от системы гарантии, которой она не даёт, и
+// падал на исправном сборщике.
+//
+// Поэтому сравниваются МНОЖЕСТВА записей под ключом целиком: любое изменение любого
+// поля любой записи по-прежнему валит тест (инвариант сохранён полностью), а
+// перестановка одинаковых по составу записей — нет.
 func TestLiveSoftwareStability(t *testing.T) {
 	first := installedSoftware()
 	if len(first) == 0 {
 		t.Skip("system_profiler не вернул приложений — нечего сравнивать")
 	}
-	type key struct{ name, version string }
-	seen := make(map[key]Software, len(first))
-	for _, s := range first {
-		seen[key{s.Name, s.Version}] = s
+	byKey := func(list []Software) map[string][]Software {
+		m := make(map[string][]Software, len(list))
+		for _, s := range list {
+			k := s.Name + "\x00" + s.Version
+			m[k] = append(m[k], s)
+		}
+		for k := range m {
+			// Порядок выдачи system_profiler не является частью контракта — сравниваем
+			// как множества, а не как последовательности.
+			sort.Slice(m[k], func(i, j int) bool { return m[k][i].InstallLocation < m[k][j].InstallLocation })
+		}
+		return m
 	}
-	for _, s := range installedSoftware() {
-		if prev, ok := seen[key{s.Name, s.Version}]; ok && prev != s {
-			t.Errorf("запись %q нестабильна между снимками:\n первый %+v\n второй %+v", s.Name, prev, s)
+
+	a, b := byKey(first), byKey(installedSoftware())
+	for k, want := range a {
+		got, ok := b[k]
+		// Разное число записей под ключом — это появление/исчезновение, которое тест
+		// терпит намеренно (фоновое обновление, временный каталог установщика).
+		if !ok || len(got) != len(want) {
+			continue
+		}
+		for i := range want {
+			if want[i] != got[i] {
+				t.Errorf("запись %q нестабильна между снимками:\n первый %+v\n второй %+v",
+					want[i].Name, want[i], got[i])
+			}
 		}
 	}
 }

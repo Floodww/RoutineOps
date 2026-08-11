@@ -251,6 +251,7 @@ NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{en
 docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" -e RELEASE_PUBKEY="$RELEASE_PUBKEY" \
   -e BUILD_TAGS="${BUILD_TAGS:-}" -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
+  -e ENTERPRISE_MSI="${ENTERPRISE_MSI:-}" -e ENTERPRISE_PKG="${ENTERPRISE_PKG:-}" \
   golang:1.26-alpine sh -c '
     set -e
     V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
@@ -365,9 +366,13 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # падал "Permission denied": releases/ становится root-owned после этого же
     # контейнера (publish-release пишет от root), а install.sh с umask 077 к тому же
     # создал бы 600 — сервер не прочитал бы их по /downloads. В контейнере: тот же root
-    # + umask 022 → 644, читаемо. Из репо; при отсутствии — просто пропуск (варнинг ниже).
-    [ -f build/msi/RoutineOps-agent.msi ] && { cp build/msi/RoutineOps-agent.msi releases/RoutineOps-agent.msi; echo "  MSI → releases/RoutineOps-agent.msi (универсальный, из репо)"; }
-    [ -f build/pkg/RoutineOps-agent.pkg ] && { cp build/pkg/RoutineOps-agent.pkg releases/RoutineOps-agent.pkg; echo "  PKG → releases/RoutineOps-agent.pkg (универсальный, из репо)"; }
+    # + umask 022 → 644, читаемо.
+    #
+    # Тот же скрипт, что в update.sh: правило про редакцию (на enterprise-инсталляции в
+    # releases/ не место трекнутым open-core артефактам) обязано действовать и при ПЕРВОЙ
+    # установке. Иначе оно закрывало бы только повторный выкат, а свежая инсталляция ехала
+    # бы с ним сломанным с первого дня — и именно на ней заводят парк.
+    sh scripts/publish-installers.sh
   '
 
 # Канонические инсталляторы (releases/RoutineOps-agent.{msi,pkg} → /downloads/… для кнопок в

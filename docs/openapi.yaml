@@ -2698,6 +2698,7 @@ paths:
                 type: object
                 properties:
                   mode: { type: string, enum: [unattended, consent_required] }
+                  profile_cap: { type: string, enum: [low, medium], description: Потолок профиля сеансов тенанта }
                   recording_used: { type: integer, format: int64, description: Занято записями, байт }
                   recording_quota: { type: integer, format: int64, description: Потолок на тенанта, байт }
                   recording_retention: { type: integer, description: Срок хранения записей, суток }
@@ -2740,6 +2741,54 @@ paths:
         '403': { description: Нет роли либо сервисный токен }
         '500': { description: Не записался аудит смены — режим не изменён (fail-closed) }
 
+  /api/v1/screen-profile-cap:
+    x-enterprise: true
+    patch:
+      tags: [Устройства]
+      summary: Потолок профиля сеансов экрана (§10 контракта)
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Два значения: `medium` (по умолчанию — 2 к/с,
+        до 1920 px) и `low` (1 к/с, до 1280 px).
+
+        Это ПОТОЛОК, а не значение: профиль сеанса выдаёт сервер в приглашении, но не
+        выше того, что разрешил тенант. Оператор выбрать профиль не может — §10 держит
+        потолки вне интерфейса оператора, — а тенант на узком канале обязан мочь
+        опуститься для всего своего парка.
+
+        Умолчание `medium` появилось после полевого замера: сеанс с управлением отъедал
+        1.6–1.7 % бюджета `low`, то есть худший случай (keyframe каждый кадр), на который
+        считался прежний бюджет, в поле не наступает.
+
+        Смена пишется в аудит В ТОЙ ЖЕ ТРАНЗАКЦИИ и fail-closed — как и смена режима
+        доступа: изменение меняет полосу, которую парк тенанта отъедает у ретранслятора.
+
+        Отдельная ручка, а не поле в теле `PATCH /screen-access-mode`: режим доступа про
+        права сотрудника, потолок — про полосу канала, и склеенные в один запрос они
+        давали бы одну строку аудита на два разных по смыслу изменения.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile_cap]
+              properties:
+                profile_cap: { type: string, enum: [low, medium] }
+      responses:
+        '200':
+          description: Потолок применён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile_cap: { type: string }
+                  previous_profile_cap: { type: string }
+        '400': { description: Потолок вне списка low/medium }
+        '403': { description: Нет роли либо сервисный токен }
+        '500': { description: Не записался аудит смены — потолок не изменён (fail-closed) }
+
   /api/v1/screen-recording-grants:
     x-enterprise: true
     get:
@@ -2763,6 +2812,34 @@ paths:
                     email: { type: string }
                     role: { type: string }
                     can_view_session_recording: { type: boolean }
+        '403': { description: Нет роли либо сервисный токен }
+
+  /api/v1/screen-recording-grants/me:
+    x-enterprise: true
+    get:
+      tags: [Устройства]
+      summary: Разрешено ли МНЕ смотреть записи сеансов
+      x-requires-human: true
+      description: |
+        Роль: `it_admin`, только человек. Отдаёт один бит — состояние отзываемого гранта
+        `users.can_view_session_recording` у ВЫЗЫВАЮЩЕГО (§5).
+
+        Нужна интерфейсу: без неё панель устройства предлагала кнопку «Запись» каждому
+        администратору, а скачивание отвечало 403 всем, кому грант не выдан. Список по
+        тенанту для этого не годится — панель спрашивает про себя, а получала бы строки
+        всех администраторов тенанта на каждый открытый экран устройства.
+
+        Авторизацией НЕ является: грант отзываемый, и решение принимает
+        `GET /screen-sessions/{sid}/recording` в момент запроса файла.
+      responses:
+        '200':
+          description: Состояние собственного гранта
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  can_view_session_recording: { type: boolean }
         '403': { description: Нет роли либо сервисный токен }
 
   /api/v1/screen-recording-grants/{uid}:

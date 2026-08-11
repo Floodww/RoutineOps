@@ -25,7 +25,8 @@
     "sso": "SSO / OIDC",
     "saml": "SSO / SAML",
     "siem": "SIEM export",
-    "screenAccess": "Screen access"
+    "screenAccess": "Screen access",
+    "owners": "Owners"
   },
   "layout": {
     "roleAdmin": "administrator",
@@ -547,7 +548,37 @@
     "screen_recording_view_denied": "was denied access to a session recording",
     "screen_session_foreign_claim": "device tried to claim another device's session",
     "screen_session_operator_revoked": "session terminated: operator rights revoked",
-    "screen_event_foreign_session": "device reported on another device's session"
+    "screen_event_foreign_session": "device reported on another device's session",
+    "delete_person": "deleted a person record",
+    "update_person": "updated a person record",
+    "delete_user": "deleted a user",
+    "update_script_policy": "updated a script policy",
+    "login_mfa_pending": "passed the password step and is awaiting the second factor",
+    "mfa_disabled": "disabled two-factor authentication",
+    "mfa_recovery_code_used": "signed in with a recovery code",
+    "scim_create_user": "created a user via SCIM",
+    "scim_update_user": "updated a user via SCIM",
+    "scim_deactivate_user": "deactivated a user via SCIM",
+    "scim_delete_user": "deleted a user via SCIM",
+    "set_directory_config": "changed the directory settings",
+    "sync_directory": "synchronised the directory",
+    "screen_access_mode_changed": "changed the screen access mode",
+    "screen_profile_cap_changed": "changed the screen session quality ceiling",
+    "screen_recording_grant_granted": "granted access to session recordings",
+    "screen_recording_grant_revoked": "revoked access to session recordings",
+    "screen_session_consent": "recorded the employee's answer to the session request",
+    "screen_session_control_granted": "took control during the session",
+    "screen_session_control_returned": "returned control to the employee",
+    "admin_session_changes_final": "finalised the changes made during the admin window",
+    "late_task_result": "returned a task result late",
+    "lock_failed": "failed to lock the device",
+    "arm_lock_secrets": "armed the device lock secrets",
+    "filevault_revoked": "revoked disk access (FileVault)",
+    "filevault_revoke_failed": "failed to revoke disk access (FileVault)",
+    "filevault_not_armed": "reported that the FileVault secrets were not armed",
+    "filevault_secret_mismatch": "reported a FileVault secret mismatch",
+    "reveal_escrow": "revealed a recovery key from escrow",
+    "reveal_escrow_denied": "was denied a recovery key reveal"
   },
   "deviceStatus": {
     "active": "Active",
@@ -1413,6 +1444,8 @@
     "brokenStream": "Frame stream is corrupted — viewing stopped",
     "watch": "Watch",
     "recordingForbidden": "Viewing recordings requires a grant — an administrator issues it on the Screen access page",
+    "recordingLocked": "Recorded, no access",
+    "recordingLockedHint": "These sessions were recorded, but you are not allowed to open the recordings. An administrator issues the viewing grant here:",
     "consent": {
       "granted": "employee allowed",
       "denied": "employee refused",
@@ -1429,7 +1462,8 @@
     "controlBadge": "with control",
     "canvasControlLabel": "Remote device screen — control active",
     "inputBacklog": "The agent cannot keep up with input — some keystrokes were not delivered. Wait or end the session.",
-    "agentNoControl": "The agent on this device does not support control — update the agent"
+    "agentNoControl": "The agent on this device does not support control — update the agent",
+    "controlUipiHint": "On Windows, windows running as administrator cannot be controlled: the system silently discards input addressed to them. The picture keeps coming. If the mouse and keyboard stop working, check whether a window with administrator rights has focus."
   },
   "format": {
     "bytes": "B",
@@ -1448,6 +1482,15 @@
     "modeTitle": "Access mode",
     "current": "active",
     "modeSaved": "Access mode changed",
+    "profileTitle": "Quality and frame rate",
+    "profileHint": "A ceiling for every session of this tenant. Operators cannot request more — but on a narrow link the ceiling is worth lowering.",
+    "profileSaved": "Quality ceiling changed",
+    "profile": {
+      "medium": "2 frames per second, up to 1920 px",
+      "mediumHint": "The default. Measured on a live desktop: a session uses 1.6-1.7 % of the allotted bandwidth, with plenty of headroom.",
+      "low": "1 frame per second, up to 1280 px",
+      "lowHint": "For narrow links and sites with expensive traffic. The picture refreshes noticeably less often."
+    },
     "mode": {
       "unattended": "Without consent",
       "unattendedHint": "The operator connects straight away. The employee sees the monitoring notice but cannot refuse.",
@@ -1467,5 +1510,20 @@
     "give": "Grant",
     "revoke": "Revoke",
     "noAdmins": "No administrators in this tenant"
+  },
+  "owners": {
+    "title": "Device owners",
+    "subtitle": "Person records that devices are assigned to. Created from a device card or by directory synchronisation.",
+    "name": "Name",
+    "source": "Source",
+    "sourceManual": "created manually",
+    "sourceLdap": "from the directory",
+    "empty": "No records yet. The first one appears when you assign an owner to a device.",
+    "loadFailed": "Could not load the list of owners.",
+    "delete": "Delete record",
+    "deleteQ": "Delete this owner record?",
+    "deleteWarn": "The record «{{name}}» will be deleted and the owner will disappear from ALL devices it is assigned to — not only the one you came from. The devices themselves are not touched: they are simply left without an owner.",
+    "deleted": "Record «{{name}}» deleted",
+    "deleteFailed": "Could not delete the record"
   }
 }

@@ -29,6 +29,18 @@ func IsNewer(have, want string) (bool, error) {
 	return false, nil
 }
 
+// Valid — разбирается ли строка как версия вообще.
+//
+// Нужна там, где «непарсибельно» и «старее» — разные решения, а не одна ветка
+// ошибки. Пример из self-update: версия `dev` не сравнима ни с чем, и записывать
+// её в пол анти-отката нельзя, тогда как битый пол на диске, наоборот, надо
+// перезаписать работающей версией. Через IsNewer эти два случая не разделяются:
+// она возвращает одну ошибку на обе стороны сравнения.
+func Valid(s string) bool {
+	_, err := parseSemver(s)
+	return err == nil
+}
+
 func parseSemver(s string) ([3]int, error) {
 	var v [3]int
 	s = strings.TrimPrefix(strings.TrimSpace(s), "v")

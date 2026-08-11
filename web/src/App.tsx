@@ -25,6 +25,7 @@ import Users from "@/pages/Users"
 import License from "@/pages/License"
 import APITokens from "@/pages/APITokens"
 import Directory from "@/pages/Directory"
+import Owners from "@/pages/Owners"
 import OIDC from "@/pages/OIDC"
 import SAML from "@/pages/SAML"
 import SIEM from "@/pages/SIEM"
@@ -84,6 +85,7 @@ export default function App() {
           <Route path="scripts" element={<AdminRoute><Scripts /></AdminRoute>} />
           <Route path="script-policies" element={<AdminRoute><ScriptPolicies /></AdminRoute>} />
           <Route path="groups" element={<AdminRoute><Groups /></AdminRoute>} />
+          <Route path="owners" element={<AdminRoute><Owners /></AdminRoute>} />
           <Route path="audit-log" element={<AuditLog />} />
           <Route path="users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="license" element={<AdminRoute><License /></AdminRoute>} />

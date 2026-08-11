@@ -40,6 +40,50 @@ func findDeviceCompliance(t *testing.T, report *storage.ComplianceReport, device
 	return storage.DeviceCompliance{}
 }
 
+// 🔴 Незаэнролленное устройство в отчёт НЕ попадает вовсе.
+//
+// Строка устройства заводится ВЫДАЧЕЙ ТОКЕНА, а не подключением агента. Пока агент не
+// пришёл, машины физически нет: отчитываться ей нечем, и «не отчитывалась неделю» —
+// не факт о парке, а факт о том, что кто-то выписал токен и не использовал его.
+//
+// До правки каждый такой токен добавлял в «Соответствия» вечно несоответствующую строку
+// с причиной stale, и раздел копил мусор, растущий от самого факта заказа устройств.
+// Отчёт отвечал не на «в каком состоянии парк», а на «сколько токенов выписали».
+//
+// Проверяются ОБЕ стороны: pending не виден, а тот же самый парк из заэнролленных машин
+// в отчёте остаётся — иначе гейт был бы зелёным и у предиката, отсекающего вообще всё.
+func TestComplianceReport_PendingDeviceIsNotInReport(t *testing.T) {
+	db := newDB(t)
+	ctx := tenantCtx()
+
+	enrolled := complianceDevice(t, db, uniq(t))
+	pending, err := db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, "ws-заказан-"+uniq(t), "windows")
+	if err != nil {
+		t.Fatalf("CreatePendingDevice: %v", err)
+	}
+
+	report, err := db.BuildComplianceReport(ctx, tenancy.DefaultTenantID, nil)
+	if err != nil {
+		t.Fatalf("BuildComplianceReport: %v", err)
+	}
+
+	for _, d := range report.Devices {
+		if d.DeviceID == pending.ID {
+			t.Fatalf("незаэнролленное устройство попало в отчёт соответствия с причинами %v — "+
+				"раздел копит мусор из невостребованных токенов", d.Reasons)
+		}
+	}
+	// Заэнролленное на месте: предикат отсекает pending, а не отчёт целиком.
+	findDeviceCompliance(t, report, enrolled)
+
+	// И в сводке его тоже нет: счётчик «устройств» — это парк, а не число выданных
+	// токенов. Расхождение списка со сводкой было бы худшим исходом правки.
+	if report.Summary.Devices != len(report.Devices) {
+		t.Errorf("сводка считает %d устройств при %d строках в списке",
+			report.Summary.Devices, len(report.Devices))
+	}
+}
+
 // Свежее устройство без замечаний — соответствует, и причин у него ноль.
 func TestComplianceReport_FreshDeviceIsCompliant(t *testing.T) {
 	db := newDB(t)

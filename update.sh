@@ -76,9 +76,23 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
   -e BUILD_TAGS="${BUILD_TAGS:-}" \
   -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
+  -e ENTERPRISE_MSI="${ENTERPRISE_MSI:-}" \
+  -e ENTERPRISE_PKG="${ENTERPRISE_PKG:-}" \
+  -e RELEASE_CHANNEL="${RELEASE_CHANNEL:-stable}" \
   golang:1.26-alpine sh -c '
     set -e
     V=$(cat AGENT_VERSION)  # версия АГЕНТА (не продукта): агент версионируется отдельно от сервера
+
+    # Канал выкатки. Канареечная схема (Q-52) уже была в publish-release, но штатного пути
+    # к ней не вело: update.sh всегда публиковал в stable, то есть «обкатать на группе
+    # машин» означало звать publish-release руками мимо деплоя. Механизм, к которому не
+    # ведёт штатный путь, в поле не существует.
+    CH="${RELEASE_CHANNEL:-stable}"
+    case "$CH" in
+      stable|beta) ;;
+      *) echo "ОШИБКА: RELEASE_CHANNEL=$CH — ожидается stable|beta" >&2; exit 1 ;;
+    esac
+    [ "$CH" = stable ] || echo "  канал выкатки: $CH (парк на stable не двигается)"
     # PE-версия для Windows-VERSIONINFO: только semver-часть, иначе 0.0.0 (ср. WINVER в Makefile).
     WINVER=$(echo "$V" | grep -Eo "^[0-9]+\.[0-9]+\.[0-9]+" || echo 0.0.0)
     WV_MAJ=${WINVER%%.*}; WV_REST=${WINVER#*.}; WV_MIN=${WV_REST%%.*}; WV_PAT=${WV_REST#*.}
@@ -143,7 +157,7 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
       sh scripts/agent-edition-guard.sh "$BUILD_TAGS" "/tmp/agent_${OS}_${ARCH}" "$OS/$ARCH"
 
       go run ./cmd/publish-release -binary /tmp/agent_${OS}_${ARCH} \
-        -version "v${V}" -os "$OS" -arch "$ARCH" -key release_ed25519.pem
+        -version "v${V}" -os "$OS" -arch "$ARCH" -key release_ed25519.pem -channel "$CH"
     done
 
     # macOS: prebuilt из репо (собран мейнтейнером на маке с cgo), подписываем его
@@ -205,18 +219,17 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
         exit 1
       fi
       go run ./cmd/publish-release -binary "$PREBUILT" \
-        -version "v${V}" -os darwin -arch arm64 -key release_ed25519.pem
+        -version "v${V}" -os darwin -arch arm64 -key release_ed25519.pem -channel "$CH"
     else
       echo "  ⚠ darwin/arm64: $PREBUILT отсутствует — macOS-релиз НЕ опубликован."
       echo "    Маки останутся на текущей версии. Собрать: make pkg-mac-native НА маке."
     fi
 
-    # Обновляем канонические инсталляторы (releases/RoutineOps-agent.{msi,pkg} → кнопки
-    # "Скачать" в UI) ЗДЕСЬ, в контейнере: releases/ root-owned после publish-release,
-    # host-side cp упал бы Permission denied. umask контейнера 022 → 644 (читаемо сервером).
-    # Раньше update.sh их НЕ обновлял → UI отдавал старый инсталлятор до ручного sudo cp.
-    [ -f build/msi/RoutineOps-agent.msi ] && { cp build/msi/RoutineOps-agent.msi releases/RoutineOps-agent.msi; echo "  MSI → releases/RoutineOps-agent.msi обновлён"; }
-    [ -f build/pkg/RoutineOps-agent.pkg ] && { cp build/pkg/RoutineOps-agent.pkg releases/RoutineOps-agent.pkg; echo "  PKG → releases/RoutineOps-agent.pkg обновлён"; }
+    # Канонические установщики (releases/RoutineOps-agent.{msi,pkg} → кнопки «Скачать» в
+    # панели и скрипты миграции с инкумбента). Логика вынесена в отдельный скрипт: внутри
+    # `docker run … sh -c` её нельзя ни прогнать, ни проверить, а правило про редакцию
+    # артефактов слишком дорого стоит, чтобы жить непроверяемым (scripts/test-update-installer-edition.sh).
+    sh scripts/publish-installers.sh
   '
 
 echo ""

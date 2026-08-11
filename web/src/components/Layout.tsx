@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { LayoutDashboard, Monitor, Bell, Shield, ShieldCheck, LogOut, LogIn, KeyRound, KeySquare, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck, FolderTree, Building2, Network, ScanFace, Fingerprint, Radio, Rocket, MonitorPlay, ChevronsUpDown, Check } from "lucide-react"
+import { Contact, LayoutDashboard, Monitor, Bell, Shield, ShieldCheck, LogOut, LogIn, KeyRound, KeySquare, FileCode2, ListChecks, Send, History, Sun, Moon, Users, Boxes, UserCircle, BadgeCheck, FolderTree, Building2, Network, ScanFace, Fingerprint, Radio, Rocket, MonitorPlay, ChevronsUpDown, Check } from "lucide-react"
 import { logout } from "@/lib/auth"
 import { RoutineOpsLogo } from "@/components/RoutineOpsLogo"
 import { useMe } from "@/lib/useMe"
@@ -161,6 +161,7 @@ export default function Layout() {
         { to: "/across-tenants", label: t("nav.acrossTenants"), icon: Network, badge: 0, providerOnly: true },
         { to: "/enrollment", label: t("nav.enrollment"), icon: LogIn, badge: queueCount, adminOnly: true },
         { to: "/groups", label: t("nav.groups"), icon: Boxes, badge: 0, adminOnly: true },
+        { to: "/owners", label: t("nav.owners"), icon: Contact, badge: 0, adminOnly: true },
         { to: "/rollout", label: t("nav.rollout"), icon: Rocket, badge: 0, adminOnly: false },
       ],
     },

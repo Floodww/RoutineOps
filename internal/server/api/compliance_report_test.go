@@ -60,10 +60,27 @@ func TestComplianceReport_JSONAndCSVAgree(t *testing.T) {
 	token := authToken(t, rtr, db)
 
 	// Хотя бы одна машина в отчёте: пустой отчёт не проверяет ни строку выгрузки.
+	//
+	// Машина обязана быть ЗАЭНРОЛЛЕННОЙ. Раньше здесь стояло голое CreatePendingDevice —
+	// не потому, что тест про pending, а потому что это был самый короткий способ завести
+	// строку. С тех пор отчёт перестал показывать невостребованные токены, и строка в
+	// статусе pending перестала быть машиной парка: тест сверял бы JSON с CSV на предмете,
+	// которого в отчёте нет по построению.
 	hostname := "host-compliance-" + t.Name()
-	if _, err := db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, hostname, "linux"); err != nil {
+	dev, err := db.CreatePendingDevice(ctx, tenancy.DefaultTenantID, hostname, "linux")
+	if err != nil {
 		t.Fatalf("CreatePendingDevice: %v", err)
 	}
+	enrollCtx, finish, err := db.BindTenant(ctx, tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
+	if _, err := db.Scoped(enrollCtx).Exec(enrollCtx,
+		`UPDATE devices SET status = 'active', last_seen_at = now() WHERE id = $1`, dev.ID); err != nil {
+		finish(false)
+		t.Fatalf("перевод устройства в active: %v", err)
+	}
+	finish(true)
 
 	report := getReportJSON(t, rtr, token)
 	if report.Summary.Devices != len(report.Devices) {

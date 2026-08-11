@@ -23,6 +23,13 @@ const MODES = [
   { value: "consent_required", label: "screenAccess.mode.consent", hint: "screenAccess.mode.consentHint" },
 ] as const
 
+// Потолок профиля сеанса. Порядок «выше → ниже» намеренно: medium — умолчание после
+// полевых замеров, а low остаётся для тенанта на узком канале.
+const PROFILE_CAPS = [
+  { value: "medium", label: "screenAccess.profile.medium", hint: "screenAccess.profile.mediumHint" },
+  { value: "low", label: "screenAccess.profile.low", hint: "screenAccess.profile.lowHint" },
+] as const
+
 export default function ScreenAccess() {
   const { t } = useTranslation()
   const [policy, setPolicy] = useState<ScreenAccessPolicy | null>(null)
@@ -60,6 +67,20 @@ export default function ScreenAccess() {
     try {
       await api.patch("/screen-access-mode", { mode })
       toast({ title: t("screenAccess.modeSaved"), variant: "success" })
+      await load()
+    } catch (e) {
+      toast({ title: errMessage(e), variant: "destructive" })
+    } finally {
+      setBusy("")
+    }
+  }
+
+  const setProfileCap = async (cap: string) => {
+    if (!policy || policy.profile_cap === cap) return
+    setBusy("profile")
+    try {
+      await api.patch("/screen-profile-cap", { profile_cap: cap })
+      toast({ title: t("screenAccess.profileSaved"), variant: "success" })
       await load()
     } catch (e) {
       toast({ title: errMessage(e), variant: "destructive" })
@@ -129,6 +150,42 @@ export default function ScreenAccess() {
             это здесь важнее, чем в документации: администратор выбирает режим именно
             здесь и может решить, что unattended означает «сотрудник не узнает». */}
         <p className="mt-3 text-xs text-muted-foreground">{t("screenAccess.noticeAlways")}</p>
+      </section>
+
+      {/* Потолок профиля. Здесь же, где режим, и это не соседство ради компоновки:
+          администратор, у которого сеансы «мыльные» или, наоборот, съедают канал, ищет
+          причину там, где настраивает наблюдение. Названия профилей не показываем сырыми
+          (low/medium ничего не говорят) — показываем то, что человек увидит: частоту
+          кадров и разрешение. */}
+      <section className="glass p-5">
+        <h2 className="text-[15px] font-semibold text-foreground">{t("screenAccess.profileTitle")}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">{t("screenAccess.profileHint")}</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          {PROFILE_CAPS.map((p) => {
+            const active = policy?.profile_cap === p.value
+            return (
+              <button
+                key={p.value}
+                type="button"
+                disabled={busy === "profile"}
+                onClick={() => void setProfileCap(p.value)}
+                aria-pressed={active}
+                className={
+                  "rounded-xl border p-4 text-left transition-colors " +
+                  (active
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/40 hover:bg-muted/40")
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">{t(p.label)}</span>
+                  {active && <Badge variant="outline">{t("screenAccess.current")}</Badge>}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{t(p.hint)}</p>
+              </button>
+            )
+          })}
+        </div>
       </section>
 
       <section className="glass p-5">

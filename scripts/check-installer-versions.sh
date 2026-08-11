@@ -288,7 +288,25 @@ if [ -f "$PKG" ]; then
     echo "ОШИБКА: Payload из $PKG не распаковался — редакцию проверить нечем" >&2
     exit 2
   fi
-  edition_open_core "$tmpd/payload" "payload внутри PKG"
+  # Гейт наводится на САМ БИНАРЬ, а не на поток cpio. Раньше сюда уезжал распакованный
+  # поток целиком, и совпадение токена в нём было удачей: cpio не сжимает, поэтому
+  # работало — но ровно до первого формата, который сжимает (и тогда «open-core» было бы
+  # выдумкой, а не наблюдением). Гейт с 2.6.2 такой вход отвергает сам (код 2), и это
+  # правильная сторона: разбирать контейнеры — работа вызывающего.
+  mkdir -p "$tmpd/x"
+  if command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xf "$tmpd/payload" -C "$tmpd/x" >/dev/null 2>&1 || true
+  elif command -v cpio >/dev/null 2>&1; then
+    ( cd "$tmpd/x" && cpio -idm < "$tmpd/payload" >/dev/null 2>&1 ) || true
+  fi
+  inner_bin=$(find "$tmpd/x" -type f -name 'RoutineOps-agent' 2>/dev/null | head -1)
+  [ -n "$inner_bin" ] || inner_bin=$(find "$tmpd/x" -type f -name 'mdm-agent' 2>/dev/null | head -1)
+  if [ -z "$inner_bin" ]; then
+    rm -rf "$tmpd"
+    echo "ОШИБКА: в Payload из $PKG не нашёлся бинарь агента — редакцию проверить нечем" >&2
+    exit 2
+  fi
+  edition_open_core "$inner_bin" "бинарь внутри PKG"
   rm -rf "$tmpd"
 fi
 
