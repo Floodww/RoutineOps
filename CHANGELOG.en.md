@@ -14,6 +14,42 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.6.8 — 11 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Self-update
+
+- 🔴 **Rollback protection no longer locks a machine onto a version that never ran.** The
+  floor was raised by a SUCCESSFUL FILE REPLACEMENT rather than a successful start: if the
+  new binary landed on disk but the process did not come up afterwards (a corrupt build, an
+  incompatible library, a startup failure), the machine refused that version forever and
+  **silently** — including a fixed rebuild under the same number — while the documented
+  recovery from the backup copy never touched the floor. The floor is now raised by the
+  first successful start, and a refusal caused by it is logged with every number and the
+  file path instead of silence.
+- **The previous binary's backup copy is removed on confirmation, not at startup.** An
+  agent that came up and died two seconds later used to delete its only recovery path
+  before breaking.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] Control now works against windows started as administrator.** The system
+  used to silently discard input aimed at a window with higher privileges: the operator saw
+  a healthy picture and rising counters while the cursor stood still and clicks went
+  nowhere — a Task Manager left in the foreground was enough. The screen capturer now runs
+  with system privileges, which also removes the loss of control at the moment of an
+  elevation prompt (UAC).
+- **[Enterprise] Input follows the desktop the system switches to** — the binding is
+  refreshed before every batch of events instead of once per session. Input is deliberately
+  not delivered to the secure desktop (lock screen, UAC, Ctrl+Alt+Del): that is the
+  territory of the rule "locking the screen ends the session".
+- **[Enterprise] Detecting the secure desktop no longer relies on being denied access.**
+  With system privileges the secure desktop opens, so the former signal ("access denied,
+  therefore we are on the secure desktop") would have answered backwards on the lock screen
+  and the rule would have stopped firing exactly where it is the only safeguard. The signal
+  is now the desktop's name.
+
 ## 2.6.7 — 10 August 2026
 
 Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.

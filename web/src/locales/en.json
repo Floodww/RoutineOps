@@ -569,6 +569,7 @@
     "screen_session_consent": "recorded the employee's answer to the session request",
     "screen_session_control_granted": "took control during the session",
     "screen_session_control_returned": "returned control to the employee",
+    "screen_control_ineffective": "control stopped taking effect during the session",
     "admin_session_changes_final": "finalised the changes made during the admin window",
     "late_task_result": "returned a task result late",
     "lock_failed": "failed to lock the device",
@@ -1463,7 +1464,11 @@
     "canvasControlLabel": "Remote device screen — control active",
     "inputBacklog": "The agent cannot keep up with input — some keystrokes were not delivered. Wait or end the session.",
     "agentNoControl": "The agent on this device does not support control — update the agent",
-    "controlUipiHint": "On Windows, windows running as administrator cannot be controlled: the system silently discards input addressed to them. The picture keeps coming. If the mouse and keyboard stop working, check whether a window with administrator rights has focus."
+    "controlUipiHint": "Your input is not reaching the machine right now. Wait a moment; if it persists, end and restart the session.",
+    "controlActive": "Control is taking effect — your input is reaching the machine.",
+    "controlUnknown": "Confirming control… the agent has not yet reported whether input is reaching the machine.",
+    "controlIneffectiveDesktop": "Your input is not reaching the machine: a protected desktop is active (a UAC prompt, the lock screen, or Ctrl+Alt+Del). Control resumes on its own once it closes.",
+    "controlIneffectiveRejected": "Your input is being discarded by the OS — a window with higher privileges may have focus."
   },
   "format": {
     "bytes": "B",

@@ -36,8 +36,14 @@ cd "$repo"
 zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
 changed=""
 all=0
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+head=$(git rev-parse HEAD)
+notlhead=""
+while read -r local_ref local_sha _remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue          # удаление ветки — проверять нечего
+  case "$local_ref" in
+    # Теги пропускаем: они публикуют уже существующий коммит, а не новое содержимое.
+    refs/heads/*) [ "$local_sha" = "$head" ] || notlhead="$notlhead $local_ref" ;;
+  esac
   if [ "$remote_sha" = "$zero" ]; then
     all=1
   else
@@ -47,6 +53,27 @@ $(git diff --name-only "$remote_sha" "$local_sha")"
 done
 if [ -z "$changed" ] && [ "$all" = 0 ]; then
   exit 0
+fi
+
+# 🔴 Гейты гоняются по РАБОЧЕМУ ДЕРЕВУ, а публикуется коммит. Пока эти два не совпадают,
+# зелёный гейт подтверждает не то, что уезжает.
+#
+# Поймано 12.08.2026: первый пуш ветки screen-control-state прошёл зелёным на коммите,
+# который правок ещё не содержал, — они в этот момент лежали в дереве незастейдженными.
+# Класс тот же, что «файл существует ≠ файл тот»: проверка верна буквально и ложна по
+# смыслу. Незакоммиченный файл прячет обе половины сразу — и правку, которой в пуше нет,
+# и файл, которого в пуше нет, но который гейты успешно собрали.
+#
+# Отказ, а не предупреждение: предупреждение в конце зелёного прогона читают как «ok».
+if [ -n "$(git status --porcelain)" ]; then
+  echo "pre-push: дерево грязное — гейты проверили бы НЕ то, что уезжает в пуш." >&2
+  git status --short >&2
+  echo "  Закоммитьте либо спрячьте (git stash -u) и повторите." >&2
+  exit 1
+fi
+if [ -n "$notlhead" ]; then
+  echo "pre-push: уезжает не HEAD ($notlhead) — гейты гоняются по дереву HEAD, то есть проверят не то." >&2
+  exit 1
 fi
 
 go_touched=$all

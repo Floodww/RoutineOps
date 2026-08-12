@@ -70,6 +70,56 @@ export function recordingAffordance(hasRecording: boolean, grant: boolean | null
   return grant === false ? "locked" : "download"
 }
 
+// Признак применяемости ввода (Ф3), как его отдаёт заголовок X-Screen-Control.
+//
+// Три состояния, и «неизвестно» — НЕ «работает»: агент старше поля X-Screen-Control не
+// пришлёт признак вовсе, и молчание, прочитанное как успех, оставило бы ложный зелёный.
+// Панель рисует индикатор только у сеанса с управлением; у смотрового заголовка нет.
+export type ControlIndicator = {
+  state: "unknown" | "effective" | "ineffective"
+  reason: string
+}
+
+// parseControlHeader разбирает X-Screen-Control. Пустое или незнакомое → unknown:
+// отсутствие сигнала не должно читаться как «работает».
+export function parseControlHeader(raw: string | undefined): ControlIndicator {
+  const v = String(raw || "").trim()
+  if (v === "effective") return { state: "effective", reason: "" }
+  if (v.startsWith("ineffective:")) return { state: "ineffective", reason: v.slice("ineffective:".length) }
+  return { state: "unknown", reason: "" }
+}
+
+// controlIneffectiveKey переводит причину неприменимости в ключ подсказки. Пустая строка
+// означает «подписи нет» — тогда показывается САМ КОД, а не общая формулировка.
+//
+// 🔴 Незнакомый код обязан доехать до оператора текстом (§«Честный признак управления»:
+// reason строкой именно затем, чтобы код, которого панель не знает, не схлопывался). Общий
+// фолбэк здесь был бы тем же `UNSPECIFIED`, от которого контракт и отказался: сервер новее
+// панели — штатная ситуация, и в этот момент код в интерфейсе единственный способ понять,
+// что происходит.
+export function controlIneffectiveKey(reason: string): string {
+  switch (reason) {
+    case "DESKTOP_LOST":
+    case "SECURE_DESKTOP":
+      return "screenSession.controlIneffectiveDesktop"
+    case "INPUT_REJECTED":
+      return "screenSession.controlIneffectiveRejected"
+    default:
+      return ""
+  }
+}
+
+// controlIneffectiveText — что показать под индикатором «не действует». Известная причина
+// переводится, незнакомая выводится кодом рядом с общей рамкой «ввод не доходит», чтобы
+// строка оставалась понятной оператору и не теряла код для разбора.
+export function controlIneffectiveText(reason: string, t: (k: string) => string): string {
+  const key = controlIneffectiveKey(reason)
+  if (key !== "") return t(key)
+  const code = reason.trim()
+  if (code === "") return t("screenSession.controlUipiHint")
+  return t("screenSession.controlUipiHint") + " (" + code + ")"
+}
+
 export function ScreenSessionPanel({ deviceId }: Props) {
   const { t } = useTranslation()
   const [sessions, setSessions] = useState<ScreenSession[]>([])
@@ -99,6 +149,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // кнопка после нажатия исчезает, а не превращается в «взять снова».
   const [controlReturned, setControlReturned] = useState(false)
   const [inputWarning, setInputWarning] = useState("")
+  // Применяемость ввода (Ф3), как её на каждом опросе сообщает сервер заголовком
+  // X-Screen-Control. Три состояния, и «неизвестно» — не «работает»: агент старше поля
+  // молчит, и молчание не должно читаться как зелёное. Живёт только у сеанса с управлением.
+  const [controlState, setControlState] = useState<ControlIndicator>({ state: "unknown", reason: "" })
   // Открыт ли стрим агента. Отдельно от `live`: сеанс СОЗДАН с момента ответа 201, а
   // стрим появляется через 3.5 с — приглашение едет на устройство, захватчик поднимается
   // в сессии пользователя, в режиме согласия отвечает сотрудник. Управление сервер выдаёт
@@ -192,6 +246,12 @@ export function ScreenSessionPanel({ deviceId }: Props) {
           sized = true
         }
         since = Number(res.headers["x-screen-seq"] || since)
+        // Признак применяемости ввода (Ф3): сервер шлёт его только у сеанса с управлением.
+        // Заголовка нет — состояние не трогаем (у смотрового сеанса его и не будет).
+        const ctrlHeader = res.headers["x-screen-control"]
+        if (ctrlHeader !== undefined) {
+          setControlState(parseControlHeader(ctrlHeader as string))
+        }
 
         const body = new Uint8Array(res.data as ArrayBuffer)
         if (body.byteLength > 0 && canvas) {
@@ -337,6 +397,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
       setStreamOpen(false)
       setControlReturned(false)
       setInputWarning("")
+      setControlState({ state: "unknown", reason: "" })
       setStatus(t("screenSession.waitingAgent"))
       setReason("")
       void runViewer(r.data.id)
@@ -397,6 +458,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
     // журнал под именем другого). Кнопка управления здесь не появляется.
     setControlReturned(true)
     setInputWarning("")
+    setControlState({ state: "unknown", reason: "" })
     setStatus(t("screenSession.waitingAgent"))
     void runViewer(s.id)
   }
@@ -510,14 +572,21 @@ export function ScreenSessionPanel({ deviceId }: Props) {
               <p className="text-xs text-destructive">{t("screenSession.controlHint")}</p>
             )}
             {/*
-              Граница управления называется ЗДЕСЬ, а не в документации: без манифеста
-              UIAccess Windows молча выбрасывает синтетический ввод, адресованный окнам,
-              запущенным от администратора. Оператор в этот момент видит живую картинку и
-              неработающую мышь — то есть ровно ту картину, из-за которой в поле идут чинить
-              сеть. Молчание интерфейса здесь стоит дороже лишней строки.
+              Применяемость ввода называется ЗДЕСЬ живым признаком, а не статичной
+              оговоркой. Раньше тут висело предупреждение про UIAccess «ввод в окна
+              администратора молча пропадает»; с захватчиком под SYSTEM это больше не так,
+              а на потерю входного стола (UAC, локскрин) сервер теперь шлёт настоящий
+              признак X-Screen-Control. Ложный зелёный хуже честного «не доходит»: пока
+              состояние неизвестно — так и говорим, а не показываем работающее управление.
             */}
-            {controlOn && (
-              <p className="text-xs text-muted-foreground">{t("screenSession.controlUipiHint")}</p>
+            {controlOn && controlState.state === "effective" && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-500">{t("screenSession.controlActive")}</p>
+            )}
+            {controlOn && controlState.state === "unknown" && (
+              <p className="text-xs text-muted-foreground">{t("screenSession.controlUnknown")}</p>
+            )}
+            {controlOn && controlState.state === "ineffective" && (
+              <p className="text-xs text-destructive">{controlIneffectiveText(controlState.reason, t)}</p>
             )}
             {inputWarning && <p className="text-xs text-amber-600 dark:text-amber-500">{inputWarning}</p>}
             <p className="text-xs text-muted-foreground">{t("screenSession.recordingNotice")}</p>
