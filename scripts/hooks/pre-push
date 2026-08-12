@@ -150,6 +150,17 @@ if [ -f scripts/agent-edition-guard.sh ] && [ -f build/darwin/agent_darwin_arm64
     sh scripts/agent-edition-guard.sh "" build/darwin/agent_darwin_arm64 "трекнутый darwin-prebuilt"
 fi
 
+# Версии трекнутых установщиков (MSI, PKG). ВСЕГДА: коммит release(installers)
+# не трогает .go, но обязан проверяться до пуша — иначе enterprise дрейфует молча,
+# и узнаём мы о расхождении из публичного CI через полчаса после пуша. Класс тот же,
+# что у сегодняшнего дефекта гейта «проверяет дерево, а не пуш». Гейт быстрый —
+# msitools + pkgutil, никаких сборок, стоит доли секунды.
+# Поймано 12.08.2026: установщики отстали на три выпуска (2.6.5 при AGENT_VERSION=2.6.8),
+# CI покраснел только после публичного среза — pre-push гейта не было.
+if [ -f scripts/check-installer-versions.sh ]; then
+  run "check-installer-versions.sh" bash scripts/check-installer-versions.sh
+fi
+
 if [ "$web_touched" = 1 ] && [ -d web ]; then
   if need npm "https://nodejs.org/"; then
     if [ ! -d web/node_modules ]; then
