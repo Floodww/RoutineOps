@@ -24,6 +24,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/registry"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
 	"github.com/Floodww/RoutineOps/internal/server/tenancy"
+	"github.com/Floodww/RoutineOps/internal/server/uninstall"
 	"github.com/Floodww/RoutineOps/internal/server/worker"
 	pb "github.com/Floodww/RoutineOps/proto"
 	"github.com/hibiken/asynq"
@@ -163,6 +164,10 @@ func main() {
 	// escrow Unimplemented, lock mode=filevault → 409. См. enterprise{,_stub}.go.
 	routerOpts := enterpriseSetup(g, db, asynqClient, reg, cfg.ScreenDir, cfg.RedisAddr, cfg.JWTSecret, logger)
 	routerOpts = append(routerOpts, api.WithReleasePubKey(cfg.ReleasePubKey))
+	// Удаление ПО — open-core на всех редакциях (13.08.2026, перенос из enterprise). Проводка
+	// здесь, в общей композиции, а не в enterprise-оверлее: ручка есть в обеих сборках, без
+	// лицензионного гейта. Агентская половина (internal/agent/uninstall) тоже не заперта тегом.
+	routerOpts = append(routerOpts, uninstall.Routes(uninstall.NewService(db, asynqClient, logger)))
 	// Fail-closed: опечатка в TRUSTED_PROXIES означает, что оператор настраивал
 	// нестандартную топологию. Молча откатиться на дефолт — оставить его с per-IP
 	// лимитом, который он считает настроенным, а тот схлопнут в один общий бакет.

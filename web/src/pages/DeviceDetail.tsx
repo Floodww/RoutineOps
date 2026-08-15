@@ -301,16 +301,12 @@ export default function DeviceDetail() {
       const r = (e as { response?: { status?: number; data?: unknown } }).response
       const text = typeof r?.data === "string" ? r.data.trim() : ""
       toast({
-        // 402 — лицензия, 404 — свободная редакция (ручки физически нет), 409 —
-        // осмысленный отказ с причиной от сервера. Их важно различать: «попробуйте
-        // ещё раз» подходит ровно ни к одному из них.
-        title: r?.status === 404
-          ? t("deviceDetail.softwareRemovalIsAvailable")
-          : r?.status === 402
-            ? t("deviceDetail.theLicenseDoesNot")
-            : r?.status === 409 && text
-              ? text
-              : t("deviceDetail.failedToQueueThe2"),
+        // 409 — осмысленный отказ с причиной от сервера (нет в инвентаре, снять нечем,
+        // устройство не active), её и показываем дословно. Всё прочее — общий сбой:
+        // «попробуйте ещё раз» к нему подходит, к 409 — нет. Удаление ПО с 13.08.2026
+        // open-core на всех редакциях, поэтому веток 402 (лицензия) и 404 (фичи нет) больше
+        // не бывает.
+        title: r?.status === 409 && text ? text : t("deviceDetail.failedToQueueThe2"),
         variant: "destructive",
       })
     } finally {

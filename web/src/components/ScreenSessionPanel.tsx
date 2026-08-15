@@ -120,6 +120,32 @@ export function controlIneffectiveText(reason: string, t: (k: string) => string)
   return t("screenSession.controlUipiHint") + " (" + code + ")"
 }
 
+// Приостановлена ли выдача кадров (§9.11), как её отдаёт заголовок X-Screen-Frames.
+//
+// Два состояния, а не три, и это не небрежность рядом с ControlState: молчание здесь
+// честно читается как «кадры идут». Агент старше поля паузы не делает вовсе — он на
+// защищённом столе заканчивал сеанс, и вместо неподвижной картинки оператор получал конец.
+export type FrameFlowIndicator = { paused: boolean; reason: string }
+
+// parseFramesHeader разбирает X-Screen-Frames. Всё, кроме «paused», — кадры идут.
+export function parseFramesHeader(raw: string | undefined): FrameFlowIndicator {
+  const v = String(raw || "").trim()
+  if (v === "paused") return { paused: true, reason: "" }
+  if (v.startsWith("paused:")) return { paused: true, reason: v.slice("paused:".length) }
+  return { paused: false, reason: "" }
+}
+
+// framesPausedText — что показать, пока кадров нет. Известная причина переводится,
+// незнакомая выводится КОДОМ рядом с общей рамкой: сервер новее панели — штатная
+// ситуация, и схлопнуть незнакомый код в общую формулировку значит отнять у оператора
+// единственное объяснение замершему экрану (та же причина, что у controlIneffectiveText).
+export function framesPausedText(reason: string, t: (k: string) => string): string {
+  if (reason === "SECURE_DESKTOP") return t("screenSession.framesPausedSecureDesktop")
+  const code = reason.trim()
+  if (code === "") return t("screenSession.framesPaused")
+  return t("screenSession.framesPaused") + " (" + code + ")"
+}
+
 export function ScreenSessionPanel({ deviceId }: Props) {
   const { t } = useTranslation()
   const [sessions, setSessions] = useState<ScreenSession[]>([])
@@ -153,6 +179,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // X-Screen-Control. Три состояния, и «неизвестно» — не «работает»: агент старше поля
   // молчит, и молчание не должно читаться как зелёное. Живёт только у сеанса с управлением.
   const [controlState, setControlState] = useState<ControlIndicator>({ state: "unknown", reason: "" })
+  // Идёт ли выдача кадров (§9.11). Живёт в ОБОИХ видах сеанса, в отличие от controlState:
+  // у смотрящего кроме кадров ничего и нет, и замерший экран без объяснения — это всё,
+  // что он видит.
+  const [framesFlow, setFramesFlow] = useState<FrameFlowIndicator>({ paused: false, reason: "" })
   // Открыт ли стрим агента. Отдельно от `live`: сеанс СОЗДАН с момента ответа 201, а
   // стрим появляется через 3.5 с — приглашение едет на устройство, захватчик поднимается
   // в сессии пользователя, в режиме согласия отвечает сотрудник. Управление сервер выдаёт
@@ -166,6 +196,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // мыши, и перерисовка компонента на этом такте съела бы кадры, нужные самому экрану.
   const inputRef = useRef<InputCollector | null>(null)
   const controlOnRef = useRef(false)
+  // Была ли пауза кадров на ПРЕДЫДУЩЕМ опросе. В ref, а не в состоянии: переход
+  // «пауза → кадры идут» ловится внутри петли опроса, а состояние там уже устарело на
+  // целый рендер, и переход был бы то пропущен, то увиден дважды.
+  const framesPausedRef = useRef(false)
 
   const loadJournal = useCallback(async () => {
     try {
@@ -251,6 +285,24 @@ export function ScreenSessionPanel({ deviceId }: Props) {
         const ctrlHeader = res.headers["x-screen-control"]
         if (ctrlHeader !== undefined) {
           setControlState(parseControlHeader(ctrlHeader as string))
+        }
+        // Выдача кадров (§9.11): заголовок есть у обоих видов сеанса. Его отсутствие —
+        // сервер старше поля, и это ровно «кадры идут»; трогать состояние не надо.
+        //
+        // 🔴 Порядок с блоком выше не случаен. На СНЯТИИ паузы вердикт по вводу роняется в
+        // «проверяем» и делается это ПОСЛЕ применения X-Screen-Control, то есть перебивает
+        // вердикт, приехавший тем же ответом. Прежний вердикт после возврата — память, а
+        // не знание: на Windows внедритель успевает объявить SECURE_DESKTOP раньше опроса,
+        // и «восстановленный» вердикт окажется той причиной, которой на экране уже нет.
+        // Держится «проверяем» ровно до следующего опроса — там приедет настоящий.
+        const framesHeader = res.headers["x-screen-frames"]
+        if (framesHeader !== undefined) {
+          const nextFrames = parseFramesHeader(framesHeader as string)
+          if (framesPausedRef.current && !nextFrames.paused) {
+            setControlState({ state: "unknown", reason: "" })
+          }
+          framesPausedRef.current = nextFrames.paused
+          setFramesFlow(nextFrames)
         }
 
         const body = new Uint8Array(res.data as ArrayBuffer)
@@ -398,6 +450,9 @@ export function ScreenSessionPanel({ deviceId }: Props) {
       setControlReturned(false)
       setInputWarning("")
       setControlState({ state: "unknown", reason: "" })
+      setFramesFlow({ paused: false, reason: "" })
+    framesPausedRef.current = false
+      framesPausedRef.current = false
       setStatus(t("screenSession.waitingAgent"))
       setReason("")
       void runViewer(r.data.id)
@@ -459,6 +514,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
     setControlReturned(true)
     setInputWarning("")
     setControlState({ state: "unknown", reason: "" })
+    setFramesFlow({ paused: false, reason: "" })
     setStatus(t("screenSession.waitingAgent"))
     void runViewer(s.id)
   }
@@ -568,6 +624,19 @@ export function ScreenSessionPanel({ deviceId }: Props) {
                 inputRef.current?.add({ kind: "text", text })
               }}
             />
+            {/*
+              Кадры приостановлены (§9.11) — БЕЗ оговорки на controlOn, в отличие от
+              соседних индикаторов ниже. Смотровой сеанс это и есть тот случай, ради
+              которого признак заведён отдельным состоянием: замершая картинка там —
+              единственное, что происходит, и без строки она неотличима от зависшего
+              сеанса. Пауза ограничена потолком: не снявшись, она станет концом сеанса, и
+              оператор увидит уже причину завершения.
+            */}
+            {framesFlow.paused && (
+              <p className="text-xs text-amber-600 dark:text-amber-500">
+                {framesPausedText(framesFlow.reason, t)}
+              </p>
+            )}
             {controlOn && (
               <p className="text-xs text-destructive">{t("screenSession.controlHint")}</p>
             )}

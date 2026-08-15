@@ -23,8 +23,8 @@ fail=0
 # проезжает под зелёное «open-core чист ✅»: проверено подсадкой в cmd/routineops.
 FREE_CMDS="./cmd/server ./cmd/agent ./cmd/routineops ./cmd/routineops-license ./cmd/routineops-unseal"
 
-# stderr НЕ гасим. Утечка enterprise-пакета БЕЗ free-заглушки (escrow, directory,
-# uninstall) роняет сам `go list` («build constraints exclude all Go files»), а не
+# stderr НЕ гасим. Утечка enterprise-пакета БЕЗ free-заглушки (escrow, directory)
+# роняет сам `go list` («build constraints exclude all Go files»), а не
 # попадает в граф. С прежним 2>/dev/null под set -e гард выходил кодом 1, не напечатав
 # ни байта: оператор видел пустой экран, а проверки ниже не исполнялись вовсе — то есть
 # для этих пакетов пункт 2 был мёртвым кодом.
@@ -34,7 +34,7 @@ trap 'rm -f "$ERRLOG"' EXIT INT TERM
 if ! BINDEPS=$(go list -deps $FREE_CMDS 2>"$ERRLOG"); then
   echo "LEAK-GUARD: НЕ ВЫПОЛНЕН — go list -deps упал, граф зависимостей не построен." >&2
   echo "  (частая причина: free-код импортирует enterprise-пакет без free-заглушки," >&2
-  echo "   напр. internal/server/escrow, internal/server/directory, internal/server/uninstall)" >&2
+  echo "   напр. internal/server/escrow, internal/server/directory)" >&2
   sed 's/^/  go list: /' "$ERRLOG" >&2
   exit 1
 fi
@@ -54,11 +54,12 @@ fi
 
 echo "== 2. enterprise-пакеты не импортируются free-бинарями =="
 # Список обязан совпадать с набором пакетов-библиотек под //go:build enterprise.
-# internal/license (весь слой лицензий и энтайтлментов) и internal/server/uninstall
-# в нём отсутствовали, а ни одной canary-либы они не тянут — значит их утечка
-# не ловилась вообще ничем. Якорь на module path и граница (/|$) — чтобы имя пакета
-# не матчилось подстрокой в постороннем пути.
-ent='^github\.com/Floodww/RoutineOps/(internal/server/crypto|internal/server/escrow|internal/agent/filevault|internal/offline/shamir|internal/server/directory|internal/license|internal/server/uninstall)(/|$)'
+# internal/license (весь слой лицензий и энтайтлментов) в нём отсутствовал, а ни одной
+# canary-либы он не тянет — значит его утечка не ловилась вообще ничем. internal/server/uninstall
+# ЗДЕСЬ БЫЛ, но удаление ПО стало open-core (13.08.2026, перенос во Free) — убран, иначе гард
+# ложно роняет срез на легитимном free-импорте. Якорь на module path и граница (/|$) — чтобы
+# имя пакета не матчилось подстрокой в постороннем пути.
+ent='^github\.com/Floodww/RoutineOps/(internal/server/crypto|internal/server/escrow|internal/agent/filevault|internal/offline/shamir|internal/server/directory|internal/license)(/|$)'
 if printf '%s\n' "$BINDEPS" | grep -Eq "$ent"; then
   echo "  ОШИБКА: enterprise-пакет в графе open-core-бинарей:" >&2
   printf '%s\n' "$BINDEPS" | grep -E "$ent" >&2

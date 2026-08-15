@@ -72,7 +72,12 @@ fi
 #    а серверу он приезжает из .env.prod, которую этот скрипт только читает.
 PG=$($DC -f docker-compose.prod.yml ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
-docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
+# Публикация агентов ОТДЕЛЕНА от деплоя сервера: сервер и веб уже подняты выше (шаг 3),
+# и отказ публикации не должен их откатывать. Иначе серверный хотфикс становится заложником
+# агентской версии — например, перевыпуск того же номера с другим sha256 теперь законно
+# отклоняется (версии неизменяемы, RegisterAgentRelease), и без этой развязки такой отказ
+# ронял бы весь деплой. Отказ ГРОМКИЙ (exit 1 с объяснением), но сервер остаётся на новой версии.
+if ! docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
   -e BUILD_TAGS="${BUILD_TAGS:-}" \
   -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
@@ -231,6 +236,15 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # артефактов слишком дорого стоит, чтобы жить непроверяемым (scripts/test-update-installer-edition.sh).
     sh scripts/publish-installers.sh
   '
+then
+  :
+else
+  echo "" >&2
+  echo "⚠️  ПУБЛИКАЦИЯ АГЕНТОВ ОТКАЗАЛА. Сервер и веб уже подняты на v${VERSION} (шаг 3) и НЕ откачены." >&2
+  echo "   Частая причина: перевыпуск версии с другим sha256 — версии неизменяемы, продвижение меняет только канал." >&2
+  echo "   Установщики (кнопки «Скачать») этим прогоном НЕ обновлены. Разберите публикацию отдельно и повторите." >&2
+  exit 1
+fi
 
 echo ""
 echo "Готово. Сервер на v${VERSION}; парк подтянет агентов self-update'ом за <interval>."

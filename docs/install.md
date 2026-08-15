@@ -351,7 +351,7 @@ grep -nE '^[A-Z_]+=' .env.prod
 `./install.sh` (и каждый `./update.sh`) делает это автоматически: собирает агентов
 (`windows/amd64`, `linux/amd64`, а также prebuilt `darwin/arm64` из `build/darwin/`),
 подписывает их per-deployer ключом `release_ed25519.pem` и публикует через
-`cmd/publish-release` (UPSERT в `agent_releases`, идемпотентно).
+`cmd/publish-release` (повтор той же версии с тем же sha256 идемпотентен и меняет лишь канал; с другим sha256 — отказ, версии неизменяемы).
 
 > **`linux/arm64` штатные скрипты НЕ публикуют.** В UI архитектуру `arm64` выбрать
 > можно, но installer-скрипт придёт без строки загрузки, пока вы не опубликуете

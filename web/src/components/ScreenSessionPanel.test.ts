@@ -4,6 +4,8 @@ import {
   parseControlHeader,
   controlIneffectiveKey,
   controlIneffectiveText,
+  parseFramesHeader,
+  framesPausedText,
 } from "./ScreenSessionPanel"
 
 // Гейт Q-84: панель не предлагает действие, которое заведомо упрётся в 403.
@@ -98,5 +100,48 @@ describe("controlIneffectiveText", () => {
   it("пустая причина не даёт пустых скобок", () => {
     expect(controlIneffectiveText("", t)).toBe("screenSession.controlUipiHint")
     expect(controlIneffectiveText("   ", t)).toBe("screenSession.controlUipiHint")
+  })
+})
+
+// §9.11: приостановка выдачи кадров — ОТДЕЛЬНОЕ состояние сеанса, и читается оно не так,
+// как применяемость ввода. Здесь молчание честно означает «кадры идут»: агент старше поля
+// паузы не делает вовсе, он на защищённом столе заканчивал сеанс.
+describe("parseFramesHeader", () => {
+  it("🔴 отсутствие заголовка — кадры ИДУТ, а не «неизвестно»", () => {
+    // Обратная ошибка тоже реальна: показать «изображение приостановлено» там, где сервер
+    // просто старше поля, значит объяснить движущуюся картинку паузой.
+    expect(parseFramesHeader(undefined)).toEqual({ paused: false, reason: "" })
+    expect(parseFramesHeader("flowing")).toEqual({ paused: false, reason: "" })
+  })
+
+  it("пауза несёт причину после двоеточия", () => {
+    expect(parseFramesHeader("paused:SECURE_DESKTOP")).toEqual({
+      paused: true,
+      reason: "SECURE_DESKTOP",
+    })
+    expect(parseFramesHeader("paused")).toEqual({ paused: true, reason: "" })
+  })
+
+  it("незнакомое значение не притворяется паузой", () => {
+    expect(parseFramesHeader("garbage")).toEqual({ paused: false, reason: "" })
+  })
+})
+
+describe("framesPausedText", () => {
+  const t = (k: string) => k
+
+  it("защищённый стол объясняется своей строкой", () => {
+    expect(framesPausedText("SECURE_DESKTOP", t)).toBe("screenSession.framesPausedSecureDesktop")
+  })
+
+  it("🔴 незнакомая причина доезжает до оператора КОДОМ", () => {
+    // Сервер новее панели — штатная ситуация, и код в этот момент единственное, чем
+    // объясняется замерший экран. Общий фолбэк был бы тем же UNSPECIFIED, от которого
+    // контракт отказался.
+    expect(framesPausedText("FUTURE_REASON", t)).toBe("screenSession.framesPaused (FUTURE_REASON)")
+  })
+
+  it("пустая причина оставляет общую формулировку без скобок", () => {
+    expect(framesPausedText("", t)).toBe("screenSession.framesPaused")
   })
 })

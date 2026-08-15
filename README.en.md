@@ -21,6 +21,7 @@ no VPN required. Product version (server+web): [`VERSION`](./VERSION); agent ver
 - **Device groups** — membership, per-group policies, run a script on a whole group.
 - **Software policies** — allowed/forbidden rules per device, group or platform.
 - **Device lock** — full-screen overlay with a password (Windows and macOS), unlock works offline. Only the service can release the lock: marking the device unlocked behind its back restores the lock and raises a security event.
+- **Software removal** — uninstall an installed application from a device right on the device page (role `it_admin`). The server builds the target selector from its own inventory, not from the request body; the agent picks the removal method (msiexec / dpkg / rpm / …).
 - **Remote reboot** — a single machine or a whole group (maintenance window). The employee gets a grace period to save work, counted by the OS itself; the panel says "scheduled", not "rebooted".
 - **Device owners** — a person card (full name + e-mail) is created right on the device page. An owner needs no console login and no invitation: accounts are for people who use the console.
 - **Events & alerts** — `agent_unreachable`, forbidden software, unauthorized changes, lock bypass attempts; Telegram notifications.
@@ -86,7 +87,6 @@ Enterprise adds on top of the features above:
 | Panel login with directory password (LDAP/AD) | ✅ |
 | Alert severity levels and routing | ✅ |
 | Tamper-evident audit (hash chain) | ✅ |
-| Software removal from the UI | ✅ |
 | Multi-tenancy | ✅ |
 | SSO: OIDC and SAML, both configurable from the panel | ✅ |
 | MFA / TOTP with recovery codes, per-tenant "require MFA" policy | ✅ |

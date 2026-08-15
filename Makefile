@@ -108,6 +108,7 @@ check-escrow-tags:
 # (msitools/bsdtar), в pre-push такой зависимости не место.
 REMOTE_TOKEN := internal/agent/screen
 FRAME_TOKEN  := internal/screenframe
+UNINSTALL_TOKEN := internal/agent/uninstall
 check-remote-tags: ## Гейт §9.17: удалённого стола нет во free-сборке и есть в enterprise
 	@fail=0; \
 	for pkg in 'agent/screen' 'internal/screenframe'; do \
@@ -140,6 +141,60 @@ check-remote-tags: ## Гейт §9.17: удалённого стола нет в
 	fi; \
 	[ "$$fail" -eq 0 ] || exit 1; \
 	echo "check-remote-tags: free чист (граф и бинарь), enterprise содержит фичу ✅"
+
+# Гейт Этапа 3 (удаление ПО во Free): зеркало check-remote-tags, но в ОБРАТНУЮ сторону.
+#
+# Экран — enterprise, и его гейт доказывает ОТСУТСТВИЕ во free. Удаление ПО — наоборот:
+# фича Free (агент лицензию не проверяет, гейт живёт на сервере), поэтому её половина на
+# устройстве тегом НЕ заперта и обязана ПРИСУТСТВОВАТЬ в open-core. Нужен гейт именно на
+# это: «агентская часть тегами не заперта» — предположение, а класс дефекта, ради которого
+# всё делается, тихий. Стоит однажды повесить //go:build enterprise на пакет uninstall или
+# на SetUninstaller в cmd/agent — и free-агент молча перестанет уметь снимать ПО, отвечая
+# на задачу completed с пустым логом (ровно то, от чего заведён storage/capability.go).
+#
+# Токен — ПУТЬ ПАКЕТА, как и у экрана: Go кладёт его в таблицы имён, поэтому он есть тогда
+# и только тогда, когда пакет слинкован; недостижимые строковые константы линкер выбросил
+# бы. Проверка на графе И на бинаре (граф не ловит выброшенное линковкой, бинарь не
+# объясняет причину — нужны оба).
+#
+# 🔴 Негативный контроль на ТОМ ЖЕ free-бинаре: токен экрана обязан ОТСУТСТВОВАТЬ. Он тут
+# не дубль check-remote-tags, а единственное, что делает presence-гейт способным краснеть:
+# grep, находящий что угодно, был бы зелёным всегда, а бинарь чужой редакции содержал бы
+# оба токена. Один и тот же grep обязан сказать ДА про uninstall и НЕТ про screen — только
+# тогда «да» про uninstall что-то значит.
+check-uninstall-present: ## Гейт Этапа 3: удаление ПО ЕСТЬ во free-агенте (граф и бинарь) и в enterprise
+	@fail=0; \
+	if ! go list -deps ./cmd/agent 2>/dev/null | grep -q "$(UNINSTALL_TOKEN)\$$"; then \
+		echo "ОШИБКА: пакета $(UNINSTALL_TOKEN) НЕТ в графе FREE-сборки — удаление ПО выпало из open-core." >&2; \
+		echo "  Обычная причина: на пакет или SetUninstaller в cmd/agent повесили тег enterprise." >&2; \
+		fail=1; \
+	fi; \
+	if ! go list -deps -tags enterprise ./cmd/agent 2>/dev/null | grep -q "$(UNINSTALL_TOKEN)\$$"; then \
+		echo "ОШИБКА: пакета $(UNINSTALL_TOKEN) НЕТ в графе ENTERPRISE-сборки." >&2; \
+		fail=1; \
+	fi; \
+	tmp=$$(mktemp -d); \
+	CGO_ENABLED=0 go build -o "$$tmp/free" ./cmd/agent/ >/dev/null 2>&1 || { echo "ОШИБКА: free-сборка не собралась" >&2; fail=1; }; \
+	CGO_ENABLED=0 go build -tags enterprise -o "$$tmp/ent" ./cmd/agent/ >/dev/null 2>&1 || { echo "ОШИБКА: enterprise-сборка не собралась" >&2; fail=1; }; \
+	if [ -f "$$tmp/free" ] && ! LC_ALL=C grep -qa "$(UNINSTALL_TOKEN)" "$$tmp/free"; then \
+		echo "ОШИБКА: $(UNINSTALL_TOKEN) отсутствует во FREE-БИНАРЕ — удаление ПО стёрто линковкой из open-core." >&2; fail=1; \
+	fi; \
+	if [ -f "$$tmp/ent" ] && ! LC_ALL=C grep -qa "$(UNINSTALL_TOKEN)" "$$tmp/ent"; then \
+		echo "ОШИБКА: $(UNINSTALL_TOKEN) отсутствует в ENTERPRISE-БИНАРЕ — проверка по бинарю бесполезна." >&2; fail=1; \
+	fi; \
+	if [ -f "$$tmp/free" ] && LC_ALL=C grep -qa "$(REMOTE_TOKEN)" "$$tmp/free"; then \
+		echo "ОШИБКА: $(REMOTE_TOKEN) найден во FREE-бинаре — либо это не free-редакция, либо presence-гейт слеп." >&2; fail=1; \
+	fi; \
+	rm -rf "$$tmp"; \
+	if [ -f build/darwin/agent_darwin_arm64 ]; then \
+		if ! LC_ALL=C grep -qa "$(UNINSTALL_TOKEN)" build/darwin/agent_darwin_arm64; then \
+			echo "ОШИБКА: $(UNINSTALL_TOKEN) нет в трекнутом darwin-prebuilt — mac-агент без удаления ПО." >&2; fail=1; \
+		fi; \
+	else \
+		echo "ОШИБКА: нет build/darwin/agent_darwin_arm64 — трекнутый prebuilt пропал из дерева." >&2; fail=1; \
+	fi; \
+	[ "$$fail" -eq 0 ] || exit 1; \
+	echo "check-uninstall-present: удаление ПО есть во free (граф и бинарь) и в enterprise ✅"
 
 # Гейт: enterprise-агент СОБИРАЕТСЯ под все три ОС.
 #
@@ -176,8 +231,8 @@ check-agent-platforms: ## Гейт: enterprise-агент компилирует
 
 .PHONY: help proto tidy fmt scan-free hooks agent mockserver build certs up down logs run-mock run-agent test clean \
         pkg-linux pkg-deb pkg-rpm pkg-deb-arm64 pkg-rpm-arm64 \
-        build-win build-win-arm64 build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win \
-        check-escrow-tags check-remote-tags
+        build-win build-win-arm64 canary-win build-mac build-linux build-linux-arm64 build-all lint publish-release syso-win \
+        check-escrow-tags check-remote-tags check-uninstall-present
 
 help: ## Список целей
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -288,6 +343,40 @@ build-win: syso-win check-escrow-tags ## Кросс-компиляция аге�
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
 		$(TAGSFLAG) -ldflags "$(LDFLAGS) -X main.releasePubKey=$(RELEASE_PUBKEY) $(ESCROW_LDFLAGS) -H windowsgui" \
 		-o bin/agent_windows_amd64.exe ./cmd/agent
+
+# Имя канареечного артефакта: версия + редакция. Канареечные бинари лежат вне git (гейт
+# среза не пускает enterprise в дерево), и «какой из них какой» больше неоткуда узнать.
+CANARY_EXE := bin/agent_windows_amd64_v$(VERSION)$(if $(AGENT_TAGS),-$(AGENT_TAGS),).exe
+
+canary-win: syso-win check-escrow-tags ## Канареечная сборка агента для Windows amd64 — БАЙТ В БАЙТ как деплойная
+	# Отдельная цель, а не флаг к build-win, потому что build-win собирает НЕ ТО, что
+	# уезжает в поле, и расхождение молчаливое с двух сторон:
+	#
+	#   -s -w   — деплой (update.sh, install.sh) стрипает, Makefile нет. Разница ~7,5 МБ
+	#             на 17,3 МБ, то есть 43%. Ловится только сверкой размеров вручную, и
+	#             один раз уже ловилась — на 2.6.8.
+	#   -buildvcs=true — БЕЗ него ревизия не попадает в бинарь ВООБЩЕ (go build молча
+	#             пропускает штамп, когда git недоволен каталогом), а `go version -m`
+	#             просто не печатает трёх строк vcs.*. Именно ими и проверяется «собрано
+	#             из коммита X» перед публикацией — без штампа проверять нечем, и отказ
+	#             выглядит как «строк нет», а не как «сборка не та».
+	#
+	# build-win при этом остаётся как есть: его артефакт идёт в MSI, и менять вес
+	# установщика заодно с канарейкой — это две правки под одним именем.
+	#
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+		$(TAGSFLAG) -ldflags "-s -w $(LDFLAGS) -X main.releasePubKey=$(RELEASE_PUBKEY) $(ESCROW_LDFLAGS) -H windowsgui" \
+		-o $(CANARY_EXE) ./cmd/agent
+	@go version -m $(CANARY_EXE) | grep -E 'vcs\.|-tags=' || \
+		{ echo "ОШИБКА: в бинаре нет штампа vcs — «собрано из коммита X» проверять нечем." >&2; exit 1; }
+	# Грязное дерево — ОТКАЗ, а не строчка в выводе. Канарейка существует затем, чтобы по
+	# ней приняли КОММИТ; собранная поверх незакоммиченного (тот же нетрекнутый `*.license`
+	# в дереве, однажды уже давший +dirty) она отвечает на этот вопрос ложью. Нужен снимок
+	# дерева — build-win рядом и ничего не обещает.
+	@go version -m $(CANARY_EXE) | grep -q 'vcs.modified=false' || \
+		{ echo "ОШИБКА: дерево грязное (vcs.modified=true) — канарейка не соответствует ни одному коммиту." >&2; exit 1; }
+	@ls -l $(CANARY_EXE) | awk '{print "размер:", $$5}'
+	@sha256sum $(CANARY_EXE)
 
 syso-win-arm64: ## Сгенерировать cmd/agent/rsrc_windows_arm64.syso (манифест + PE-VERSIONINFO для arm64)
 	# Отдельный .syso, а не переиспользование amd64-шного: Go подхватывает ресурс по

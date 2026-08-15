@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Floodww/RoutineOps/internal/version"
 )
 
 // Каналы обновлений (миграция 065). Значения совпадают с CHECK'ом в схеме —
@@ -57,29 +59,72 @@ func (db *DB) GetLatestAgentRelease(ctx context.Context, os, arch string) (*Agen
 	return db.GetLatestAgentReleaseForChannel(ctx, os, arch, ChannelStable)
 }
 
-// GetLatestAgentReleaseForChannel — последний релиз, ВИДИМЫЙ каналу channel.
+// GetLatestAgentReleaseForChannel — САМАЯ НОВАЯ ПО ВЕРСИИ сборка, ВИДИМАЯ каналу channel.
 // Таблица глобальная (tenancy: ScopeGlobal) — скоуп тенанта здесь не нужен.
+//
+// 🔴 «Последний» здесь означает старшую ВЕРСИЮ, а не последнюю по времени строку, и это
+// исправление, а не оформление. Порядок по created_at хоронил канарейку молча: beta видит
+// и stable-строки, поэтому ЛЮБАЯ публикация в stable, случившаяся после канарейки,
+// становилась для канареечных машин целью. Поймано 13.08.2026 — канарейка 2.6.10 уехала в
+// beta в 11:00, штатный `update.sh` опубликовал 2.6.9 в stable в 11:05, и стенд забрал
+// 2.6.9, подняв пол анти-отката до неё. Ни одна сторона при этом не отказала: и публикация,
+// и обновление отработали «успешно».
+//
+// Повторная публикация канарейки этого не лечила: UPSERT намеренно не трогает created_at,
+// значит вернуть похороненную сборку было нечем вовсе, кроме выпуска нового номера.
+//
+// Что мы этим теряем: откат выпуском СТАРОЙ версии поверх новой. Он и не работал — агент
+// не берёт версию ниже пола анти-отката (SEC-3), то есть в поле откат был иллюзией и до
+// этой правки. Настоящий откат — новый номер с прежним содержимым.
+//
+// Непарсибельные версии не выбрасываем: если ни одна строка не разобралась, отдаём самую
+// позднюю по времени. Иначе платформа с кривым номером осталась бы БЕЗ обновлений молча —
+// ровно тот класс отказа, который здесь и чинится.
 func (db *DB) GetLatestAgentReleaseForChannel(ctx context.Context, os, arch, channel string) (*AgentRelease, error) {
 	if !ValidChannel(channel) {
 		return nil, fmt.Errorf("неизвестный канал обновлений %q", channel)
 	}
-	var r AgentRelease
-	err := db.pool.QueryRow(ctx, `
+	rows, err := db.pool.Query(ctx, `
 		SELECT id, os, arch, version, filename, sha256, signature,
 		       COALESCE(manifest_signature, ''), channel, created_at
 		FROM agent_releases
 		WHERE os = $1 AND arch = $2 AND channel = ANY($3)
-		ORDER BY created_at DESC LIMIT 1
-	`, os, arch, channelsVisibleTo(channel)).
-		Scan(&r.ID, &r.OS, &r.Arch, &r.Version, &r.Filename, &r.SHA256, &r.Signature,
-			&r.ManifestSignature, &r.Channel, &r.CreatedAt)
+		ORDER BY created_at DESC
+	`, os, arch, channelsVisibleTo(channel))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	return &r, nil
+	defer rows.Close()
+
+	var best, fallback *AgentRelease
+	for rows.Next() {
+		var r AgentRelease
+		if err := rows.Scan(&r.ID, &r.OS, &r.Arch, &r.Version, &r.Filename, &r.SHA256, &r.Signature,
+			&r.ManifestSignature, &r.Channel, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		if fallback == nil {
+			fallback = &r // строки идут по времени убыванием: первая — самая поздняя
+		}
+		if !version.Valid(r.Version) {
+			continue
+		}
+		if best == nil {
+			best = &r
+			continue
+		}
+		newer, err := version.IsNewer(best.Version, r.Version)
+		if err == nil && newer {
+			best = &r
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if best != nil {
+		return best, nil
+	}
+	return fallback, nil
 }
 
 // ListAgentReleases — весь реестр публикаций для панели (последние сверху).
@@ -120,15 +165,30 @@ func (db *DB) RegisterAgentRelease(ctx context.Context, os, arch, version, filen
 	if !ValidChannel(channel) {
 		return fmt.Errorf("неизвестный канал обновлений %q", channel)
 	}
-	_, err := db.pool.Exec(ctx, `
+	// Версия НЕИЗМЕНЯЕМА: под одним (os, arch, version) байты закрепляются первой публикацией.
+	// Повтор с тем же sha256 меняет ТОЛЬКО канал — это и есть продвижение beta→stable (Q-52),
+	// единственная законная мутация опубликованной строки. Повтор с ДРУГИМ sha256 — отказ, а не
+	// upsert: прежний код перезаписывал и байты, и подпись (так 12.08 windows 2.6.8 переехала из
+	// beta в stable с новыми байтами под тем же номером), и подпись манифеста, которая ловит
+	// downgrade-relabel ИЗВНЕ, была бессильна против самонанесённого изнутри.
+	//
+	// Атомарно и fail-closed: WHERE на DO UPDATE пропускает смену канала только при совпадении
+	// sha256. При расхождении конфликт не даёт ни INSERT, ни UPDATE — RETURNING пуст, Scan
+	// возвращает ErrNoRows, и это единственный сигнал «номер занят другими байтами». Ретраи
+	// публикации не ломаются: повтор того же коммита под -trimpath даёт тот же бинарь, sha256
+	// совпадает, и WHERE пропускает. filename/signature/manifest_signature при совпадении sha256
+	// детерминированно те же (ed25519 детерминирован), поэтому в SET их нет — меняется лишь канал.
+	var dummy string
+	err := db.pool.QueryRow(ctx, `
 		INSERT INTO agent_releases (os, arch, version, filename, sha256, signature, manifest_signature, channel)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (os, arch, version) DO UPDATE SET
-			filename           = EXCLUDED.filename,
-			sha256             = EXCLUDED.sha256,
-			signature          = EXCLUDED.signature,
-			manifest_signature = EXCLUDED.manifest_signature,
-			channel            = EXCLUDED.channel
-	`, os, arch, version, filename, sha256, signature, manifestSignature, channel)
+		ON CONFLICT (os, arch, version) DO UPDATE SET channel = EXCLUDED.channel
+			WHERE agent_releases.sha256 = EXCLUDED.sha256
+		RETURNING version
+	`, os, arch, version, filename, sha256, signature, manifestSignature, channel).Scan(&dummy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("версия %s %s/%s уже опубликована с другим sha256: версии неизменяемы, "+
+			"перевыпуск под тем же номером запрещён (продвижение меняет только канал)", version, os, arch)
+	}
 	return err
 }

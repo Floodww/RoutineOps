@@ -2935,7 +2935,6 @@ paths:
         '409': { description: Нет активного FileVault-лока, лок без request_id либо лицензия не покрывает FileVault }
 
   /api/v1/devices/{id}/software/uninstall:
-    x-enterprise: true
     parameters: [{ $ref: '#/components/parameters/DeviceId' }]
     post:
       tags: [Устройства]
@@ -2988,9 +2987,7 @@ paths:
                   task_id: { type: string }
                   status: { type: string }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '402': { description: Лицензия не покрывает удаление ПО }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { description: Роут отсутствует — сборка не Enterprise }
         '409': { description: Нет в инвентаре, снять нечем либо устройство не active }
 
   /api/v1/escrow/status:

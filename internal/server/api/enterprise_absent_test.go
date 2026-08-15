@@ -3,12 +3,15 @@
 package api_test
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Floodww/RoutineOps/internal/server/api"
+	"github.com/Floodww/RoutineOps/internal/server/uninstall"
 )
 
 // В ОТКРЫТОЙ сборке платных ручек не должно быть вовсе.
@@ -57,5 +60,26 @@ func TestEnterpriseRoutesAbsentInOpenCore(t *testing.T) {
 	// иначе Match всегда возвращал бы false и тест был бы зелёным ни от чего.
 	if !routes.Match(chi.NewRouteContext(), http.MethodPost, "/api/v1/auth/login") {
 		t.Fatal("контрольная ручка /auth/login не найдена — проверка нерабочая")
+	}
+}
+
+// Удаление ПО — open-core на ВСЕХ редакциях (перенос из enterprise 13.08.2026): ни
+// build-тега, ни лицензионного энтайтлмента. Зеркало гейта выше, но с обратным знаком:
+// там платные ручки обязаны ОТСУТСТВОВАТЬ, здесь бесплатная обязана ПРИСУТСТВОВАТЬ в
+// открытой сборке. Проверка не пустая: пакет uninstall компилируется в `!enterprise`
+// (тега на нём больше нет), а его Routes монтирует путь — той же опцией, что подаёт
+// общая композиция в cmd/server/main.go. Стоит кому-то вернуть тег или гейт `if licensed`
+// — открытая сборка либо не соберётся, либо этот тест покраснеет.
+func TestUninstallRoutePresentInOpenCore(t *testing.T) {
+	svc := uninstall.NewService(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rtr := api.NewRouter(nil, nil, []byte("test"), nil, "https://test.local", t.TempDir(), nil, false,
+		uninstall.Routes(svc))
+	routes, ok := rtr.(chi.Routes)
+	if !ok {
+		t.Fatalf("роутер не chi.Routes (%T)", rtr)
+	}
+	if !routes.Match(chi.NewRouteContext(), http.MethodPost,
+		"/api/v1/devices/00000000-0000-4000-8000-000000000001/software/uninstall") {
+		t.Error("POST /software/uninstall не зарегистрирован в open-core — перенос uninstall во Free не смонтирован")
 	}
 }

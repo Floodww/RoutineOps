@@ -254,3 +254,95 @@ func TestUpdateRollout_MatchesResolver(t *testing.T) {
 		t.Fatal("в срезе beta ноль устройств, хотя канареечная машина заведена")
 	}
 }
+
+// 🔴 Канарейку НЕ хоронит более поздняя публикация в stable.
+//
+// Ровно то, что случилось 13.08.2026 на проде: канарейка 2.6.10 уехала в beta в 11:00,
+// штатный `update.sh` опубликовал 2.6.9 в stable в 11:05 — и канареечный стенд забрал
+// 2.6.9, потому что «последним» считалась самая ПОЗДНЯЯ строка, а не старшая ВЕРСИЯ.
+// beta видит stable-строки, поэтому любая публикация в парк отбирала у канарейки цель.
+//
+// Отказа при этом не было ни одного: и публикация, и обновление отработали «успешно», а
+// пол анти-отката поднялся до парковой версии. Повторная публикация канарейки не лечила —
+// UPSERT намеренно не трогает created_at.
+func TestAgentRelease_CanaryNotBuriedByLaterStable(t *testing.T) {
+	db := newDB(t)
+	ctx := tenantCtx()
+	osName := "testos" + uniq(t)
+	arch := "amd64"
+
+	if err := db.RegisterAgentRelease(ctx, osName, arch, "v2.6.10", "canary", "sha-c", "sig", "msig",
+		storage.ChannelBeta); err != nil {
+		t.Fatalf("публикация канарейки: %v", err)
+	}
+	// ПОЗЖЕ и в stable — как это делает update.sh при любом деплое сервера.
+	if err := db.RegisterAgentRelease(ctx, osName, arch, "v2.6.9", "park", "sha-p", "sig", "msig",
+		storage.ChannelStable); err != nil {
+		t.Fatalf("публикация парковой версии: %v", err)
+	}
+
+	beta, err := db.GetLatestAgentReleaseForChannel(ctx, osName, arch, storage.ChannelBeta)
+	if err != nil {
+		t.Fatalf("beta: %v", err)
+	}
+	if beta == nil || beta.Version != "v2.6.10" {
+		t.Fatalf("канарейка получила %v, ожидали v2.6.10 — более поздняя stable-публикация похоронила канарейку", beta)
+	}
+
+	// Парк при этом канареечную версию не видит: вторая половина правила не должна
+	// сломаться от первой.
+	stable, err := db.GetLatestAgentReleaseForChannel(ctx, osName, arch, storage.ChannelStable)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if stable == nil || stable.Version != "v2.6.9" {
+		t.Fatalf("канал stable отдал %v, ожидали v2.6.9", stable)
+	}
+}
+
+// Двузначный patch сравнивается как ЧИСЛО, а не строкой: 2.6.10 новее 2.6.9. Именно на
+// этой границе строковое сравнение и ломается, и она наступила впервые 12.08.2026.
+func TestAgentRelease_DoubleDigitPatchIsNewer(t *testing.T) {
+	db := newDB(t)
+	ctx := tenantCtx()
+	osName := "testos" + uniq(t)
+	arch := "amd64"
+
+	for _, v := range []string{"v2.6.10", "v2.6.9"} {
+		if err := db.RegisterAgentRelease(ctx, osName, arch, v, "f", "sha"+v, "sig", "msig",
+			storage.ChannelStable); err != nil {
+			t.Fatalf("публикация %s: %v", v, err)
+		}
+	}
+	rel, err := db.GetLatestAgentReleaseForChannel(ctx, osName, arch, storage.ChannelStable)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if rel == nil || rel.Version != "v2.6.10" {
+		t.Fatalf("канал отдал %v, ожидали v2.6.10", rel)
+	}
+}
+
+// Платформа с непарсибельным номером не остаётся БЕЗ обновлений: если ни одна строка не
+// разобралась, отдаём самую позднюю по времени. Молчаливое «обновлений нет» — тот же
+// класс отказа, который этой правкой и чинится.
+func TestAgentRelease_UnparsableVersionFallsBackToLatestRow(t *testing.T) {
+	db := newDB(t)
+	ctx := tenantCtx()
+	osName := "testos" + uniq(t)
+	arch := "amd64"
+
+	for _, v := range []string{"dev-1", "dev-2"} {
+		if err := db.RegisterAgentRelease(ctx, osName, arch, v, "f", "sha"+v, "sig", "msig",
+			storage.ChannelStable); err != nil {
+			t.Fatalf("публикация %s: %v", v, err)
+		}
+	}
+	rel, err := db.GetLatestAgentReleaseForChannel(ctx, osName, arch, storage.ChannelStable)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if rel == nil || rel.Version != "dev-2" {
+		t.Fatalf("канал отдал %v, ожидали dev-2 (самую позднюю строку)", rel)
+	}
+}
