@@ -14,6 +14,61 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.6.12 — 17 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] Maintenance mode is now continuous: one live session follows the
+  machine everywhere.** Previously the secure desktop (UAC, Ctrl+Alt+Del) paused the picture
+  and the lock screen ended the session — you could not walk a machine through an elevation
+  prompt or unlock it without starting over. The session now runs continuously across the
+  employee desktop, UAC, and the lock screen in both directions: the operator types the admin
+  password right in the UAC prompt or on the lock screen and unlocks the machine without
+  interrupting the session.
+- **[Enterprise] The employee is notified through the audit log only.** A notice banner
+  cannot be drawn on secure desktops, and in this mode it is not shown on any desktop; the
+  operator's connection is recorded by the `screen_session_maintenance_granted` audit entry.
+
+## 2.6.11 — 15 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] The Windows agent advertises maintenance-mode support.** The
+  `screen_maintenance` capability is now declared, and the server stops rejecting a maintenance
+  invitation (409) on such agents. The behaviour is turned on by the invitation flag; non-Windows
+  and older builds do not advertise the capability, and such a request is refused honestly rather
+  than silently downgraded to a regular session.
+
+## 2.6.10 — 13 August 2026
+
+Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- **[Enterprise] Frame delivery pause is a distinct session state.** The pause on the secure
+  desktop (§9.11) is separated from a disconnect and reaches the operator as its own signal:
+  the operator sees "frame delivery paused" instead of a frozen, unexplained screen.
+
+## 2.6.9 — 13 August 2026
+
+Agent release (**stable** channel). The product (server + web) does not move — 2.10.0.
+
+### Remote desktop (Enterprise)
+
+- 🔴 **[Enterprise] On the secure desktop, frames pause instead of ending the session.** On a
+  UAC or Ctrl+Alt+Del prompt during a live session, frame delivery pauses (60-second ceiling)
+  while the session itself continues — previously the secure desktop looked like a frozen or
+  dropped remote session. The lock screen still ends the session.
+- **[Enterprise] Agent release selection is by highest version, not publish time.** Devices in
+  the beta group no longer accidentally receive a fleet stable build published after the canary.
+- **[Enterprise] Maintenance-mode groundwork laid (not yet active).** The `screen_maintenance`
+  capability and its server gate (409) appear; a maintenance invitation without control is
+  refused (400) rather than turned into a silent session.
+
 ## 2.6.8 — 11 August 2026
 
 Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.

@@ -171,6 +171,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
   // Запрошено ли управление ДО начала сеанса. Отдельный флаг от `live.control`: первый —
   // намерение оператора, второй — то, что реально выдал сервер и объявил агенту.
   const [wantControl, setWantControl] = useState(false)
+  // Запрошен ли режим обслуживания ДО начала сеанса (§9.11 / §4): управлять UAC и экраном
+  // блокировки, а не паузить/рвать на них сеанс. Подразумевает управление — сервер отбивает
+  // maintenance без control (400), поэтому включение обслуживания включает и управление.
+  const [wantMaintenance, setWantMaintenance] = useState(false)
   // Управление отдано сотруднику обратно. Необратимо в пределах сеанса (§9.10), поэтому
   // кнопка после нажатия исчезает, а не превращается в «взять снова».
   const [controlReturned, setControlReturned] = useState(false)
@@ -443,7 +447,10 @@ export function ScreenSessionPanel({ deviceId }: Props) {
     try {
       const r = await api.post<ScreenSession>(`/devices/${deviceId}/screen-sessions`, {
         reason: text,
-        control: wantControl,
+        // Обслуживание подразумевает управление: сервер отбивает maintenance без control
+        // (400), поэтому не полагаемся на оператора и включаем control сами.
+        control: wantControl || wantMaintenance,
+        maintenance: wantMaintenance,
       })
       setLive(r.data)
       setStreamOpen(false)
@@ -463,6 +470,7 @@ export function ScreenSessionPanel({ deviceId }: Props) {
       if (body?.error === "device_offline") setError(t("screenSession.deviceOffline"))
       else if (body?.error === "agent_unsupported") setError(t("screenSession.agentUnsupported"))
       else if (body?.error === "agent_no_control") setError(t("screenSession.agentNoControl"))
+      else if (body?.error === "agent_no_maintenance") setError(t("screenSession.agentNoMaintenance"))
       else setError(errMessage(e))
     } finally {
       setStarting(false)
@@ -681,11 +689,25 @@ export function ScreenSessionPanel({ deviceId }: Props) {
               <input
                 type="checkbox"
                 className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
-                checked={wantControl}
+                checked={wantControl || wantMaintenance}
+                disabled={wantMaintenance}
                 onChange={(e) => setWantControl(e.target.checked)}
               />
               {t("screenSession.withControl")}
             </label>
+            {/* Обслуживание — управление UAC и экраном блокировки (§9.11 / §4). Включает
+                управление принудительно: смотреть на ввод пароля, не имея права нажать в
+                нём, — сеанс без корректного прочтения, и сервер такой запрос отбивает. */}
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
+                checked={wantMaintenance}
+                onChange={(e) => setWantMaintenance(e.target.checked)}
+              />
+              {t("screenSession.withMaintenance")}
+            </label>
+            <p className="text-xs text-muted-foreground">{t("screenSession.maintenanceHint")}</p>
           </div>
         )}
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}

@@ -138,6 +138,7 @@ export const ACTION_LABELS: Record<string, string> = {
   screen_session_consent: "auditAction.screen_session_consent",
   screen_session_control_granted: "auditAction.screen_session_control_granted",
   screen_session_control_returned: "auditAction.screen_session_control_returned",
+  screen_session_maintenance_granted: "auditAction.screen_session_maintenance_granted",
   screen_control_ineffective: "auditAction.screen_control_ineffective",
 
   // --- события от агента и FileVault ---
@@ -234,6 +235,7 @@ export const ACTION_CATEGORY: Record<string, EventCategory> = {
   screen_session_consent: "security",
   screen_session_control_granted: "security",
   screen_session_control_returned: "security",
+  screen_session_maintenance_granted: "security",
   screen_control_ineffective: "security",
   arm_lock_secrets: "security",
   filevault_revoked: "security",

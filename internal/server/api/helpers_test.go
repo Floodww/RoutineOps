@@ -24,6 +24,7 @@ import (
 	"github.com/Floodww/RoutineOps/internal/server/enroll"
 	"github.com/Floodww/RoutineOps/internal/server/mailer"
 	"github.com/Floodww/RoutineOps/internal/server/storage"
+	"github.com/Floodww/RoutineOps/internal/server/tenancy"
 	"github.com/Floodww/RoutineOps/internal/server/testutil"
 )
 
@@ -116,6 +117,79 @@ func authedDo(t *testing.T, rtr http.Handler, method, path string, body []byte, 
 	w := httptest.NewRecorder()
 	rtr.ServeHTTP(w, r)
 	return w
+}
+
+// Хелперы состояния устройства и счётчики журнала/задач.
+//
+// Живут БЕЗ build-тега намеренно. Раньше они лежали в enterprise-файлах (escrow_*,
+// screen_*), и любой тест, которому нужно активное устройство, автоматически становился
+// enterprise-only — даже если проверял open-core код. Ровно так тесты uninstall и
+// оказались под тегом после переноса фичи во Free 13.08.2026: сама ручка открытая, а
+// покрытия в открытой сборке нет, и гейт покрытия падал на 6.4% при поле 55%.
+
+// activeDeviceID заводит устройство и доводит его до active: POST /devices создаёт его
+// в pending, а операции над машиной требуют активной.
+func activeDeviceID(t *testing.T, rtr http.Handler, db *storage.DB, tok, hostname string) string {
+	t.Helper()
+	id, _ := createDevice(t, rtr, tok, hostname, "macos")
+	if err := db.UpdateDeviceStatus(context.Background(), tenancy.DefaultTenantID, id, "active"); err != nil {
+		t.Fatalf("set active: %v", err)
+	}
+	return id
+}
+
+// markEnrolled доводит устройство до состояния «энроллено и работает»: POST /devices
+// заводит его в pending, а сеанс возможен только с активным.
+func markEnrolled(t *testing.T, db *storage.DB, deviceID string, capable bool) {
+	t.Helper()
+	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
+	defer finish(true)
+	caps := "'{}'"
+	if capable {
+		caps = "ARRAY['screen_session']"
+	}
+	if _, err := db.Scoped(ctx).Exec(ctx,
+		`UPDATE devices SET status = 'active', cert_cn = 'cn-'||id::text,
+		        agent_version = '9.9.9', capabilities = `+caps+` WHERE id = $1`,
+		deviceID); err != nil {
+		t.Fatalf("отметка устройства: %v", err)
+	}
+}
+
+// auditCountForTarget — счётчик по действию И цели. Соседний auditCount из
+// tenants_handler_test считает только по действию: здесь нужна привязка к устройству,
+// иначе отказ по чужой машине зачтётся за свой.
+func auditCountForTarget(t *testing.T, db *storage.DB, action, targetID string) int {
+	t.Helper()
+	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
+	defer finish(true)
+	var n int
+	if err := db.Scoped(ctx).QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE action = $1 AND target_id = $2`, action, targetID).Scan(&n); err != nil {
+		t.Fatalf("чтение аудита: %v", err)
+	}
+	return n
+}
+
+func taskCount(t *testing.T, db *storage.DB, deviceID, taskType string) int {
+	t.Helper()
+	ctx, finish, err := db.BindTenant(context.Background(), tenancy.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("BindTenant: %v", err)
+	}
+	defer finish(true)
+	var n int
+	if err := db.Scoped(ctx).QueryRow(ctx,
+		`SELECT count(*) FROM tasks WHERE device_id = $1 AND task_type = $2`, deviceID, taskType).Scan(&n); err != nil {
+		t.Fatalf("чтение задач: %v", err)
+	}
+	return n
 }
 
 // makeTempCA генерирует самоподписанный ECDSA CA и возвращает пути к файлам.
