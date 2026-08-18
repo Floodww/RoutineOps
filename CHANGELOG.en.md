@@ -14,6 +14,33 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.11.0 — 18 August 2026
+
+Product release (server + web). The agent does not move — stable 2.6.9. Minor rather than
+patch: a capability that used to stop at a licence check is now available to the free edition.
+
+### Software removal
+
+- 🔴 **Removing installed software works in the free edition.** The button was present on
+  every device card, but on a free installation the server answered "licence required" (402) —
+  in practice the capability only existed on an enterprise installation. The endpoint is now
+  mounted in the open-source build with no licence gate: removal is available under the same
+  permissions it had on a paid installation, and the agent still verifies the target and
+  removes the package by the method it determined itself.
+
+### Agent releases and updates
+
+- 🔴 **A published agent version is now immutable.** Publishing the same number (OS,
+  architecture, version) again with different bytes is rejected with an explanation instead of
+  silently overwriting the filename, sha256 and signatures of a row that has already been
+  handed out — which is exactly how the Windows 2.6.8 build changed both its bytes and its
+  channel under one number on 12 August. The only legitimate mutation of a published row is
+  the channel change that promotes a canary, and it requires a matching sha256. Re-running the
+  publication of the same commit still succeeds: the build is reproducible.
+- **A failed agent publication no longer rolls back a server hotfix.** The server and web
+  come up before the publication step, so a failure there stops `./update.sh` loudly without
+  taking the product update that already shipped down with it.
+
 ## 2.6.12 — 17 August 2026
 
 Canary agent release (**beta** channel). The product (server + web) does not move — 2.10.0.
