@@ -1,6 +1,6 @@
 # MSI-установщик MDM-агента (Windows)
 
-Актуально на 2026-07-13 (v2.4.1). Канонический источник MSI: `mdm-agent.wxs` +
+Актуально для v2.4.1. Канонический источник MSI: `mdm-agent.wxs` +
 `build-msi.ps1` в этом каталоге; собранный MSI кладётся на сервер в `releases/`
 и раздаётся как `/downloads/RoutineOps-agent.msi`.
 
