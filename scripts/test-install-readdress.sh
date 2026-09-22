@@ -35,6 +35,11 @@ INTERNAL=192.0.2.5           # TEST-NET-1 — «внутренний» IP заг
 mkdir -p "$WORK/scripts" "$WORK/bin"
 cp "$REPO/install.sh" "$REPO/VERSION" "$REPO/docker-compose.prod.yml" "$WORK/"
 cp "$REPO/scripts/gen-certs.sh" "$REPO/scripts/env-db-roles.sh" "$WORK/scripts/"
+# 🔴 Dockerfile — не декорация фикстуры, а ПРИЗНАК РЕЖИМА: install.sh выбирает установку
+# из исходников по его наличию (нет — считает каталог комплектом покупателя и идёт в
+# docker-compose.ent.yml). Фикстура копирует фиксированный набор файлов, поэтому новый
+# вход install.sh она не подхватывает сама: без этой строки тест проверял бы не ту ветку.
+touch "$WORK/Dockerfile"
 
 # Заглушка docker: пишет свои аргументы в лог, но stdout держит ЧИСТЫМ — install.sh
 # захватывает вывод `compose ps -q postgres` и `docker inspect` в переменные.

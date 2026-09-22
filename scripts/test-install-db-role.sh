@@ -58,6 +58,11 @@ echo "== A. install.sh: раскладка ролей в .env.prod =="
 mkdir -p "$WORK/scripts" "$WORK/bin"
 cp "$REPO/install.sh" "$REPO/VERSION" "$REPO/AGENT_VERSION" "$REPO/docker-compose.prod.yml" "$WORK/"
 cp "$REPO/scripts/gen-certs.sh" "$REPO/scripts/env-db-roles.sh" "$WORK/scripts/"
+# 🔴 Dockerfile — не декорация фикстуры, а ПРИЗНАК РЕЖИМА: install.sh выбирает установку
+# из исходников по его наличию (нет — считает каталог комплектом покупателя и идёт в
+# docker-compose.ent.yml). Фикстура копирует фиксированный набор файлов, поэтому новый
+# вход install.sh она не подхватывает сама: без этой строки тест проверял бы не ту ветку.
+touch "$WORK/Dockerfile"
 
 # Заглушки: install.sh поднимает стек и собирает агентов, а нам нужен только .env.prod.
 # stdout заглушки docker держим чистым — install.sh читает вывод `compose ps -q` в переменную.
@@ -105,11 +110,15 @@ docker run -d --name "$PG" --network "$NET" --network-alias postgres \
   -e POSTGRES_DB=mdm -e POSTGRES_USER=mdm -e POSTGRES_PASSWORD="$PG_PASS" \
   "$PGIMG" >/dev/null
 
+# 🔴 -h 127.0.0.1, а не сокет: initdb поднимает ВРЕМЕННЫЙ сервер, который слушает только
+# unix-сокет. Сокетный pg_isready отвечает «готов» ему, цикл выходит по break, временный
+# сервер гасится — и следующая же проверка видит мёртвую базу («postgres не поднялся»).
+# По TCP временный сервер не слушает, поэтому ждём именно тот, что примет соединения.
 for _ in $(seq 1 30); do
-  docker exec "$PG" pg_isready -U mdm >/dev/null 2>&1 && break
+  docker exec "$PG" pg_isready -h 127.0.0.1 -U mdm >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec "$PG" pg_isready -U mdm >/dev/null 2>&1 || fail "postgres не поднялся"
+docker exec "$PG" pg_isready -h 127.0.0.1 -U mdm >/dev/null 2>&1 || fail "postgres не поднялся"
 
 run_migrate() { # $1 — путь к env-файлу
   docker run --rm --network "$NET" --env-file "$1" \
