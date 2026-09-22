@@ -13,9 +13,31 @@ else
   DC="docker-compose"
 fi
 
+# Режим установки. Есть Dockerfile — рядом лежат исходники, собираем на месте (наш
+# деплой, разработка). Нет — это комплект покупателя: server/web/migrate тянутся готовыми
+# из приватного реестра, агенты публикуются из образа routineops/agents.
+#
+# Отдельного флага режима нет намеренно: флаг можно выставить неверно и получить
+# «собираю из исходников», которых нет, а наличие Dockerfile соврать не может.
+if [ -f Dockerfile ]; then
+  COMPOSE=docker-compose.prod.yml
+  FROM_SOURCE=1
+else
+  COMPOSE=docker-compose.ent.yml
+  FROM_SOURCE=""
+  [ -f "$COMPOSE" ] || {
+    echo "ОШИБКА: нет ни Dockerfile (установка из исходников), ни $COMPOSE (установка из образов)." >&2
+    echo "  Комплект покупателя разворачивается целиком — не копируйте из него отдельные файлы." >&2
+    exit 1
+  }
+  echo "Установка ИЗ ОБРАЗОВ (исходников нет): compose = $COMPOSE"
+fi
+
 # Host-пререквизиты (кроме docker/compose, проверенных выше): install.sh генерит
-# сертификаты (openssl) и тянет обновления (git). Падаем рано с внятной ошибкой.
-for _c in git openssl; do
+# сертификаты (openssl), а обновления при установке из исходников тянет git. На
+# установке из образов git не нужен ВООБЩЕ — update.sh там ходит в реестр, и требовать
+# его значило бы упереться в пререквизит, которого схема доставки не использует.
+for _c in ${FROM_SOURCE:+git} openssl; do
   command -v "$_c" >/dev/null 2>&1 || { echo "ОШИБКА: не установлен '$_c' — нужен для установки. Поставь его и повтори." >&2; exit 1; }
 done
 
@@ -188,8 +210,13 @@ fi
 # переменной; незаданные НЕ трогаем, чтобы прогон без SMTP в окружении не стёр уже
 # настроенное (руками или прошлым прогоном).
 opt_changed=""
+# ROUTINEOPS_REGISTRY здесь же, и это не «ещё одна настройка»: на установке из образов
+# адрес реестра нужен КАЖДОМУ последующему прогону (update.sh читает только .env.prod,
+# install.env он не знает). Без персиста первое же обновление осталось бы без адреса —
+# compose упал бы на незаданной переменной, а выглядело бы это как поломка реестра.
 for v in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_TLS \
-         TELEGRAM_BOT_TOKEN COOKIE_SECURE DATA_RETENTION_DAYS AUDIT_RETENTION_DAYS; do
+         TELEGRAM_BOT_TOKEN COOKIE_SECURE DATA_RETENTION_DAYS AUDIT_RETENTION_DAYS \
+         ROUTINEOPS_REGISTRY BUILD_TAGS; do
   val="${!v:-}"
   [ -z "$val" ] && continue                        # не задано — не трогаем
   if grep -qxF "${v}=${val}" .env.prod; then continue; fi   # уже такое — no-op
@@ -230,13 +257,22 @@ chmod 600 .env.prod
 set -a; . ./.env.prod; set +a
 export VERSION="$(cat VERSION)"
 
-$DC -f docker-compose.prod.yml up -d --build
+# Compose подставляет image: из окружения ЛИБО из .env рядом с compose-файлом. У
+# install.sh/update.sh окружение есть (set -a выше), а у ручного
+# `docker compose -f docker-compose.ent.yml logs` — нет: он падает на «required variable
+# ROUTINEOPS_REGISTRY is missing». Чтобы диагностика у покупателя работала без шаманства,
+# пишем .env — это ФАЙЛ ИНТЕРПОЛЯЦИИ compose, в контейнеры он не попадает (туда env_file).
+[ -n "$FROM_SOURCE" ] || printf 'VERSION=%s\nROUTINEOPS_REGISTRY=%s\n' "$VERSION" "$ROUTINEOPS_REGISTRY" > .env
+
+# --build — только когда есть что собирать. На установке из образов compose тянет
+# готовые теги из реестра, а --build упал бы на отсутствующем build-контексте.
+$DC -f "$COMPOSE" up -d ${FROM_SOURCE:+--build}
 
 # Серт/адрес поменялись → контейнеры держат старые в памяти (nginx читает certs/ на
 # старте, сервер — env). Пересоздаём только их, БД и redis не трогаем.
 if [ -n "$RECREATE" ]; then
   echo "Конфиг изменился — пересоздаю server и web..."
-  $DC -f docker-compose.prod.yml up -d --force-recreate server web
+  $DC -f "$COMPOSE" up -d --force-recreate server web
 fi
 
 # --- сборка + ПОДПИСАННАЯ публикация агентов (win/linux/mac) ---
@@ -244,10 +280,22 @@ fi
 # отдаём ТОЛЬКО нужное (DATABASE_DSN для publish-release + RELEASE_PUBKEY), не весь
 # .env.prod (JWT/пароли билд-контейнеру не нужны). publish-release подписывает
 # манифест и делает UPSERT в agent_releases (идемпотентно при повторе).
-echo "Сборка + публикация агентов v$(cat AGENT_VERSION) (подпись per-deployer ключом)..."
 mkdir -p releases
-PG=$($DC -f docker-compose.prod.yml ps -q postgres)
+PG=$($DC -f "$COMPOSE" ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
+
+# Из образов: бинари собраны у мейнтейнера и лежат внутри routineops/agents, версию
+# агента несёт сам образ (в комплекте покупателя файла AGENT_VERSION нет). Подпись
+# остаётся ПЕР-ДЕПЛОЙНОЙ — release_ed25519.pem приезжает монтированием каталога, как и
+# при сборке из исходников. Редакцию образ знает сам (он enterprise по построению),
+# поэтому BUILD_TAGS сюда НЕ передаётся — см. publish-agents.sh.
+if [ -z "$FROM_SOURCE" ]; then
+  docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
+    -e DATABASE_DSN="$DATABASE_DSN" \
+    -e RELEASE_CHANNEL="${RELEASE_CHANNEL:-stable}" \
+    "${ROUTINEOPS_REGISTRY}/routineops/agents:${VERSION}"
+else
+echo "Сборка + публикация агентов v$(cat AGENT_VERSION) (подпись per-deployer ключом)..."
 docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" -e RELEASE_PUBKEY="$RELEASE_PUBKEY" \
   -e BUILD_TAGS="${BUILD_TAGS:-}" -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
@@ -377,9 +425,12 @@ docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
 
 # Канонические инсталляторы (releases/RoutineOps-agent.{msi,pkg} → /downloads/… для кнопок в
 # UI) копируются В КОНТЕЙНЕРЕ выше — иначе root-owned releases/ + umask 077 ломали
-# host-side cp. Здесь только предупреждаем, если исходников в репо нет.
+# host-side cp. Здесь только предупреждаем, если исходников в репо нет. На установке из
+# образов проверять нечего: установщики либо лежат в образе агентов, либо о них уже
+# предупредил publish-agents.sh.
 [ -f build/msi/RoutineOps-agent.msi ] || echo "MSI: build/msi/RoutineOps-agent.msi нет — Windows-установка через MSI недоступна (собрать: build/msi/build-msi.ps1 на Windows)"
 [ -f build/pkg/RoutineOps-agent.pkg ] || echo "PKG: build/pkg/RoutineOps-agent.pkg нет — macOS-установка через PKG недоступна (собрать: make pkg-mac-native НА маке)"
+fi
 
 echo ""
 echo "=== MDM запущен ==="

@@ -25,11 +25,24 @@ function hasExpiry(iso?: string): iso is string {
   return !!iso && new Date(iso).getUTCFullYear() > 1
 }
 
+// FEATURE_LABELS: машинные имена фич из лицензии → ключи подписей. Коды приходят из
+// подписанного blob'а (license.Known на сервере) и переименованию не подлежат — они
+// часть артефакта, который уже выдан покупателям.
+const FEATURE_LABELS: Record<string, string> = {
+  base: "license.featureNames.base",
+  filevault: "license.featureNames.filevault",
+}
+
 // featuresLabel: пустой список фич в лицензии означает «вся редакция целиком»
 // (семантика Claims.Has на сервере), а не «ничего не разрешено» — показать здесь
 // прочерк значило бы соврать ровно наоборот.
+//
+// Неизвестный код показываем КАК ЕСТЬ, а не скрываем: лицензия может быть выдана
+// сервером новее интерфейса, и «фича есть, но подписи для неё нет» должно быть видно,
+// а не выглядеть как её отсутствие.
 function featuresLabel(features: string[] | undefined, t: (key: string) => string): string {
-  return features?.length ? features.join(", ") : t("license.wholeEdition")
+  if (!features?.length) return t("license.wholeEdition")
+  return features.map((f) => (FEATURE_LABELS[f] ? t(FEATURE_LABELS[f]) : f)).join(", ")
 }
 
 export default function License() {

@@ -420,7 +420,11 @@
     "graceNote": "The term expired; features still run on grace — renew the license.",
     "daysLeft": " — {{count}} days left",
     "keyPlaceholder": "eyJwYXlsb2FkIjoi... — a single base64 line, exactly as routineops-license printed it",
-    "applyNote": "Applied immediately, no server restart. A rejected key does not reset the current license."
+    "applyNote": "Applied immediately, no server restart. A rejected key does not reset the current license.",
+    "featureNames": {
+      "base": "base edition",
+      "filevault": "FileVault"
+    }
   },
   "audit": {
     "title": "Activity log",
@@ -1250,7 +1254,8 @@
     "groupsWereClearedAssign": "Groups were cleared — assign them again in the new tenant.",
     "runItOnThe": "Run it on the device. The token is valid for 24 hours.",
     "cannotDeleteRecoveryKeys": "Cannot delete: recovery keys are in escrow",
-    "failedToSendThe": "Failed to send the unlock command",    "hardwareWriteOffEmployee": "Hardware write-off, employee departure...",
+    "failedToSendThe": "Failed to send the unlock command",
+    "hardwareWriteOffEmployee": "Hardware write-off, employee departure...",
     "failedToQueueThe": "Failed to queue the reboot task",
     "failedToCreateA": "Failed to create a re-enrollment token",
     "failedToSendThe2": "Failed to send the lock command",
@@ -1258,7 +1263,8 @@
     "failedToLoadThe": "Failed to load the device data",
     "failedToQueueThe2": "Failed to queue the uninstall task",
     "installingSecurityUpdates": "Installing security updates...",
-    "failedToQueueThe3": "Failed to queue the removal task",    "theUnlockCommandWas": "The unlock command was sent",
+    "failedToQueueThe3": "Failed to queue the removal task",
+    "theUnlockCommandWas": "The unlock command was sent",
     "theTaskWasSent": "The task was sent to the device",
     "securityIncidentLostLaptop": "Security incident, lost laptop...",
     "removeTheProgramFrom": "Remove the program from the device?",

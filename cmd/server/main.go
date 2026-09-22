@@ -162,7 +162,7 @@ func main() {
 	// Enterprise-оверлей (//go:build enterprise) регистрирует escrow-сервис на g и
 	// возвращает RouterOptions (WithLockModePolicy + /escrow/status). Open-core: nil →
 	// escrow Unimplemented, lock mode=filevault → 409. См. enterprise{,_stub}.go.
-	routerOpts := enterpriseSetup(g, db, asynqClient, reg, cfg.ScreenDir, cfg.RedisAddr, cfg.JWTSecret, logger)
+	routerOpts := enterpriseSetup(g, db, asynqClient, reg, cfg.ScreenDir, cfg.RedisAddr, cfg.JWTSecret, cfg.ReleasePubKey, logger)
 	routerOpts = append(routerOpts, api.WithReleasePubKey(cfg.ReleasePubKey))
 	// Удаление ПО — open-core на всех редакциях (13.08.2026, перенос из enterprise). Проводка
 	// здесь, в общей композиции, а не в enterprise-оверлее: ручка есть в обеих сборках, без

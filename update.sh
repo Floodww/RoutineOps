@@ -12,6 +12,17 @@ umask 077  # дампы БД не world-readable
 command -v docker >/dev/null 2>&1 || { echo "Docker не установлен"; exit 1; }
 if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
 
+# Режим обновления — тот же признак, что в install.sh: есть Dockerfile → рядом исходники
+# (git pull + пересборка), нет → комплект покупателя (новый тег из приватного реестра).
+if [ -f Dockerfile ]; then
+  COMPOSE=docker-compose.prod.yml
+  FROM_SOURCE=1
+else
+  COMPOSE=docker-compose.ent.yml
+  FROM_SOURCE=""
+  [ -f "$COMPOSE" ] || { echo "ОШИБКА: нет ни Dockerfile, ни $COMPOSE — это не каталог установки." >&2; exit 1; }
+fi
+
 [ -f .env.prod ]          || { echo "Нет .env.prod — сначала ./install.sh"; exit 1; }
 [ -f release_ed25519.pem ] || { echo "Нет release_ed25519.pem — сначала ./install.sh"; exit 1; }
 
@@ -32,14 +43,14 @@ DSN_AFTER=$(sed -n 's/^DATABASE_DSN=//p' .env.prod | head -1)
 set -a; . ./.env.prod; set +a
 
 echo "=== MDM Update ==="
-CUR=$($DC -f docker-compose.prod.yml exec -T server ./routineops-server -version 2>/dev/null || echo "неизвестно")
+CUR=$($DC -f "$COMPOSE" exec -T server ./routineops-server -version 2>/dev/null || echo "неизвестно")
 echo "Текущая версия сервера: ${CUR}"
 
 # 1. Бэкап БД ОБЯЗАТЕЛЕН перед миграциями (down-миграций нет — откат только из бэкапа).
 #    -Fc (custom format) → восстановим через pg_restore --clean --if-exists в
 #    существующую БД (plain-dump в populated БД не накатывается).
 mkdir -p backups && chmod 700 backups
-PG=$($DC -f docker-compose.prod.yml ps -q postgres)
+PG=$($DC -f "$COMPOSE" ps -q postgres)
 if [ -n "$PG" ]; then
   BK="backups/db-$(date +%Y%m%d-%H%M%S).dump"
   docker exec "$PG" pg_dump -U mdm -Fc mdm > "$BK"
@@ -48,21 +59,47 @@ else
   echo "⚠ postgres не запущен — бэкап пропущен (первый запуск?)"
 fi
 
-# 2. Новая версия из публичного репозитория.
-git fetch --tags --quiet || true
-git pull --ff-only
-export VERSION="$(cat VERSION)"
+# 2. Новая версия. Из исходников — git. Из образов — номером выпуска в аргументе
+#    (./update.sh 2.13.0): теги в реестре неизменяемы и :latest там нет намеренно,
+#    поэтому «обнови» без номера — это «перетяни тот же тег», то есть no-op. Номер
+#    выпуска приходит от вендора вместе с уведомлением о релизе.
+if [ -n "$FROM_SOURCE" ]; then
+  git fetch --tags --quiet || true
+  git pull --ff-only
+  export VERSION="$(cat VERSION)"
+else
+  # Номер ПОКА ТОЛЬКО В ПАМЯТИ — на диск он ляжет ниже, после успешного pull.
+  export VERSION="${1:-$(cat VERSION)}"
+  if [ -z "${1:-}" ]; then
+    echo "Версия не указана — остаюсь на v${VERSION} и перетяну тот же тег."
+    echo "  Обновление: ./update.sh <версия выпуска>, например ./update.sh 2.13.0"
+  fi
+fi
 echo "Новая версия: v${VERSION}"
 
-# 3. Пересборка. migrate-сервис накатит pending-миграции ДО старта server.
-$DC -f docker-compose.prod.yml up -d --build
+# 3. Выкат. migrate-сервис накатит pending-миграции ДО старта server.
+#    Из образов тянем ЯВНО и до up: опечатка в номере или не выданный покупателю выпуск
+#    обязаны падать здесь, а не на половине пересозданного деплоя.
+if [ -z "$FROM_SOURCE" ]; then
+  $DC -f "$COMPOSE" pull
+  # 🔴 Номер выпуска пишем на диск ТОЛЬКО ПОСЛЕ успешного pull. Запись до него оставляла
+  # установку врущей о себе: `./update.sh 9.9.9` падал (образов нет, контейнеры остались
+  # на прежнем выпуске — это правильно), но VERSION и .env уже говорили 9.9.9. Дальше
+  # любой голый `./update.sh` рапортовал «остаюсь на v9.9.9» и тянул несуществующий тег
+  # снова, а `docker compose ps` показывал теги, которых в реестре нет. Само не чинилось.
+  echo "$VERSION" > VERSION
+  # .env compose'а обязан догнать новую версию — иначе ручная диагностика после
+  # обновления показывала бы теги прошлого выпуска (см. install.sh).
+  printf 'VERSION=%s\nROUTINEOPS_REGISTRY=%s\n' "$VERSION" "$ROUTINEOPS_REGISTRY" > .env
+fi
+$DC -f "$COMPOSE" up -d ${FROM_SOURCE:+--build}
 
 # Сменился DSN сервера (разделение ролей выше) — контейнер держит СТАРЫЙ в памяти:
 # env_file читается на старте, а пересборка образа его не меняет, поэтому обычный up
 # может оставить сервер под прежней ролью и починка выглядела бы применённой, не будучи ею.
 if [ "$DSN_BEFORE" != "$DSN_AFTER" ]; then
   echo "DSN сервера изменился — пересоздаю server..."
-  $DC -f docker-compose.prod.yml up -d --force-recreate server
+  $DC -f "$COMPOSE" up -d --force-recreate server
 fi
 
 # 4. Сборка + публикация агентов новой версии (self-update подхватит парк за <interval>).
@@ -70,14 +107,26 @@ fi
 #    (повтор той же версии = no-op, не падение). В build-контейнер отдаём только нужное.
 #    RELEASE_PUBKEY контейнеру НЕ передаём: в бинарь он больше не вшивается (см. ниже),
 #    а серверу он приезжает из .env.prod, которую этот скрипт только читает.
-PG=$($DC -f docker-compose.prod.yml ps -q postgres)
+PG=$($DC -f "$COMPOSE" ps -q postgres)
 NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG" | awk '{print $1}')
 # Публикация агентов ОТДЕЛЕНА от деплоя сервера: сервер и веб уже подняты выше (шаг 3),
 # и отказ публикации не должен их откатывать. Иначе серверный хотфикс становится заложником
 # агентской версии — например, перевыпуск того же номера с другим sha256 теперь законно
 # отклоняется (версии неизменяемы, RegisterAgentRelease), и без этой развязки такой отказ
 # ронял бы весь деплой. Отказ ГРОМКИЙ (exit 1 с объяснением), но сервер остаётся на новой версии.
-if ! docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
+publish_agents() {
+  # Из образов: бинари уже собраны у мейнтейнера, версию агента несёт сам образ
+  # (тег образа = версия ПРОДУКТА). Подпись остаётся пер-деплойной — приватник
+  # приезжает монтированием каталога, ровно как в сборочном контейнере ниже.
+  if [ -z "$FROM_SOURCE" ]; then
+    docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
+      -e DATABASE_DSN="$DATABASE_DSN" \
+      -e RELEASE_CHANNEL="${RELEASE_CHANNEL:-stable}" \
+      "${ROUTINEOPS_REGISTRY}/routineops/agents:${VERSION}"
+    return
+  fi
+
+docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
   -e DATABASE_DSN="$DATABASE_DSN" \
   -e BUILD_TAGS="${BUILD_TAGS:-}" \
   -e DARWIN_AGENT="${DARWIN_AGENT:-}" \
@@ -236,6 +285,14 @@ if ! docker run --rm --network "$NET" -v "$(pwd)":/app -w /app \
     # артефактов слишком дорого стоит, чтобы жить непроверяемым (scripts/test-update-installer-edition.sh).
     sh scripts/publish-installers.sh
   '
+}
+
+# 🔴 Ветки здесь были ПЕРЕПУТАНЫ с 15.08 (12571d1): `if ! docker run …; then :; else
+# <ОТКАЗ>; exit 1; fi` означало ровно обратное задуманному — УСПЕШНАЯ публикация печатала
+# «ПУБЛИКАЦИЯ АГЕНТОВ ОТКАЗАЛА» и роняла выкат, а настоящий отказ проглатывался молча и
+# деплой рапортовал «Готово» без единого опубликованного агента. В поле не стреляло
+# только потому, что августовские выкаты шли шагами вручную, мимо update.sh.
+if publish_agents
 then
   :
 else
@@ -248,7 +305,12 @@ fi
 
 echo ""
 echo "Готово. Сервер на v${VERSION}; парк подтянет агентов self-update'ом за <interval>."
-echo "Откат сервера: git checkout <старый-tag> && ${DC} -f docker-compose.prod.yml up -d --build"
-echo "Откат БД (при несовместимости схемы): docker exec -i \$(${DC} -f docker-compose.prod.yml ps -q postgres) \\"
+if [ -n "$FROM_SOURCE" ]; then
+  echo "Откат сервера: git checkout <старый-tag> && ${DC} -f ${COMPOSE} up -d --build"
+else
+  # Теги в реестре неизменяемы: прежний выпуск никуда не делся, откат — это его номер.
+  echo "Откат сервера: ./update.sh <прежняя версия>"
+fi
+echo "Откат БД (при несовместимости схемы): docker exec -i \$(${DC} -f ${COMPOSE} ps -q postgres) \\"
 echo "  pg_restore -U mdm -d mdm --clean --if-exists < backups/<файл>.dump"
 echo "Агенты назад не даунгрейдятся — битый релиз чинится версией ВПЕРЁД (vX.Y.Z+1)."

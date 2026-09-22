@@ -14,6 +14,47 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.12.0 — 22 September 2026
+
+Product release (server+web). The agent is unchanged — stable 2.6.9. Minor: enterprise no
+longer needs a per-customer build, and paid modules are now granted by name.
+
+### Licensing
+
+- 🔴 **A license spells out what it grants.** An empty feature list meant "the whole
+  edition", paid modules included — which is not how a base license may be issued. The
+  base is now issued as `base`, base plus module as `base,filevault`. Feature names are
+  validated at issue time: a typo no longer yields a correctly signed license without the
+  module that was paid for. Already issued licenses are unaffected.
+- **[Enterprise]** The License page shows feature names instead of machine codes.
+
+### Installation
+
+- 🔴 **[Enterprise] Installing without sources, git or Go.** `server`, `web` and
+  `migrate` arrive as prebuilt images from a private registry; agents are published from
+  the `routineops/agents` image. The mode is chosen by whether a `Dockerfile` sits next
+  to the installer, not by a flag: a flag can be set wrong, the presence of a file cannot
+  lie. Updating is `./update.sh <version>` — the number comes from the vendor, and there
+  is deliberately no `:latest` in the registry. Agent signing stays per-deployment: the
+  key is created on the owner's machine and never leaves it.
+- **[Enterprise] The Download button serves the installer of its own edition.** Open-core
+  MSI/PKG could previously reach the fleet — packages where paid features are not
+  disabled but simply not compiled in.
+
+### FileVault
+
+- 🔴 **[Enterprise] The escrow recipient no longer has to be baked into the server
+  build.** Enabling FileVault used to require a server built with the custody fingerprint
+  inside — a separate image per organisation. The server now accepts the fingerprint from
+  a record signed by that installation's own release key (the same mechanism the agent
+  already used), so one image fits every customer. The data owner creates the custody key
+  themselves, after installation; the private half is never handed to the vendor. Builds
+  with a baked fingerprint behave exactly as before.
+- 🔴 **[Enterprise] Revealing a recovery key after a recipient rotation no longer
+  fails.** Ingest knew about every published recipient while reveal compared against the
+  configured one only: the server returned 409 for records it had accepted itself — and
+  that surfaced at the moment a disk actually had to be unlocked.
+
 ## 2.11.0 — 18 August 2026
 
 Product release (server + web). The agent does not move — stable 2.6.9. Minor rather than

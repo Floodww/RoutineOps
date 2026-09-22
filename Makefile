@@ -56,7 +56,17 @@ ESCROW_RECIPIENT_FPR ?=
 # escrow-ldflags добавляются ТОЛЬКО в enterprise-сборке (иначе таргетят несуществующие
 # символы). TAGSFLAG подставляет -tags, когда AGENT_TAGS задан.
 ifeq ($(AGENT_TAGS),enterprise)
+ifeq ($(ESCROW_RECIPIENT),none)
+# Явный отказ от ВШИТОГО получателя — универсальная enterprise-сборка (один агент на всех
+# покупателей). Символы остаются пустыми, получатель приезжает подписанной публикацией
+# сервера (internal/agent/recipient: подпись релизным ключом деплоя + epoch). FileVault в
+# таком агенте скомпилирован, но до первой публикации выключен — и это видно в `-version`.
+# "none" именно СЛОВОМ, а не пустым значением: пустое — это забытая переменная, и её
+# гейт ниже обязан продолжать ловить.
+ESCROW_LDFLAGS :=
+else
 ESCROW_LDFLAGS := -X main.escrowRecipient=$(ESCROW_RECIPIENT) -X main.escrowRecipientFpr=$(ESCROW_RECIPIENT_FPR)
+endif
 else
 ESCROW_LDFLAGS :=
 endif
@@ -70,10 +80,12 @@ check-escrow-tags:
 		echo "ОШИБКА: ESCROW_RECIPIENT/_FPR заданы без AGENT_TAGS=enterprise — escrow молча не попадёт в free-агент." >&2; \
 		exit 1; \
 	fi
-	@if [ "$(AGENT_TAGS)" = "enterprise" ] && { [ -z "$(ESCROW_RECIPIENT)" ] || [ -z "$(ESCROW_RECIPIENT_FPR)" ]; }; then \
+	@if [ "$(AGENT_TAGS)" = "enterprise" ] && [ "$(ESCROW_RECIPIENT)" != "none" ] && { [ -z "$(ESCROW_RECIPIENT)" ] || [ -z "$(ESCROW_RECIPIENT_FPR)" ]; }; then \
 		echo "ОШИБКА: AGENT_TAGS=enterprise, но ESCROW_RECIPIENT/_FPR пусты." >&2; \
 		echo "-X по пустой строке линкер отработает МОЛЧА, и enterprise-агент уедет с выключенным FileVault-escrow." >&2; \
-		echo "Задай оба: ESCROW_RECIPIENT=age1... ESCROW_RECIPIENT_FPR=<fpr>." >&2; \
+		echo "Задай оба: ESCROW_RECIPIENT=age1... ESCROW_RECIPIENT_FPR=<fpr>," >&2; \
+		echo "либо ESCROW_RECIPIENT=none — явный отказ от вшитого получателя (универсальная сборка:" >&2; \
+		echo "получатель приедет подписанной публикацией сервера)." >&2; \
 		exit 1; \
 	fi
 

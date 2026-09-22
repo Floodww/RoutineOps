@@ -24,7 +24,7 @@ func runEnterpriseCLI() bool { return false }
 func registerEnterpriseWorkers(_ *asynq.ServeMux, _ *storage.DB, _ string, _ *slog.Logger) {}
 
 func enterpriseSetup(_ *gateway.Gateway, _ *storage.DB, _ *asynq.Client, _ *registry.Registry,
-	_, _, _ string, logger *slog.Logger) []api.RouterOption {
+	_, _, _, _ string, logger *slog.Logger) []api.RouterOption {
 	// Оператор задал ESCROW_* на open-core-бинаре — фичи тут физически нет; молчание
 	// выглядело бы как «эскроу включён». Предупредить, но стартовать (fail-closed).
 	if os.Getenv("ESCROW_RECIPIENT") != "" || os.Getenv("ESCROW_RECIPIENT_FPR") != "" {

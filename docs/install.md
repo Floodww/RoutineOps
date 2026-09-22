@@ -212,7 +212,6 @@ docker compose -f docker-compose.prod.yml up -d --build
 > backfill — иначе `migrate` откажется стартовать. Процедура:
 > [self-hosted-deploy.md](self-hosted-deploy.md#существующие-инсталляции-один-раз-засидить-schema_migrations).
 
----
 
 ## Переменные окружения
 

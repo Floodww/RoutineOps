@@ -121,6 +121,10 @@ web/test-results/
 
 # nfpm staging (генерится pkg-* целями, уникальный per arch+format)
 build/nfpm/stage-*/
+# Сборочные контексты доставки без исходников: в agents-image лежат собранные агенты и
+# publish-release, в kit — архив покупателя. И то и другое пересобирается скриптами.
+build/agents-image/
+build/kit/
 # Скриншоты и логи прогона стенда экрана блокировки (scripts/test-lock-linux.sh)
 build/test/lock-linux/out/
 cmd/agent/rsrc_windows_arm64.syso
