@@ -632,7 +632,10 @@ func runEnroll(cfg *config.Config, log *slog.Logger) error {
 			if kerr != nil || kerr2 != nil {
 				return fmt.Errorf("чтение выданного материала для импорта в keychain: %v / %v", kerr, kerr2)
 			}
-			if err := keystore.Import(certPEM, keyPEM, target); err != nil {
+			// SA4023 подавлен: на Linux keystore.Import — заглушка, всегда
+			// возвращающая ошибку, поэтому для GOOS=linux сравнение вырождается в true.
+			// Ветка нужна darwin/windows, где импорт может и пройти, и упасть.
+			if err := keystore.Import(certPEM, keyPEM, target); err != nil { //nolint:staticcheck // SA4023, см. выше
 				return fmt.Errorf("импорт идентичности в хранилище: %w", err)
 			}
 			if err := os.Remove(cfg.KeyFile); err != nil {
