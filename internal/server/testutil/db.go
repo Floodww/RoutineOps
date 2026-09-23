@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -140,7 +143,7 @@ func createAppRole(ctx context.Context, ownerDSN string) string {
 		"ALTER ROLE mdm_app PASSWORD '" + appRoleTestPassword + "'",
 	}
 	for _, s := range stmts {
-		if _, err := conn.Exec(ctx, s); err != nil {
+		if err := execRoleStmt(ctx, conn, s); err != nil {
 			panic("createAppRole: " + s[:40] + "…: " + err.Error())
 		}
 	}
@@ -152,6 +155,27 @@ func createAppRole(ctx context.Context, ownerDSN string) string {
 	}
 	u.User = url.UserPassword("mdm_app", appRoleTestPassword)
 	return u.String()
+}
+
+// execRoleStmt повторяет оператор, проигравший гонку за кластерную роль. Пакеты тестов
+// идут параллельно, каждый в своей БД, но на ОДНОМ сервере (TEST_POSTGRES_DSN в CI), а
+// mdm_app — одна на кластер: одновременные ALTER ROLE правят одну строку pg_authid, и
+// второй получает «tuple concurrently updated» (XX000), одновременный CREATE ROLE —
+// unique_violation (23505). Advisory-лок не спасает: его пространство — одна БД.
+// Значения у всех одинаковые, поэтому повтор безопасен.
+func execRoleStmt(ctx context.Context, conn *pgx.Conn, sql string) error {
+	var err error
+	for attempt := 1; attempt <= 10; attempt++ {
+		if _, err = conn.Exec(ctx, sql); err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || (pgErr.Code != "XX000" && pgErr.Code != "23505") {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
+	}
+	return err
 }
 
 func runMigrationsCtx(ctx context.Context, dsn string) {
