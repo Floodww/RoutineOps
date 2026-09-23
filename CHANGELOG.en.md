@@ -14,6 +14,15 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.13.1 — 23 September 2026
+
+Product release (server+web). The agent is unchanged — stable 2.6.9. Licensing patch.
+
+### Licensing
+
+- 🔴 **[Enterprise]** The post-expiry grace period (`ROUTINEOPS_LICENSE_GRACE`) is capped
+  at 7 days. A larger value is clamped to `168h` and the server logs a warning.
+
 ## 2.13.0 — 23 September 2026
 
 Product release (server+web). The agent is unchanged — stable 2.6.9. Minor: an enterprise
