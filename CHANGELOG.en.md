@@ -14,6 +14,25 @@ the `VERSION` file, the agent uses `AGENT_VERSION`. A release may touch only one
 
 ---
 
+## 2.13.0 — 23 September 2026
+
+Product release (server+web). The agent is unchanged — stable 2.6.9. Minor: an enterprise
+license is now delivered as a single code and renews itself.
+
+### Licensing
+
+- 🔴 **[Enterprise] Activation with a single code.** Instead of a "key + activation
+  password" pair the customer receives one code and enters it on the License page →
+  "Activation code". The server fetches the signed license from the vendor and verifies
+  the signature locally against the built-in key: the activation server signs nothing and
+  does not store the code.
+- **[Enterprise] Renewal without an administrator.** Once a day the server fetches the
+  next license on its own. 🔴 An unreachable activation server is not a refusal: the
+  current license keeps working until it expires, and a warning goes to the log.
+- **[Enterprise]** The file path (key + password) stays and remains the only one for an
+  air-gapped network. The activation server address is overridden with
+  `ROUTINEOPS_ACTIVATION_URL`, its CA with `ROUTINEOPS_ACTIVATION_CA`.
+
 ## 2.12.0 — 22 September 2026
 
 Product release (server+web). The agent is unchanged — stable 2.6.9. Minor: enterprise no

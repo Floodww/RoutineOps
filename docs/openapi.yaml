@@ -3070,6 +3070,12 @@ paths:
                   description: Blob лицензии; пустая строка = деактивация
                 activation_password:
                   type: string
+                activation_code:
+                  type: string
+                  description: >-
+                    Код активации: сервер сам получит лицензию у вендора и дальше будет
+                    продлевать её раз в сутки. Задан — `license`/`activation_password`
+                    игнорируются. Неизвестный код = 400, недоступный вендор = 502.
       responses:
         '200':
           description: Применено

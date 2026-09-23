@@ -424,7 +424,11 @@
     "featureNames": {
       "base": "base edition",
       "filevault": "FileVault"
-    }
+    },
+    "activate": "Activate with a code",
+    "activationCode": "Activation code",
+    "activateNote": "The usual path. The server fetches the license from the vendor and renews it automatically.",
+    "fileNote": "For air-gapped deployments: the key as a file plus the activation password."
   },
   "audit": {
     "title": "Activity log",

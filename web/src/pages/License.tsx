@@ -57,6 +57,7 @@ export default function License() {
   const [loadError, setLoadError] = useState(false)
   const [loading, setLoading] = useState(true)
   const [blob, setBlob] = useState("")
+  const [code, setCode] = useState("")
   const [password, setPassword] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [confirmDeactivate, setConfirmDeactivate] = useState(false)
@@ -89,28 +90,28 @@ export default function License() {
   // catch пустой намеренно: интерцептор уже показал текст сервера («лицензия отклонена:
   // ...»), а он информативнее любого нашего заголовка. Без catch отказ POST (штатный
   // путь — опечатка в ключе) уходил бы наверх необработанным rejection'ом.
-  async function submit(license: string, activationPassword: string) {
+  type ApplyBody = { license?: string; activation_password?: string; activation_code?: string }
+
+  async function submit(body: ApplyBody, applying: boolean) {
     setSubmitting(true)
     try {
-      const r = await api.post<LicenseStatus>("/license", {
-        license,
-        activation_password: activationPassword,
-      })
+      const r = await api.post<LicenseStatus>("/license", body)
       setStatus(r.data)
       setLoadError(false)
       setPersistWarning(r.data.persist_warning ?? "")
       setBlob("")
       setPassword("")
+      setCode("")
       // Успех HTTP ≠ успех по существу. Два случая, когда 200 означает проблему:
       // ключ не лёг на диск (рестарт всё откатит) и лицензия принята, но не в сроке
       // (подпись верна, а фичи не включились). Зелёный тост в этих случаях врал бы.
       if (r.data.persist_warning) {
         toast({
-          title: license ? t("license.appliedNotPersisted") : t("license.disabledNotRemoved"),
+          title: applying ? t("license.appliedNotPersisted") : t("license.disabledNotRemoved"),
           description: r.data.persist_warning,
           variant: "destructive",
         })
-      } else if (license && !r.data.valid) {
+      } else if (applying && !r.data.valid) {
         toast({
           title: t("license.acceptedNotInTerm"),
           description: t("license.acceptedNotInTermHint"),
@@ -118,8 +119,8 @@ export default function License() {
         })
       } else {
         toast({
-          title: license ? t("license.applied") : t("license.deactivated"),
-          description: license ? t("license.immediate") : t("license.nowFree"),
+          title: applying ? t("license.applied") : t("license.deactivated"),
+          description: applying ? t("license.immediate") : t("license.nowFree"),
           variant: "success",
         })
       }
@@ -132,7 +133,12 @@ export default function License() {
 
   function handleApply(e: FormEvent) {
     e.preventDefault()
-    submit(blob.trim(), password)
+    submit({ license: blob.trim(), activation_password: password }, true)
+  }
+
+  function handleActivate(e: FormEvent) {
+    e.preventDefault()
+    submit({ activation_code: code.trim() }, true)
   }
 
   if (loading) return <p className="text-muted-foreground text-sm">{t("common.loading")}</p>
@@ -255,10 +261,30 @@ export default function License() {
         </div>
       )}
 
+      <form onSubmit={handleActivate} className="glass px-5 py-[18px] space-y-4">
+        <h2 className="text-[15px] font-semibold text-foreground">{t("license.activate")}</h2>
+        <div className="space-y-1.5">
+          <Label htmlFor="license-code" className="text-soft">{t("license.activationCode")}</Label>
+          <Input
+            id="license-code"
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">{t("license.activateNote")}</p>
+        <Button type="submit" disabled={submitting || !code.trim()}>
+          {submitting ? t("license.applying") : t("license.applyShort")}
+        </Button>
+      </form>
+
       <form onSubmit={handleApply} className="glass px-5 py-[18px] space-y-4">
         <h2 className="text-[15px] font-semibold text-foreground">
           {status?.configured ? t("license.replace") : t("license.apply")}
         </h2>
+        <p className="text-xs text-muted-foreground">{t("license.fileNote")}</p>
         <div className="space-y-1.5">
           <Label htmlFor="license-blob" className="text-soft">{t("license.key")}</Label>
           <textarea
@@ -305,7 +331,7 @@ export default function License() {
         description={t("license.deactivateWarn")}
         confirmLabel={t("license.deactivate")}
         destructive
-        onConfirm={() => submit("", "")}
+        onConfirm={() => submit({ license: "", activation_password: "" }, false)}
       />
     </div>
   )
