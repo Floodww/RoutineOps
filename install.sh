@@ -216,7 +216,7 @@ opt_changed=""
 # compose упал бы на незаданной переменной, а выглядело бы это как поломка реестра.
 for v in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_TLS \
          TELEGRAM_BOT_TOKEN COOKIE_SECURE DATA_RETENTION_DAYS AUDIT_RETENTION_DAYS \
-         ROUTINEOPS_REGISTRY BUILD_TAGS; do
+         ROUTINEOPS_REGISTRY BUILD_TAGS ROUTINEOPS_ACTIVATION_URL ROUTINEOPS_ACTIVATION_CA; do
   val="${!v:-}"
   [ -z "$val" ] && continue                        # не задано — не трогаем
   if grep -qxF "${v}=${val}" .env.prod; then continue; fi   # уже такое — no-op
